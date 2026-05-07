@@ -1,0 +1,16 @@
+[package]
+name = "ugwc"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Gateway API+ control plane (binary)"
+
+[[bin]]
+name = "ugwc"
+path = "src/main.rs"
+
+[dependencies]
+ugwc-core = { path = "../ugwc-core" }
+ugwc-k8s = { path = "../ugwc-k8s" }
+ugwc-xds = { path = "../ugwc-xds" }

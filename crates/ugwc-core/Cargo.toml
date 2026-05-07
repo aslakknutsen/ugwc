@@ -1,0 +1,9 @@
+[package]
+name = "ugwc-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Internal IR, compile reports, FailurePolicy (see design)"
+
+[dependencies]

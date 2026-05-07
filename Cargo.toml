@@ -1,0 +1,14 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/ugwc",
+    "crates/ugwc-core",
+    "crates/ugwc-k8s",
+    "crates/ugwc-xds",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+repository = "https://github.com/praxis-proxy/ugwc"
