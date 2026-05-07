@@ -1,7 +1,15 @@
-//! Kubernetes client stack (`kube`, `kube-runtime`) and Gateway API watches — see
-//! `design/implementation-plan.md` Phase 2A.
+//! Kubernetes watches, mappers, and status patches for Gateway API+.
 
-/// Stub symbol so the crate graph links; replaced with real exports in 2A.
+pub mod controller;
+pub mod mappers;
+pub mod resources;
+pub mod status;
+
+pub use controller::{run_gateway_controller, ReconcileFn};
+pub use mappers::{mapped_gateway_key, GatewayKey, WatchEventCause};
+pub use status::patch_gateway_programmed_false;
+
+/// Stub symbol retained for crate-graph smoke tests.
 pub fn kube_placeholder() -> &'static str {
     "ugwc-k8s"
 }

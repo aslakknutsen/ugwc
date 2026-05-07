@@ -1,0 +1,54 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: -Dwarnings
+
+jobs:
+  rust:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Format
+        run: cargo fmt --all --check
+
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: Test
+        env:
+          UGWC_GIT_COMMIT: ${{ github.sha }}
+        run: cargo test --workspace
+
+      - name: Build release binary
+        env:
+          UGWC_GIT_COMMIT: ${{ github.sha }}
+        run: cargo build -p ugwc --release
+
+      - name: Upload ugwc binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: ugwc-x86_64-unknown-linux-gnu
+          path: target/release/ugwc
+
+  docker:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Docker build
+        run: docker build -t ugwc:ci .

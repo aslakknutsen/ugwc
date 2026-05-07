@@ -1441,3 +1441,5 @@ Update this file when:
 - security defaults move out of prototype.
 
 When code exists, link concrete packages in [`control-plane-design-index.md`](control-plane-design-index.md) under “Related code”.
+
+**Implementation snapshot (workspace):** Cargo workspace + CI (`Makefile`, `.github/workflows`) are live; crate graph `ugwc` / `ugwc-core` / `ugwc-k8s` / `ugwc-xds`. Full multi-worktree lane simulation was **not** used for this drop — changes landed sequentially on one branch while respecting the documented serial gates (Phase 0→1 before 2A/2B/2C, Merge A before Phase 3+, **SotW before Delta**, threat-model text before prod TLS defaults).

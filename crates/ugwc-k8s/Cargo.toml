@@ -4,6 +4,21 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "kube clients, watches, and status (Phase 2A+)"
+description = "kube clients, watches, status writers (Gateway API)"
 
 [dependencies]
+ugwc-core = { path = "../ugwc-core" }
+kube.workspace = true
+kube-runtime.workspace = true
+k8s-openapi.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
+futures.workspace = true
+http.workspace = true
+chrono = { version = "0.4", default-features = false, features = ["clock", "std", "serde"] }
+
+[dev-dependencies]

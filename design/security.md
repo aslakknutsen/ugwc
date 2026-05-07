@@ -12,6 +12,16 @@
 3. **Mutual authentication** for **distribution surfaces** where the threat model requires it (xDS, HTTP admin, …)  
 4. **Minimal image** — distroless/scratch-style bases where feasible  
 
+### 1.1 Threat model (v0 — Phase 9 track)
+
+| Actor | Asset | Primary risk | Mitigation direction |
+|-------|--------|--------------|----------------------|
+| Cluster insider / compromised workload | xDS stream to Envoy | Push forged LDS/RDS/CDS | Identity at transport layer + narrow RBAC for dataplane clients (see §2) |
+| Cluster/network attacker | gRPC xDS on the data plane network | MITM, replays | **TLS/mTLS** on xDS in non-`dev` profiles; `run_profile=prod` rejects plaintext (see implementation) |
+| Operator misconfiguration | Management plane process | Privileged credentials, leaked secrets | Redact secrets in logs; **dev** vs **prod** config profile |
+
+Plaintext xDS remains **prototype-only** and must not be the implicit production default.
+
 ---
 
 ## 2. Kubernetes RBAC

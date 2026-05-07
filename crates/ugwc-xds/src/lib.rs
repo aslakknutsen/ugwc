@@ -1,7 +1,15 @@
-//! xDS gRPC (tonic) server and IR → xDS encoding — see
-//! `design/implementation-plan.md` Phase 2C / 7.
+//! xDS control plane surface (`tonic` + `xds-api` generated types).
+//! **Hot encode path:** keep Kubernetes types out — only [`ugwc_core::IrSnapshot`] inputs.
 
-/// Stub until ADS service registration lands.
+pub mod cache;
+pub mod encode;
+pub mod server;
+
+pub use cache::{SharedSnapshot, SnapshotCache};
+pub use encode::{encode_delta, encode_sotw, XdsSnapshot};
+pub use server::{serve, shutdown_gracefully, XdsSecurityConfig, XdsServerConfig};
+
+/// Legacy placeholder retained for crate graph smoke tests.
 pub fn xds_placeholder() -> &'static str {
     "ugwc-xds"
 }

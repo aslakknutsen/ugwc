@@ -4,6 +4,19 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "xDS gRPC server and encoding (Phase 2C+)"
+description = "xDS gRPC server and encoding for ugwc"
 
 [dependencies]
+ugwc-core = { path = "../ugwc-core" }
+arc-swap.workspace = true
+tonic.workspace = true
+prost.workspace = true
+prost-types.workspace = true
+xds-api.workspace = true
+tokio.workspace = true
+tokio-stream.workspace = true
+tokio-util.workspace = true
+futures.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]

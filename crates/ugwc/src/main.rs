@@ -1,25 +1,54 @@
-//! Gateway API control plane entry point. Wired in later phases; see
-//! `design/implementation-plan.md` Phase 0–1.
+//! Gateway API control plane binary — see `design/implementation-plan.md`.
 
-fn main() {
-    // Phase 0: keep workspace library crates linked in the build graph.
-    let _ = (
-        ugwc_core::placeholder(),
-        ugwc_k8s::kube_placeholder(),
-        ugwc_xds::xds_placeholder(),
-    );
+use clap::Parser;
 
-    let mut args = std::env::args();
-    let bin = args.next().unwrap_or_default();
-    if args.next().as_deref() == Some("--version") {
-        println!(
-            "ugwc {} (commit {})",
-            env!("CARGO_PKG_VERSION"),
-            option_env!("UGWC_GIT_COMMIT").unwrap_or("unknown")
-        );
-        return;
+mod admin;
+mod config;
+mod leader;
+mod logging;
+mod metrics;
+mod run;
+
+#[derive(Parser, Debug)]
+#[command(name = "ugwc", version = version_string())]
+struct Cli {
+    /// Dump effective configuration as JSON and exit.
+    #[arg(long)]
+    dump_config: bool,
+}
+
+const fn version_string() -> &'static str {
+    concat!(
+        env!("CARGO_PKG_VERSION"),
+        " (",
+        env!("UGWC_BUILD_COMMIT"),
+        ")"
+    )
+}
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let cli = Cli::parse();
+    let cfg = config::Config::from_env()?;
+    if cli.dump_config {
+        println!("{}", serde_json::to_string_pretty(&cfg)?);
+        return Ok(());
     }
-    eprintln!(
-        "{bin}: Gateway API control plane — scaffold only; use --version"
-    );
+
+    logging::init(cfg.log_json);
+    tracing::info!(summary = %cfg.log_summary(), commit = env!("UGWC_BUILD_COMMIT"), "startup");
+    if cfg.xds_insecure {
+        tracing::warn!("UGWC_XDS_INSECURE is set — plaintext xDS (prototype only)");
+    }
+    run::run(cfg).await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn version_has_sha_token() {
+        assert!(version_string().contains('('));
+    }
 }
