@@ -47,12 +47,28 @@ pub enum TlsMode {
     Terminate,
 }
 
-/// Single listener row derived from `Gateway` addresses / protocol.
+/// Single listener row after Gateway + ListenerSet merge.
 #[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ListenerIr {
-    pub name: String,
+    /// `sectionName` within the Gateway or ListenerSet spec.
+    pub section_name: String,
     pub bind_port: u16,
     pub tls: TlsMode,
+    pub parent_kind: String,
+    pub parent_namespace: String,
+    pub parent_name: String,
+    #[serde(default)]
+    pub conflicted: bool,
+}
+
+/// Route binding to a specific effective listener (parent + `sectionName` + port).
+#[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, serde::Serialize, serde::Deserialize)]
+pub struct ListenerAttachmentIr {
+    pub parent_kind: String,
+    pub parent_namespace: String,
+    pub parent_name: String,
+    pub section_name: String,
+    pub port: u16,
 }
 
 /// Normalized HTTP route match + backend (Phase 4+).
@@ -63,6 +79,8 @@ pub struct RouteRuleIr {
     pub host: Option<String>,
     pub path_prefix: Option<String>,
     pub backend: BackendIr,
+    #[serde(default)]
+    pub listener: Option<ListenerAttachmentIr>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]

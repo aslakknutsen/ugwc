@@ -8,7 +8,7 @@ use kube::api::Api;
 use tracing::{info, warn};
 use ugwc_core::publish::plan_publish;
 use ugwc_core::{http_route_resolved_refs_row, CompileInput, FailurePolicy, PublishAction};
-use ugwc_k8s::resources::Gateway;
+use ugwc_k8s::resources::{Gateway, ListenerSet};
 use ugwc_xds::{
     serve as serve_xds, MultiScopeSnapshot, XdsSecurityConfig, XdsServerConfig, XdsSnapshotSource,
 };
@@ -156,6 +156,7 @@ pub async fn run(cfg: Config) -> Result<(), Box<dyn std::error::Error + Send + S
                         &api,
                         &latest,
                         &co,
+                        input.cluster.as_ref(),
                         Some(status_cache.clone()),
                     )
                     .await
@@ -166,25 +167,56 @@ pub async fn run(cfg: Config) -> Result<(), Box<dyn std::error::Error + Send + S
                     if let Some(ref snap) = input.cluster {
                         for r in &snap.http_routes {
                             let (rs, rr, rm) = http_route_resolved_refs_row(&co.report, r);
-                            if let Err(e) = ugwc_k8s::apply_http_route_parent_status(
-                                ugwc_k8s::HttpRouteParentStatusArgs {
+                            if let Err(e) = ugwc_k8s::apply_http_route_merged_parent_status(
+                                ugwc_k8s::HttpRouteMergedParentStatusArgs {
                                     client: &client_inner,
                                     route_ns: &r.namespace,
                                     route_name: &r.name,
-                                    gateway_ns: &ns,
-                                    gateway_name: &name,
                                     controller_name: &primary_controller,
                                     route_generation: r.generation,
                                     programmed_ok,
                                     resolved_refs_status: rs,
                                     resolved_refs_reason: rr,
                                     resolved_refs_message: rm,
+                                    reconciled_gateway_ns: &ns,
+                                    reconciled_gateway_name: &name,
+                                    snapshot: snap,
                                     status_cache: Some(status_cache.clone()),
                                 },
                             )
                             .await
                             {
                                 warn!(error = %e, route = %r.name, "httproute status patch");
+                            }
+                        }
+
+                        for ls_snap in &snap.listener_sets {
+                            let ls_api: Api<ListenerSet> =
+                                Api::namespaced(client_inner.clone(), &ls_snap.namespace);
+                            match ls_api.get(&ls_snap.name).await {
+                                Ok(ls) => {
+                                    if let Err(e) = ugwc_k8s::apply_listenerset_reconciled_status(
+                                        &client_inner,
+                                        &ls,
+                                        snap,
+                                        programmed_ok,
+                                        &co,
+                                        Some(status_cache.clone()),
+                                    )
+                                    .await
+                                    {
+                                        warn!(
+                                            error = %e,
+                                            listenerset = %ls_snap.name,
+                                            "listenerset status patch"
+                                        );
+                                    }
+                                }
+                                Err(e) => warn!(
+                                    error = %e,
+                                    listenerset = %ls_snap.name,
+                                    "get listenerset for status"
+                                ),
                             }
                         }
                     }
@@ -204,8 +236,10 @@ pub async fn run(cfg: Config) -> Result<(), Box<dyn std::error::Error + Send + S
                         .as_ref()
                         .and_then(|c| c.gateway_class.as_ref())
                         .map(|gc| gc.controller_name.as_str());
-                    let profile =
-                        implementation_profiles::resolve_for_controller(&impl_profiles, controller_name);
+                    let profile = implementation_profiles::resolve_for_controller(
+                        &impl_profiles,
+                        controller_name,
+                    );
 
                     match &profile.data_plane {
                         DataPlaneKind::External => {}
@@ -235,10 +269,15 @@ pub async fn run(cfg: Config) -> Result<(), Box<dyn std::error::Error + Send + S
                                     gateway_scope: scope,
                                     gateway_class_name: latest.spec.gateway_class_name.clone(),
                                 };
+                                let listener_ports = input
+                                    .cluster
+                                    .as_ref()
+                                    .map(ugwc_k8s::collect_effective_listener_ports);
                                 match ugwc_k8s::reconcile_per_gateway_praxis(
                                     &client_inner,
                                     &latest,
                                     &args,
+                                    listener_ports.as_deref(),
                                 )
                                 .await
                                 {

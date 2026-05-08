@@ -2,7 +2,7 @@
 
 **Goal:** Track latest **Gateway API** (standard + extended channel semantics where relevant) and **Gateway API Inference Extension** so the controller observes, loads into `ClusterSnapshot`, compiles, publishes IR/xDS, and writes status for all resource kinds required for parity—not only `HTTPRoute` + `Service`.
 
-**Baseline (current code):** Watches `Gateway`, `HTTPRoute` (parents must be `Gateway`), `EndpointSlice` (debounced full-gateway fan-out), `GatewayClass` (owned classes). Snapshot loads `Gateway`, attaching `HTTPRoute`s, `Service` backends only, matching `EndpointSlice`s, `GatewayClass`. No `ReferenceGrant`, no other route kinds, no policy APIs, no `InferencePool`.
+**Baseline (current code):** Watches `Gateway`, `HTTPRoute` (parents may be `Gateway` or `ListenerSet`), `ListenerSet`, `EndpointSlice` (debounced full-gateway fan-out), `GatewayClass` (owned classes). Snapshot loads merged listeners (`Gateway` + attached `ListenerSet` when `allowedListeners` permits), `HTTPRoute`s attached to either parent kind, `Service` backends, `EndpointSlice`s, `GatewayClass`. No `ReferenceGrant`, no other route kinds, no policy APIs, no `InferencePool`.
 
 ---
 
@@ -20,7 +20,7 @@ Concrete additions:
 - [ ] **`GRPCRoute`** — parent refs to `Gateway`; same attachment rules as `HTTPRoute`; reconcile key from parent Gateway.
 - [ ] **`TLSRoute`** / **`TCPRoute`** / **`UDPRoute`** (as applicable to supported protocols) — watch + map + snapshot fields.
 - [ ] **`BackendTLSPolicy`** — watch; resolve targets that reference `Service` / `HTTPRoute` / backends used by owned Gateways; reconcile affected gateways.
-- [ ] **`ListenerSet`** (if required by the pinned Gateway API version and the listener model) — watch + merge into listener resolution.
+- [x] **`ListenerSet`** — watch + merge into listener resolution (**Gateway API standard channel v1.5.x**; `Gateway.spec.allowedListeners` required for attachment).
 - [ ] **`InferencePool`** (`inference.networking.k8s.io/v1`) — watch; map to Gateway via `HTTPRoute` / `backendRefs` and/or parent/status relationships per spec.
 - [ ] **`InferenceObjective`** (if shipped as a CRD in the target version) — watch + tie to routes/pools per spec.
 
@@ -30,6 +30,7 @@ Concrete additions:
 
 Extend types and `load_cluster_snapshot` (or successor) to include:
 
+- [x] **ListenerSet merge + effective listeners** on `ClusterSnapshot` (`listener_sets`, `effective_listeners`, `allowedListeners` snapshot fields).
 - [ ] **Routes:** `GRPCRoute` (and TLS/TCP/UDP as scoped).
 - [ ] **Grants:** relevant `ReferenceGrant` documents for allowed cross-namespace reference pairs touching that Gateway’s scope.
 - [ ] **TLS:** resolved `BackendTLSPolicy` blobs (or normalized TLS IR inputs) for backends that require upstream TLS.
@@ -97,12 +98,12 @@ Ensure:
 3. **BackendTLSPolicy** (depends on stable backend resolution).
 4. **InferencePool** watch + loader + compile + xDS path (depends on non-Service `backendRefs`).
 5. **InferenceObjective** (if applicable) after pools are end-to-end.
-6. **ListenerSet** and remaining route kinds as required by the version pin.
+6. ~~**ListenerSet**~~ — implemented against Gateway API **standard v1.5.x** (`allowedListeners`, merge order, status).
 
 ---
 
 ## Open questions (resolve before calling parity “complete”)
 
-1. Exact **Gateway API release** to standardize on (CRD set differs by minor version).
+1. Exact **Gateway API release** to standardize on (CRD set differs by minor version). **Partial:** `ListenerSet` support assumes **standard channel v1.5.x** CRDs.
 2. Whether **InferenceObjective** is a CRD in that release or documented-only.
 3. **Shard model:** single reconciler listing all gateways vs namespace/class sharding for watch fan-out at scale.

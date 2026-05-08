@@ -129,10 +129,7 @@ mod tests {
         let p = resolve_for_controller(&m, Some(BUILTIN_DEFAULT_CONTROLLER_NAME));
         assert_eq!(p.data_plane, DataPlaneKind::PerGatewayPraxis);
         assert_eq!(p.subscription_default, SubscriptionScope::OneGateway);
-        assert_eq!(
-            p.proxy_image.as_deref(),
-            Some(BUILTIN_PRAXIS_PROXY_IMAGE)
-        );
+        assert_eq!(p.proxy_image.as_deref(), Some(BUILTIN_PRAXIS_PROXY_IMAGE));
     }
 
     #[test]

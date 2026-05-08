@@ -26,9 +26,13 @@ impl HttpCompileFixture {
             gateway_namespace: "default".into(),
             gateway_name: "gw".into(),
             listeners: vec![ListenerIr {
-                name: "http".into(),
+                section_name: "http".into(),
                 bind_port: 80,
                 tls: TlsMode::Plaintext,
+                parent_kind: "Gateway".into(),
+                parent_namespace: "default".into(),
+                parent_name: "gw".into(),
+                conflicted: false,
             }],
             routes: vec![RouteRuleIr {
                 name: "hr".into(),
@@ -40,6 +44,13 @@ impl HttpCompileFixture {
                     port_name: Some("http".into()),
                     port_number: Some(80),
                 },
+                listener: Some(crate::ir::ListenerAttachmentIr {
+                    parent_kind: "Gateway".into(),
+                    parent_namespace: "default".into(),
+                    parent_name: "gw".into(),
+                    section_name: "http".into(),
+                    port: 80,
+                }),
             }],
             endpoints: BTreeMap::from([(
                 "default/svc:80".into(),

@@ -8,6 +8,7 @@ pub mod from_cluster;
 pub mod http_ir;
 pub mod inference;
 pub mod ir;
+pub mod listener_merge;
 pub mod policy;
 pub mod publish;
 pub mod snapshot;
@@ -20,8 +21,9 @@ pub use failure_policy::FailurePolicy;
 pub use from_cluster::ir_from_cluster;
 pub use http_ir::{build_http_ir_from_fixture, HttpCompileFixture};
 pub use ir::{
-    BackendEndpointIr, BackendIr, IrRevision, IrScopeId, IrSnapshot, ListenerIr, RouteRuleIr,
-    SnapshotMeta, IR_VERSION,
+    BackendEndpointIr, BackendIr, IrRevision, IrScopeId, IrSnapshot, ListenerAttachmentIr,
+    ListenerIr, RouteRuleIr, SnapshotMeta, IR_VERSION,
 };
+pub use listener_merge::merge_effective_listeners;
 pub use publish::{plan_publish, PublishAction, PublishPlan};
 pub use snapshot::ClusterSnapshot;

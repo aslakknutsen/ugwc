@@ -1,5 +1,7 @@
 //! Gateway API objects via `kube::CustomResource` (typed watches without OpenAPI embedding).
 
+use std::collections::BTreeMap;
+
 use kube::CustomResource;
 use serde::{Deserialize, Serialize};
 
@@ -19,6 +21,9 @@ pub struct GatewaySpec {
     /// Listener names only (full `Listener` shape is ignored on deserialize).
     #[serde(default)]
     pub listeners: Vec<GatewayListenerSpec>,
+    /// Which namespaces may attach `ListenerSet` resources (default: none).
+    #[serde(rename = "allowedListeners", default)]
+    pub allowed_listeners: Option<AllowedListenersSpec>,
 }
 
 /// Subset of `Gateway.spec.listeners[]` needed for status writes.
@@ -33,8 +38,52 @@ pub struct GatewayListenerSpec {
     pub hostname: Option<String>,
 }
 
+/// `Gateway.spec.allowedListeners`.
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+pub struct AllowedListenersSpec {
+    #[serde(default)]
+    pub namespaces: Option<ListenerNamespacesSpec>,
+}
+
+/// Namespace selector for attached ListenerSets (Gateway API).
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+pub struct ListenerNamespacesSpec {
+    /// `None` | `Same` | `All` | `Selector` — omitted means None (no ListenerSets).
+    #[serde(default)]
+    pub from: Option<String>,
+    #[serde(default)]
+    pub selector: Option<LabelSelectorSpec>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+pub struct LabelSelectorSpec {
+    #[serde(rename = "matchLabels", default)]
+    pub match_labels: BTreeMap<String, String>,
+}
+
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 pub struct GatewayStatus {}
+
+/// `ListenerSet` — extra listeners merged onto a parent `Gateway` (Gateway API v1.5+ standard).
+#[derive(CustomResource, Clone, Debug, Deserialize, Serialize)]
+#[kube(
+    group = "gateway.networking.k8s.io",
+    version = "v1",
+    kind = "ListenerSet",
+    namespaced,
+    status = "ListenerSetStatus",
+    schema = "disabled"
+)]
+pub struct ListenerSetSpec {
+    #[serde(rename = "parentRefs", default)]
+    pub parent_refs: Vec<ParentReferenceSpec>,
+    /// Same shape as `Gateway.spec.listeners[]` for the fields we consume.
+    #[serde(default)]
+    pub listeners: Vec<GatewayListenerSpec>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+pub struct ListenerSetStatus {}
 
 /// Cluster-scoped `GatewayClass`.
 #[derive(CustomResource, Clone, Debug, Deserialize, Serialize)]
@@ -123,4 +172,8 @@ pub struct HTTPBackendRefSpec {
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
-pub struct HTTPRouteStatus {}
+pub struct HTTPRouteStatus {
+    /// Populated by the apiserver; preserved across ugwc status merges.
+    #[serde(default)]
+    pub parents: Vec<serde_json::Value>,
+}

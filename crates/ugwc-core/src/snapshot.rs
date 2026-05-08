@@ -3,6 +3,7 @@
 //! Populated by `ugwc-k8s` loaders from API objects — no `kube` types here.
 
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 
 /// One `Gateway.spec.listeners[]` row (HTTP/HTTPS focused).
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
@@ -132,6 +133,57 @@ pub struct GatewayClassSnap {
     pub controller_name: String,
 }
 
+/// `Gateway.spec.allowedListeners` subset for merge policy (snapshot).
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+pub struct AllowedListenersSnap {
+    #[serde(default)]
+    pub namespaces: Option<ListenerNamespacesSnap>,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+pub struct ListenerNamespacesSnap {
+    #[serde(default)]
+    pub from: Option<String>,
+    #[serde(default)]
+    pub selector_match_labels: BTreeMap<String, String>,
+}
+
+/// Attached `ListenerSet` documents selected by the loader for this Gateway.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct ListenerSetSnap {
+    pub namespace: String,
+    pub name: String,
+    #[serde(default)]
+    pub uid: String,
+    #[serde(rename = "creationTimestamp", default)]
+    pub creation_timestamp_rfc3339: Option<String>,
+    #[serde(rename = "parentRefs", default)]
+    pub parent_refs: Vec<ParentRefSnap>,
+    #[serde(default)]
+    pub listeners: Vec<GatewayListenerSnap>,
+}
+
+/// Provenance for one logical listener after Gateway + ListenerSet merge.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub enum ListenerParentSnap {
+    InlineGateway,
+    ListenerSet { namespace: String, name: String },
+}
+
+/// One listener row after merge — [`crate::listener_merge::merge_effective_listeners`].
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct EffectiveListenerSnap {
+    pub parent: ListenerParentSnap,
+    /// Listener name within the Gateway or ListenerSet (`sectionName`).
+    pub section_name: String,
+    pub port: u16,
+    pub protocol: String,
+    #[serde(default)]
+    pub hostname: Option<String>,
+    #[serde(default)]
+    pub conflicted: bool,
+}
+
 /// Bounded cluster state for compiling one `Gateway`.
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
 pub struct ClusterSnapshot {
@@ -141,8 +193,15 @@ pub struct ClusterSnapshot {
     pub gateway_class_name: String,
     #[serde(rename = "gatewayGeneration", default)]
     pub gateway_generation: i64,
+    /// Inline `Gateway.spec.listeners` only (status rows match this list).
     #[serde(default)]
     pub listeners: Vec<GatewayListenerSnap>,
+    #[serde(rename = "effectiveListeners", default)]
+    pub effective_listeners: Vec<EffectiveListenerSnap>,
+    #[serde(rename = "listenerSets", default)]
+    pub listener_sets: Vec<ListenerSetSnap>,
+    #[serde(rename = "allowedListeners", default)]
+    pub allowed_listeners: Option<AllowedListenersSnap>,
     #[serde(rename = "httpRoutes", default)]
     pub http_routes: Vec<HttpRouteSnap>,
     #[serde(default)]

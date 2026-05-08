@@ -42,7 +42,9 @@ pub struct PerGatewayTemplateContext<'a> {
     pub service_ports: &'a [NamePort],
 }
 
-pub fn render_per_gateway_praxis(ctx: &PerGatewayTemplateContext<'_>) -> Result<String, ProvisionError> {
+pub fn render_per_gateway_praxis(
+    ctx: &PerGatewayTemplateContext<'_>,
+) -> Result<String, ProvisionError> {
     let mut env = Environment::new();
     env.add_template("per_gateway_praxis", PER_GATEWAY_PRAXIS_TEMPLATE)
         .map_err(|e| ProvisionError::Msg(format!("template compile: {e}")))?;
@@ -55,7 +57,9 @@ pub fn render_per_gateway_praxis(ctx: &PerGatewayTemplateContext<'_>) -> Result<
 }
 
 /// Parse multi-doc YAML into JSON values (sync; safe to call before `.await` in `Send` futures).
-pub fn parse_manifest_documents(rendered_yaml: &str) -> Result<Vec<serde_json::Value>, ProvisionError> {
+pub fn parse_manifest_documents(
+    rendered_yaml: &str,
+) -> Result<Vec<serde_json::Value>, ProvisionError> {
     let mut out = Vec::new();
     for doc in serde_yaml::Deserializer::from_str(rendered_yaml) {
         let yaml_val: serde_yaml::Value = serde_yaml::Value::deserialize(doc)
@@ -144,6 +148,9 @@ mod tests {
         assert!(out.contains("containerPort: 15021"));
         let docs = parse_manifest_documents(&out).expect("parse");
         assert_eq!(docs.len(), 5);
-        assert_eq!(docs[0].get("kind").and_then(|k| k.as_str()), Some("ServiceAccount"));
+        assert_eq!(
+            docs[0].get("kind").and_then(|k| k.as_str()),
+            Some("ServiceAccount")
+        );
     }
 }

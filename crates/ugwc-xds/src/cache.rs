@@ -90,15 +90,10 @@ impl XdsSnapshotSource for MultiScopeSnapshot {
         let key = node_id.map(str::trim).filter(|s| !s.is_empty());
         match key {
             None | Some("global") | Some("*") => self.global.load_full(),
-            Some(k) => self
-                .by_scope
-                .read()
-                .get(k)
-                .cloned()
-                .unwrap_or_else(|| {
-                    counter!("ugwc_xds_scope_miss_total").increment(1);
-                    Arc::new(IrSnapshot::empty_for_scope(IrScopeId(k.to_string())))
-                }),
+            Some(k) => self.by_scope.read().get(k).cloned().unwrap_or_else(|| {
+                counter!("ugwc_xds_scope_miss_total").increment(1);
+                Arc::new(IrSnapshot::empty_for_scope(IrScopeId(k.to_string())))
+            }),
         }
     }
 

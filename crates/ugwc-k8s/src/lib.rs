@@ -11,12 +11,14 @@ pub use controller::{run_gateway_controller, ReconcileFn};
 pub use loader::{load_cluster_snapshot, LoaderError};
 pub use mappers::{mapped_gateway_key, GatewayKey, WatchEventCause};
 pub use provision::{
-    reconcile_per_gateway_praxis, reconcile_shared_deployment_stub, warn_per_gateway_without_enable,
-    PraxisProvisionArgs, ProvisionError,
+    collect_effective_listener_ports, reconcile_per_gateway_praxis,
+    reconcile_shared_deployment_stub, warn_per_gateway_without_enable, PraxisProvisionArgs,
+    ProvisionError,
 };
 pub use status::{
     apply_gateway_class_accepted_stub, apply_gateway_reconciled_status,
-    apply_http_route_parent_status, patch_gateway_programmed_false, HttpRouteParentStatusArgs,
+    apply_http_route_merged_parent_status, apply_listenerset_reconciled_status,
+    patch_gateway_programmed_false, HttpRouteMergedParentStatusArgs,
 };
 
 /// Stub symbol retained for crate-graph smoke tests.

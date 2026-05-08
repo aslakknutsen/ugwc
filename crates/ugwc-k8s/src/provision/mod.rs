@@ -6,6 +6,8 @@
 
 mod template;
 
+use std::collections::HashSet;
+
 use kube::api::PatchParams;
 use kube::Client;
 use thiserror::Error;
@@ -88,6 +90,36 @@ fn sanitize_port_name(raw: &str, port: i32) -> String {
     s.chars().take(15).collect()
 }
 
+/// Ports from merged Gateway + ListenerSet listeners (conflicts / duplicates skipped).
+#[must_use]
+pub fn collect_effective_listener_ports(
+    snapshot: &ugwc_core::ClusterSnapshot,
+) -> Vec<(String, i32)> {
+    let mut out = Vec::new();
+    let mut seen_port: HashSet<i32> = HashSet::new();
+    for e in &snapshot.effective_listeners {
+        if e.conflicted {
+            continue;
+        }
+        let port = i32::from(e.port);
+        if port <= 0 || !seen_port.insert(port) {
+            continue;
+        }
+        let raw_label = match &e.parent {
+            ugwc_core::snapshot::ListenerParentSnap::InlineGateway => e.section_name.clone(),
+            ugwc_core::snapshot::ListenerParentSnap::ListenerSet { namespace, name } => {
+                format!("{namespace}-{name}-{}", e.section_name)
+            }
+        };
+        let name = sanitize_port_name(&raw_label, port);
+        out.push((name, port));
+    }
+    if out.is_empty() {
+        out.push(("http".into(), 8080));
+    }
+    out
+}
+
 /// Listener-derived service ports; default `http` 8080 when none valid.
 fn collect_listener_ports(gateway: &Gateway) -> Vec<(String, i32)> {
     let mut out = Vec::new();
@@ -141,6 +173,7 @@ pub async fn reconcile_per_gateway_praxis(
     client: &Client,
     gateway: &Gateway,
     args: &PraxisProvisionArgs,
+    listener_port_override: Option<&[(String, i32)]>,
 ) -> Result<(), ProvisionError> {
     let ns = gateway
         .metadata
@@ -161,7 +194,9 @@ pub async fn reconcile_per_gateway_praxis(
     let sa_name = service_account_name(&dep_name);
     let gw_class = gateway_class_label(&args.gateway_class_name);
 
-    let listener_pairs = collect_listener_ports(gateway);
+    let listener_pairs = listener_port_override
+        .map(<[_]>::to_vec)
+        .unwrap_or_else(|| collect_listener_ports(gateway));
     let container_ports = container_port_rows(&listener_pairs);
     let service_ports = service_port_rows(&listener_pairs);
 

@@ -37,7 +37,13 @@ pub fn encode_ir(ir: &IrSnapshot) -> Vec<Resource> {
     let (gw_ns, gw_name) = parse_scope(&ir.scope);
     let mut out = Vec::new();
     for ln in &ir.listeners {
-        let listener_key = format!("{gw_ns}/{gw_name}/{}", ln.name);
+        if ln.conflicted {
+            continue;
+        }
+        let listener_key = format!(
+            "{gw_ns}/{gw_name}/{}/{}/{}/{}/{}",
+            ln.parent_kind, ln.parent_namespace, ln.parent_name, ln.section_name, ln.bind_port
+        );
         let protocol = if matches!(ln.tls, TlsMode::Terminate) {
             Protocol::Https as i32
         } else {
@@ -54,6 +60,16 @@ pub fn encode_ir(ir: &IrSnapshot) -> Vec<Resource> {
 
         let mut routes = Vec::new();
         for (idx, r) in ir.routes.iter().enumerate() {
+            let attach_ok = r.listener.as_ref().map_or(false, |att| {
+                att.section_name == ln.section_name
+                    && att.port == ln.bind_port
+                    && att.parent_kind == ln.parent_kind
+                    && att.parent_namespace == ln.parent_namespace
+                    && att.parent_name == ln.parent_name
+            });
+            if !attach_ok {
+                continue;
+            }
             let route_key = format!("{}/{}/{}", gw_ns, r.name, idx);
             let mut backends = Vec::new();
             let key = format!(

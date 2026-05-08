@@ -98,8 +98,9 @@ impl Config {
             .map_err(|e: envy::Error| ConfigError::Addr("UGWC_*".into(), e.to_string()))?;
 
         let from_file = match &cfg.implementation_profiles_path {
-            Some(p) => crate::implementation_profiles::load_from_path(p)
-                .map_err(ConfigError::Profiles)?,
+            Some(p) => {
+                crate::implementation_profiles::load_from_path(p).map_err(ConfigError::Profiles)?
+            }
             None => HashMap::new(),
         };
         let mut profiles = crate::implementation_profiles::builtin_profiles();
@@ -127,7 +128,11 @@ impl Config {
                 .values()
                 .any(|p| matches!(p.data_plane, DataPlaneKind::PerGatewayPraxis));
             if needs_addr {
-                let addr = self.control_plane_xds_bootstrap_addr.as_deref().unwrap_or("").trim();
+                let addr = self
+                    .control_plane_xds_bootstrap_addr
+                    .as_deref()
+                    .unwrap_or("")
+                    .trim();
                 if addr.is_empty() {
                     return Err(ConfigError::BootstrapAddrRequired);
                 }
