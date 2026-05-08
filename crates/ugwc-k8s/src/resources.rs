@@ -16,6 +16,15 @@ use serde::{Deserialize, Serialize};
 pub struct GatewaySpec {
     #[serde(rename = "gatewayClassName", default)]
     pub gateway_class_name: String,
+    /// Listener names only (full `Listener` shape is ignored on deserialize).
+    #[serde(default)]
+    pub listeners: Vec<GatewayListenerSpec>,
+}
+
+/// Subset of `Gateway.spec.listeners[]` needed for status writes.
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+pub struct GatewayListenerSpec {
+    pub name: String,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]

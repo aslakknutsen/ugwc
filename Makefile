@@ -1,5 +1,5 @@
 # Local parity with CI — see design/implementation-plan.md Phase 0.4
-.PHONY: fmt fmt-check clippy test build release ci check deny docker-build
+.PHONY: fmt fmt-check clippy test build release ci check deny docker-build conformance
 
 fmt:
 	cargo fmt --all
@@ -28,3 +28,7 @@ deny:
 
 docker-build:
 	docker build -t ugwc:dev .
+
+# Requires GATEWAY_API_ROOT, Go, and a conforming cluster — see hack/conformance.sh
+conformance:
+	./hack/conformance.sh

@@ -7,7 +7,7 @@ pub mod status;
 
 pub use controller::{run_gateway_controller, ReconcileFn};
 pub use mappers::{mapped_gateway_key, GatewayKey, WatchEventCause};
-pub use status::patch_gateway_programmed_false;
+pub use status::{apply_gateway_reconciled_status, patch_gateway_programmed_false};
 
 /// Stub symbol retained for crate-graph smoke tests.
 pub fn kube_placeholder() -> &'static str {

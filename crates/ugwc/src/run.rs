@@ -4,6 +4,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Instant;
 
+use kube::api::Api;
 use kube::ResourceExt;
 use tracing::{info, warn};
 use ugwc_core::publish::plan_publish;
@@ -80,46 +81,64 @@ pub async fn run(cfg: Config) -> Result<(), Box<dyn std::error::Error + Send + S
         let kube_sd = shutdown.child_token();
         let run_ns = cfg.kube_namespace.clone();
         let leader_k = leader.clone();
+        let watch_client = client.clone();
+        let reconcile_client = client.clone();
         let kube_task = tokio::spawn(async move {
             let rfn: ugwc_k8s::ReconcileFn = Arc::new(move |gw: Gateway| {
                 metrics::record_reconcile();
-                let t0 = Instant::now();
-                let ns = gw.namespace().unwrap_or_else(|| ns_default.clone());
-                let name = gw.name_any();
-                let input = CompileInput {
-                    reconcile_gateway: Some((ns, name)),
-                    ..Default::default()
-                };
-                let co = ugwc_core::compile(&fp_k, &input).map_err(|e| e.to_string())?;
+                let fp_k = fp_k.clone();
+                let cache_k = cache_k.clone();
+                let leader_k = leader_k.clone();
+                let ns_default = ns_default.clone();
+                let client_inner = reconcile_client.clone();
+                Box::pin(async move {
+                    let t0 = Instant::now();
+                    let ns = gw.namespace().unwrap_or_else(|| ns_default.clone());
+                    let name = gw.name_any();
+                    let api: Api<Gateway> = Api::namespaced(client_inner, &ns);
+                    let latest = api.get(&name).await.map_err(|e| e.to_string())?;
 
-                let plan = plan_publish(
-                    Some(SnapshotCache::current(cache_k.as_ref()).as_ref()),
-                    &co.snapshot,
-                    &fp_k,
-                );
+                    let input = CompileInput {
+                        reconcile_gateway: Some((ns.clone(), name.clone())),
+                        ..Default::default()
+                    };
+                    let co = ugwc_core::compile(&fp_k, &input).map_err(|e| e.to_string())?;
 
-                metrics::observe_compile_seconds(t0.elapsed().as_secs_f64());
-                if co.report.has_errors() {
-                    metrics::record_compile_error();
-                }
+                    let plan = plan_publish(
+                        Some(SnapshotCache::current(cache_k.as_ref()).as_ref()),
+                        &co.snapshot,
+                        &fp_k,
+                    );
 
-                if !leader_k.is_leader() {
-                    metrics::record_publish_skipped();
-                    return Ok(());
-                }
-
-                match plan.action {
-                    PublishAction::Skip => metrics::record_publish_skipped(),
-                    PublishAction::FullReplace => {
-                        cache_k.store(co.snapshot);
-                        metrics::record_publish_applied();
+                    metrics::observe_compile_seconds(t0.elapsed().as_secs_f64());
+                    if co.report.has_errors() {
+                        metrics::record_compile_error();
                     }
-                    PublishAction::Delta => {}
-                    _ => {}
-                }
-                Ok(())
+
+                    if !leader_k.is_leader() {
+                        metrics::record_publish_skipped();
+                        return Ok(());
+                    }
+
+                    if let Err(e) =
+                        ugwc_k8s::apply_gateway_reconciled_status(&api, &latest, &co).await
+                    {
+                        warn!(error = %e, %ns, %name, "gateway status patch");
+                    }
+
+                    match plan.action {
+                        PublishAction::Skip => metrics::record_publish_skipped(),
+                        PublishAction::FullReplace => {
+                            cache_k.store(co.snapshot);
+                            metrics::record_publish_applied();
+                        }
+                        PublishAction::Delta => {}
+                        _ => {}
+                    }
+                    Ok(())
+                })
             });
-            ugwc_k8s::run_gateway_controller(client, run_ns, kube_sd, rfn).await;
+            ugwc_k8s::run_gateway_controller(watch_client, run_ns, kube_sd, rfn).await;
         });
         wait_shutdown(shutdown, admin_task, xds_task, Some(kube_task)).await;
     } else {

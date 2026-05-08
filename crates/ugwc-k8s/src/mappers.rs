@@ -66,6 +66,7 @@ mod tests {
             },
             spec: crate::resources::GatewaySpec {
                 gateway_class_name: "cls".into(),
+                listeners: vec![],
             },
             status: Default::default(),
         };

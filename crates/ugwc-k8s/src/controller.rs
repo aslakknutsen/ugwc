@@ -1,5 +1,7 @@
 //! kube-runtime watch over `Gateway` (Phase 2A minimal; Phase 3 expands graph).
 
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::Arc;
 
 use futures::StreamExt;
@@ -12,7 +14,8 @@ use tracing::{info, instrument, warn};
 
 use crate::resources::Gateway;
 
-pub type ReconcileFn = Arc<dyn Fn(Gateway) -> Result<(), String> + Send + Sync>;
+pub type ReconcileFuture = Pin<Box<dyn Future<Output = Result<(), String>> + Send>>;
+pub type ReconcileFn = Arc<dyn Fn(Gateway) -> ReconcileFuture + Send + Sync>;
 
 /// Observe `Gateway` objects in `namespace` until cancelled.
 #[instrument(skip(client, shutdown, reconcile))]
@@ -37,7 +40,7 @@ pub async fn run_gateway_controller(
                     Some(Ok(gw)) => {
                         let name = gw.name_any();
                         let ns = gw.namespace().unwrap_or_default();
-                        if let Err(e) = reconcile(gw) {
+                        if let Err(e) = reconcile(gw).await {
                             warn!(error = %e, %ns, %name, "reconcile");
                         }
                     }
