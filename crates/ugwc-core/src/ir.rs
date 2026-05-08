@@ -5,7 +5,7 @@ use std::collections::BTreeMap;
 use uuid::Uuid;
 
 /// Schema version embedded on every snapshot (bump when wire/IR changes).
-pub const IR_VERSION: u32 = 3;
+pub const IR_VERSION: u32 = 4;
 
 /// Per-dataplane scope identity for sharded xDS versions (see module docs).
 #[derive(Clone, Debug, Eq, Hash, PartialEq, Ord, PartialOrd)]
@@ -68,16 +68,27 @@ pub struct ListenerIr {
     /// PEM TLS private key (terminate mode), resolved by loader.
     #[serde(default)]
     pub tls_key_pem: Vec<u8>,
+    /// Effective `allowedRoutes` as `group/kind` strings (empty = infer HTTP + GRPC on HTTP-like listeners in encoder).
+    #[serde(default)]
+    pub allowed_route_group_kinds: Vec<String>,
 }
 
 /// Route binding to a specific effective listener (parent + `sectionName` + port).
-#[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Hash, serde::Serialize, serde::Deserialize)]
 pub struct ListenerAttachmentIr {
     pub parent_kind: String,
     pub parent_namespace: String,
     pub parent_name: String,
     pub section_name: String,
     pub port: u16,
+}
+
+/// Route protocol family (Gateway API HTTPRoute vs GRPCRoute).
+#[derive(Clone, Debug, Eq, PartialEq, Default, serde::Serialize, serde::Deserialize)]
+pub enum RouteFamily {
+    #[default]
+    Http,
+    Grpc,
 }
 
 /// One HTTP match clause (Core: path prefix or exact + header exact matches).
@@ -90,6 +101,12 @@ pub struct RouteMatchIr {
     /// Lowercase header name → exact value.
     #[serde(default)]
     pub headers_exact: BTreeMap<String, String>,
+    /// gRPC full service name (e.g. `helloworld.Greeter`); unset = wildcard for GRPCRoute matches.
+    #[serde(default)]
+    pub grpc_service: Option<String>,
+    /// gRPC method name; unset = wildcard.
+    #[serde(default)]
+    pub grpc_method: Option<String>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -136,10 +153,12 @@ pub struct RequestHeaderModifierIr {
     pub remove: Vec<String>,
 }
 
-/// Normalized HTTP route rule (Gateway API Core HTTPRoute).
+/// Normalized Gateway API route rule (HTTPRoute or GRPCRoute).
 #[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct RouteRuleIr {
     pub name: String,
+    #[serde(default)]
+    pub route_family: RouteFamily,
     /// Effective hostnames (`empty` ⇒ any / `*` in encoders).
     #[serde(default)]
     pub hosts: Vec<String>,
@@ -151,6 +170,8 @@ pub struct RouteRuleIr {
     pub request_redirect: Option<RequestRedirectIr>,
     #[serde(default)]
     pub request_header_modifier: Option<RequestHeaderModifierIr>,
+    #[serde(default)]
+    pub response_header_modifier: Option<RequestHeaderModifierIr>,
     #[serde(default)]
     pub listener: Option<ListenerAttachmentIr>,
 }

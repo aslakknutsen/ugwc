@@ -15,6 +15,8 @@ use ugwc_core::snapshot::{
     AllowedListenersSnap, AllowedRoutesNamespacesSnap, AllowedRoutesSnap, ClusterSnapshot,
     EffectiveListenerSnap, EndpointPortSnap, EndpointSliceSnap, EndpointSnap, GatewayAddressSnap,
     GatewayClassSnap, GatewayInfrastructureSnap, GatewayListenerSnap, GatewayListenerTlsSnap,
+    GrpcHeaderMatchSnap, GrpcMethodMatchSnap, GrpcRouteFilterSnap, GrpcRouteMatchSnap,
+    GrpcRouteRuleSnap, GrpcRouteSnap,
     HttpBackendRefSnap, HttpHeaderFilterSnap, HttpHeaderMatchSnap, HttpHeaderNameValueSnap,
     HttpPathMatchSnap, HttpPathModifierSnap, HttpRequestMatchSnap, HttpRequestRedirectFilterSnap,
     HttpRouteFilterSnap, HttpRouteRuleSnap, HttpRouteSnap, ListenerNamespacesSnap, ListenerSetSnap,
@@ -23,7 +25,7 @@ use ugwc_core::snapshot::{
 };
 
 use crate::resources::{
-    Gateway, GatewayClass, HTTPRoute, ListenerSet, ParentReferenceSpec, ReferenceGrant,
+    Gateway, GatewayClass, GRPCRoute, HTTPRoute, ListenerSet, ParentReferenceSpec, ReferenceGrant,
 };
 
 #[derive(Debug, Error)]
@@ -292,6 +294,20 @@ fn http_route_filter_snap(f: &crate::resources::HTTPRouteFilterSpec) -> HttpRout
     }
 }
 
+fn grpc_route_filter_snap(f: &crate::resources::GRPCRouteFilterSpec) -> GrpcRouteFilterSnap {
+    GrpcRouteFilterSnap {
+        filter_type: f.filter_type.clone(),
+        request_header_modifier: f
+            .request_header_modifier
+            .as_ref()
+            .map(http_header_filter_snap),
+        response_header_modifier: f
+            .response_header_modifier
+            .as_ref()
+            .map(http_header_filter_snap),
+    }
+}
+
 fn reference_grant_to_snap(rg: ReferenceGrant) -> ReferenceGrantSnap {
     ReferenceGrantSnap {
         namespace: rg.metadata.namespace.unwrap_or_default(),
@@ -343,7 +359,7 @@ fn listenerset_to_snap(ls: ListenerSet) -> ListenerSetSnap {
 
 fn route_attaches_to_gateway_parent(
     p: &ParentReferenceSpec,
-    route: &HTTPRoute,
+    route_namespace: Option<&str>,
     gw_ns: &str,
     gw_name: &str,
 ) -> bool {
@@ -355,14 +371,14 @@ fn route_attaches_to_gateway_parent(
     let pns = p
         .namespace
         .as_deref()
-        .or(route.metadata.namespace.as_deref())
+        .or(route_namespace)
         .unwrap_or("");
     pns == gw_ns && p.name == gw_name
 }
 
 fn route_attaches_to_listener_set_parent(
     p: &ParentReferenceSpec,
-    route: &HTTPRoute,
+    route_namespace: Option<&str>,
     attached_ls: &HashSet<(String, String)>,
 ) -> bool {
     let g = p.group.as_deref().unwrap_or("gateway.networking.k8s.io");
@@ -372,10 +388,24 @@ fn route_attaches_to_listener_set_parent(
     }
     let ls_ns = p
         .namespace
-        .clone()
-        .or(route.metadata.namespace.clone())
-        .unwrap_or_default();
+        .as_deref()
+        .or(route_namespace)
+        .unwrap_or_default()
+        .to_string();
     attached_ls.contains(&(ls_ns, p.name.clone()))
+}
+
+fn route_relevant_to_gateway_refs(
+    parent_refs: &[ParentReferenceSpec],
+    route_namespace: Option<&str>,
+    gw_ns: &str,
+    gw_name: &str,
+    attached_ls: &HashSet<(String, String)>,
+) -> bool {
+    parent_refs.iter().any(|p| {
+        route_attaches_to_gateway_parent(p, route_namespace, gw_ns, gw_name)
+            || route_attaches_to_listener_set_parent(p, route_namespace, attached_ls)
+    })
 }
 
 fn route_relevant_to_gateway(
@@ -384,10 +414,28 @@ fn route_relevant_to_gateway(
     gw_name: &str,
     attached_ls: &HashSet<(String, String)>,
 ) -> bool {
-    route.spec.parent_refs.iter().any(|p| {
-        route_attaches_to_gateway_parent(p, route, gw_ns, gw_name)
-            || route_attaches_to_listener_set_parent(p, route, attached_ls)
-    })
+    route_relevant_to_gateway_refs(
+        &route.spec.parent_refs,
+        route.metadata.namespace.as_deref(),
+        gw_ns,
+        gw_name,
+        attached_ls,
+    )
+}
+
+fn grpc_route_relevant_to_gateway(
+    route: &GRPCRoute,
+    gw_ns: &str,
+    gw_name: &str,
+    attached_ls: &HashSet<(String, String)>,
+) -> bool {
+    route_relevant_to_gateway_refs(
+        &route.spec.parent_refs,
+        route.metadata.namespace.as_deref(),
+        gw_ns,
+        gw_name,
+        attached_ls,
+    )
 }
 
 fn http_route_to_snap(route: &HTTPRoute) -> HttpRouteSnap {
@@ -439,6 +487,66 @@ fn http_route_to_snap(route: &HTTPRoute) -> HttpRouteSnap {
         .collect();
 
     HttpRouteSnap {
+        namespace: route.metadata.namespace.clone().unwrap_or_default(),
+        name: route.metadata.name.clone().unwrap_or_default(),
+        generation: gen,
+        creation_timestamp_rfc3339,
+        parent_refs: route.spec.parent_refs.iter().map(parent_to_snap).collect(),
+        hostnames: route.spec.hostnames.clone(),
+        rules,
+    }
+}
+
+fn grpc_route_to_snap(route: &GRPCRoute) -> GrpcRouteSnap {
+    let gen = route.metadata.generation.unwrap_or(0);
+    let creation_timestamp_rfc3339 = route
+        .metadata
+        .creation_timestamp
+        .as_ref()
+        .map(|t| t.0.to_rfc3339());
+    let rules: Vec<GrpcRouteRuleSnap> = route
+        .spec
+        .rules
+        .iter()
+        .map(|r| GrpcRouteRuleSnap {
+            matches: r
+                .matches
+                .iter()
+                .map(|m| GrpcRouteMatchSnap {
+                    method: m.method.as_ref().map(|mm| GrpcMethodMatchSnap {
+                        match_type: mm.match_type.clone(),
+                        service: mm.service.clone(),
+                        method: mm.method.clone(),
+                    }),
+                    headers: m
+                        .headers
+                        .iter()
+                        .map(|h| GrpcHeaderMatchSnap {
+                            match_type: h.match_type.clone(),
+                            name: h.name.clone(),
+                            value: h.value.clone(),
+                        })
+                        .collect(),
+                })
+                .collect(),
+            filters: r.filters.iter().map(grpc_route_filter_snap).collect(),
+            backend_refs: r
+                .backend_refs
+                .iter()
+                .map(|b| HttpBackendRefSnap {
+                    group: b.group.clone(),
+                    kind: b.kind.clone(),
+                    namespace: b.namespace.clone(),
+                    name: b.name.clone(),
+                    port: b.port,
+                    port_name: b.port_name.clone(),
+                    weight: b.weight,
+                })
+                .collect(),
+        })
+        .collect();
+
+    GrpcRouteSnap {
         namespace: route.metadata.namespace.clone().unwrap_or_default(),
         name: route.metadata.name.clone().unwrap_or_default(),
         generation: gen,
@@ -502,6 +610,7 @@ pub async fn load_cluster_snapshot(
     let route_api: Api<HTTPRoute> = Api::all(client.clone());
     let routes_list = route_api.list(&ListParams::default()).await?;
     let mut http_routes: Vec<HttpRouteSnap> = Vec::new();
+    let mut grpc_routes: Vec<GrpcRouteSnap> = Vec::new();
     let mut needed_services: Vec<(String, String)> = Vec::new();
     let mut ns_for_labels: HashSet<String> = HashSet::new();
     ns_for_labels.insert(gateway_ns.to_string());
@@ -529,6 +638,43 @@ pub async fn load_cluster_snapshot(
             }
         }
         http_routes.push(snap);
+    }
+
+    let grpc_api: Api<GRPCRoute> = Api::all(client.clone());
+    match grpc_api.list(&ListParams::default()).await {
+        Ok(grpc_list) => {
+            for item in grpc_list.items {
+                if !grpc_route_relevant_to_gateway(&item, gateway_ns, gateway_name, &attached_ls_keys)
+                {
+                    continue;
+                }
+                let rns = item.metadata.namespace.clone().unwrap_or_default();
+                ns_for_labels.insert(rns.clone());
+
+                let snap = grpc_route_to_snap(&item);
+                for rule in &item.spec.rules {
+                    for br in &rule.backend_refs {
+                        if br.kind.as_deref().unwrap_or("Service") != "Service" {
+                            continue;
+                        }
+                        let sns = br
+                            .namespace
+                            .clone()
+                            .or(item.metadata.namespace.clone())
+                            .unwrap_or_default();
+                        ns_for_labels.insert(sns.clone());
+                        needed_services.push((sns, br.name.clone()));
+                    }
+                }
+                grpc_routes.push(snap);
+            }
+        }
+        Err(e) => {
+            warn!(
+                error = %e,
+                "GRPCRoute list failed — clusters without GRPCRoute CRD skip gRPC routes"
+            );
+        }
     }
 
     needed_services.sort();
@@ -682,6 +828,7 @@ pub async fn load_cluster_snapshot(
         listener_sets,
         allowed_listeners,
         http_routes,
+        grpc_routes,
         services,
         endpoint_slices,
         gateway_class,

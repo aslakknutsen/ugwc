@@ -5,21 +5,23 @@ use std::collections::{BTreeMap, HashSet};
 
 use uuid::Uuid;
 
-use crate::compile::{CompileReport, ObjectRefErr};
+use crate::compile::{CompileReport, HttpGrpcConflictLoser, ObjectRefErr};
 use crate::http_route_attachment::{
-    find_effective_for_key, intersect_route_listener_hosts, reference_grant_permits_service_ref,
-    route_attachment_keys,
+    find_effective_for_key, grpc_route_attachment_keys, grpc_route_listener_hostname_ok,
+    intersect_route_listener_hosts, reference_grant_permits_service_ref, route_attachment_keys,
+    route_listener_hostname_ok,
 };
 use crate::inference::InferenceIr;
 use crate::ir::{
-    BackendEndpointIr, BackendIr, IrSnapshot, ListenerIr, NamedHeaderIr,
+    BackendEndpointIr, BackendIr, IrSnapshot, ListenerIr, NamedHeaderIr, RouteFamily,
     RequestHeaderModifierIr, RequestRedirectIr, RouteMatchIr, RouteRuleIr, SnapshotMeta, TlsMode,
     WeightedBackendIr, IR_VERSION,
 };
 use crate::policy::PolicyOverlayIr;
 use crate::snapshot::{
-    ClusterSnapshot, EffectiveListenerSnap, HttpBackendRefSnap, HttpRequestMatchSnap,
-    HttpRouteRuleSnap, HttpRouteSnap, ListenerParentSnap, ServiceSnap,
+    ClusterSnapshot, EffectiveListenerSnap, GrpcRouteMatchSnap, GrpcRouteRuleSnap, GrpcRouteSnap,
+    HttpBackendRefSnap, HttpRequestMatchSnap, HttpRouteRuleSnap, HttpRouteSnap, ListenerParentSnap,
+    ServiceSnap,
 };
 
 #[derive(Clone, Eq, PartialEq)]
@@ -27,6 +29,8 @@ struct RouteSortMeta {
     ts: String,
     route_ns: String,
     route_name: String,
+    /// 0 = HTTPRoute, 1 = GRPCRoute (stable ordering when timestamps match).
+    route_kind_order: u8,
     rule_idx: usize,
     seq: usize,
 }
@@ -37,6 +41,7 @@ impl Ord for RouteSortMeta {
             .cmp(&other.ts)
             .then_with(|| self.route_ns.cmp(&other.route_ns))
             .then_with(|| self.route_name.cmp(&other.route_name))
+            .then_with(|| self.route_kind_order.cmp(&other.route_kind_order))
             .then_with(|| self.rule_idx.cmp(&other.rule_idx))
             .then_with(|| self.seq.cmp(&other.seq))
     }
@@ -62,6 +67,17 @@ fn httproute_obj_err(route: &HttpRouteSnap, reason: impl Into<String>) -> Object
         group: "gateway.networking.k8s.io".into(),
         version: "v1".into(),
         kind: "HTTPRoute".into(),
+        namespace: route.namespace.clone(),
+        name: route.name.clone(),
+        reason: reason.into(),
+    }
+}
+
+fn grpcroute_obj_err(route: &GrpcRouteSnap, reason: impl Into<String>) -> ObjectRefErr {
+    ObjectRefErr {
+        group: "gateway.networking.k8s.io".into(),
+        version: "v1".into(),
+        kind: "GRPCRoute".into(),
         namespace: route.namespace.clone(),
         name: route.name.clone(),
         reason: reason.into(),
@@ -203,6 +219,8 @@ fn validate_and_convert_matches(
             path_prefix,
             path_exact,
             headers_exact,
+            grpc_service: None,
+            grpc_method: None,
         });
     }
     Some(out)
@@ -386,10 +404,171 @@ fn record_listener_conflicts(snapshot: &ClusterSnapshot, report: &mut CompileRep
     }
 }
 
-fn resolve_weighted_backends(
+fn validate_and_convert_grpc_matches(
+    route: &GrpcRouteSnap,
+    rule_idx: usize,
+    matches: &[GrpcRouteMatchSnap],
+    report: &mut CompileReport,
+) -> Option<Vec<RouteMatchIr>> {
+    let src: Vec<GrpcRouteMatchSnap> = if matches.is_empty() {
+        vec![GrpcRouteMatchSnap::default()]
+    } else {
+        matches.to_vec()
+    };
+    let mut out = Vec::new();
+    for (mi, m) in src.iter().enumerate() {
+        let mut headers_exact = BTreeMap::new();
+        for h in &m.headers {
+            let mt = h.match_type.as_deref().unwrap_or("Exact");
+            if mt != "Exact" {
+                report.errors.push(grpcroute_obj_err(
+                    route,
+                    format!(
+                        "UnsupportedValue: gRPC header match type {mt} (rule {rule_idx} match {mi})"
+                    ),
+                ));
+                return None;
+            }
+            headers_exact.insert(h.name.to_ascii_lowercase(), h.value.clone());
+        }
+
+        let (grpc_service, grpc_method) = match &m.method {
+            None => (None, None),
+            Some(mm) => {
+                let typ = mm.match_type.as_deref().unwrap_or("Exact");
+                if typ == "RegularExpression" {
+                    report.errors.push(grpcroute_obj_err(
+                        route,
+                        format!(
+                            "UnsupportedValue: gRPC method RegularExpression (rule {rule_idx} match {mi})"
+                        ),
+                    ));
+                    return None;
+                }
+                if typ != "Exact" && !typ.is_empty() {
+                    report.errors.push(grpcroute_obj_err(
+                        route,
+                        format!(
+                            "UnsupportedValue: gRPC method match type {typ} (rule {rule_idx} match {mi})"
+                        ),
+                    ));
+                    return None;
+                }
+                (
+                    mm.service.clone().filter(|s| !s.is_empty()),
+                    mm.method.clone().filter(|s| !s.is_empty()),
+                )
+            }
+        };
+
+        out.push(RouteMatchIr {
+            path_prefix: None,
+            path_exact: None,
+            headers_exact,
+            grpc_service,
+            grpc_method,
+        });
+    }
+    Some(out)
+}
+
+fn extract_grpc_rule_filters(
+    route: &GrpcRouteSnap,
+    rule: &GrpcRouteRuleSnap,
+    rule_idx: usize,
+    report: &mut CompileReport,
+) -> (
+    Option<RequestHeaderModifierIr>,
+    Option<RequestHeaderModifierIr>,
+) {
+    let mut hdr_mod: Option<RequestHeaderModifierIr> = None;
+    let mut resp_hdr: Option<RequestHeaderModifierIr> = None;
+
+    for (fi, f) in rule.filters.iter().enumerate() {
+        match f.filter_type.as_str() {
+            "RequestHeaderModifier" => {
+                let Some(hm) = f.request_header_modifier.as_ref() else {
+                    report.errors.push(grpcroute_obj_err(
+                        route,
+                        format!(
+                            "InvalidReference: RequestHeaderModifier missing body (rule {rule_idx} filter {fi})"
+                        ),
+                    ));
+                    continue;
+                };
+                hdr_mod = Some(RequestHeaderModifierIr {
+                    set: hm
+                        .set
+                        .iter()
+                        .map(|x| NamedHeaderIr {
+                            name: x.name.clone(),
+                            value: x.value.clone(),
+                        })
+                        .collect(),
+                    add: hm
+                        .add
+                        .iter()
+                        .map(|x| NamedHeaderIr {
+                            name: x.name.clone(),
+                            value: x.value.clone(),
+                        })
+                        .collect(),
+                    remove: hm.remove.clone(),
+                });
+            }
+            "ResponseHeaderModifier" => {
+                let Some(hm) = f.response_header_modifier.as_ref() else {
+                    report.errors.push(grpcroute_obj_err(
+                        route,
+                        format!(
+                            "InvalidReference: ResponseHeaderModifier missing body (rule {rule_idx} filter {fi})"
+                        ),
+                    ));
+                    continue;
+                };
+                resp_hdr = Some(RequestHeaderModifierIr {
+                    set: hm
+                        .set
+                        .iter()
+                        .map(|x| NamedHeaderIr {
+                            name: x.name.clone(),
+                            value: x.value.clone(),
+                        })
+                        .collect(),
+                    add: hm
+                        .add
+                        .iter()
+                        .map(|x| NamedHeaderIr {
+                            name: x.name.clone(),
+                            value: x.value.clone(),
+                        })
+                        .collect(),
+                    remove: hm.remove.clone(),
+                });
+            }
+            "RequestMirror" | "ExtensionRef" => {
+                report.errors.push(grpcroute_obj_err(
+                    route,
+                    format!(
+                        "UnsupportedValue: filter type {} (rule {rule_idx} filter {fi})",
+                        f.filter_type
+                    ),
+                ));
+            }
+            other => {
+                report.errors.push(grpcroute_obj_err(
+                    route,
+                    format!("UnsupportedValue: filter type {other} (rule {rule_idx})"),
+                ));
+            }
+        }
+    }
+    (hdr_mod, resp_hdr)
+}
+
+fn resolve_http_route_backends(
     route: &HttpRouteSnap,
     rule: &HttpRouteRuleSnap,
-    _rule_idx: usize,
     snapshot: &ClusterSnapshot,
     report: &mut CompileReport,
 ) -> Vec<WeightedBackendIr> {
@@ -413,6 +592,7 @@ fn resolve_weighted_backends(
             &route.namespace,
             svc_ns,
             svc_name,
+            "HTTPRoute",
         ) {
             report.errors.push(ObjectRefErr {
                 group: "gateway.networking.k8s.io".into(),
@@ -455,6 +635,248 @@ fn resolve_weighted_backends(
     backends
 }
 
+fn resolve_grpc_route_backends(
+    route: &GrpcRouteSnap,
+    rule: &GrpcRouteRuleSnap,
+    snapshot: &ClusterSnapshot,
+    report: &mut CompileReport,
+) -> Vec<WeightedBackendIr> {
+    let mut backends = Vec::new();
+    for br in &rule.backend_refs {
+        if br.kind.as_deref().unwrap_or("Service") != "Service" {
+            report.errors.push(ObjectRefErr {
+                group: "gateway.networking.k8s.io".into(),
+                version: "v1".into(),
+                kind: "GRPCRoute".into(),
+                namespace: route.namespace.clone(),
+                name: route.name.clone(),
+                reason: "UnsupportedBackendKind".into(),
+            });
+            continue;
+        }
+        let svc_ns = br.namespace.as_deref().unwrap_or(&route.namespace);
+        let svc_name = &br.name;
+        if !reference_grant_permits_service_ref(
+            &snapshot.reference_grants,
+            &route.namespace,
+            svc_ns,
+            svc_name,
+            "GRPCRoute",
+        ) {
+            report.errors.push(ObjectRefErr {
+                group: "gateway.networking.k8s.io".into(),
+                version: "v1".into(),
+                kind: "GRPCRoute".into(),
+                namespace: route.namespace.clone(),
+                name: route.name.clone(),
+                reason: "RefNotPermitted".into(),
+            });
+            continue;
+        }
+        let Some(svc) = find_service(snapshot, svc_ns, svc_name) else {
+            report.errors.push(ObjectRefErr {
+                group: "".into(),
+                version: "v1".into(),
+                kind: "Service".into(),
+                namespace: svc_ns.to_string(),
+                name: svc_name.clone(),
+                reason: "BackendNotFound".into(),
+            });
+            continue;
+        };
+        let port = match resolve_service_port(svc, br) {
+            Ok(p) => p,
+            Err(reason) => {
+                report.errors.push(grpcroute_obj_err(route, reason));
+                continue;
+            }
+        };
+        backends.push(WeightedBackendIr {
+            backend: BackendIr {
+                service_namespace: svc_ns.to_string(),
+                service_name: svc_name.clone(),
+                port_name: br.port_name.clone(),
+                port_number: Some(port),
+            },
+            weight: br.weight.unwrap_or(1),
+        });
+    }
+    backends
+}
+
+fn allowed_route_group_kinds_for_effective(e: &EffectiveListenerSnap) -> Vec<String> {
+    let kinds = e
+        .allowed_routes
+        .as_ref()
+        .map(|a| &a.kinds[..])
+        .unwrap_or(&[]);
+    if kinds.is_empty() {
+        let proto = e.protocol.trim().to_ascii_uppercase();
+        if proto == "HTTP" || proto == "HTTPS" {
+            return vec![
+                "gateway.networking.k8s.io/HTTPRoute".into(),
+                "gateway.networking.k8s.io/GRPCRoute".into(),
+            ];
+        }
+        return vec![];
+    }
+    kinds
+        .iter()
+        .map(|k| {
+            format!(
+                "{}/{}",
+                k.group.as_deref().unwrap_or("gateway.networking.k8s.io"),
+                k.kind
+            )
+        })
+        .collect()
+}
+
+fn hosts_for_grpc_route_on_listener(route: &GrpcRouteSnap, eff: &EffectiveListenerSnap) -> Vec<String> {
+    let Some(intersected) = intersect_route_listener_hosts(&route.hostnames, &eff.hostname) else {
+        return Vec::new();
+    };
+    if intersected.is_empty() {
+        Vec::new()
+    } else {
+        intersected
+    }
+}
+
+fn host_sets_overlap(a: &[String], b: &[String]) -> bool {
+    if a.is_empty() || b.is_empty() {
+        return true;
+    }
+    a.iter().any(|x| b.iter().any(|y| x == y))
+}
+
+fn grpc_route_loses_http_conflict(h: &HttpRouteSnap, g: &GrpcRouteSnap) -> bool {
+    match h
+        .creation_timestamp_rfc3339
+        .as_deref()
+        .unwrap_or("")
+        .cmp(g.creation_timestamp_rfc3339.as_deref().unwrap_or(""))
+    {
+        Ordering::Less => true,
+        Ordering::Greater => false,
+        Ordering::Equal => {
+            (h.namespace.as_str(), h.name.as_str()) < (g.namespace.as_str(), g.name.as_str())
+        }
+    }
+}
+
+fn http_route_loses_grpc_conflict(h: &HttpRouteSnap, g: &GrpcRouteSnap) -> bool {
+    match h
+        .creation_timestamp_rfc3339
+        .as_deref()
+        .unwrap_or("")
+        .cmp(g.creation_timestamp_rfc3339.as_deref().unwrap_or(""))
+    {
+        Ordering::Less => false,
+        Ordering::Greater => true,
+        Ordering::Equal => {
+            (h.namespace.as_str(), h.name.as_str()) > (g.namespace.as_str(), g.name.as_str())
+        }
+    }
+}
+
+fn compute_http_grpc_conflict_losers(
+    snapshot: &ClusterSnapshot,
+    attached_ls: &HashSet<(String, String)>,
+) -> Vec<HttpGrpcConflictLoser> {
+    let mut all_lk: HashSet<crate::ir::ListenerAttachmentIr> = HashSet::new();
+    for r in &snapshot.http_routes {
+        for k in route_attachment_keys(r, snapshot, attached_ls) {
+            all_lk.insert(k);
+        }
+    }
+    for r in &snapshot.grpc_routes {
+        for k in grpc_route_attachment_keys(r, snapshot, attached_ls) {
+            all_lk.insert(k);
+        }
+    }
+
+    let mut losers: Vec<HttpGrpcConflictLoser> = Vec::new();
+
+    for lk in &all_lk {
+        let Some(eff) = find_effective_for_key(snapshot, lk) else {
+            continue;
+        };
+        if eff.conflicted {
+            continue;
+        }
+
+        let http_on: Vec<&HttpRouteSnap> = snapshot
+            .http_routes
+            .iter()
+            .filter(|r| {
+                route_attachment_keys(r, snapshot, attached_ls).contains(lk)
+                    && route_listener_hostname_ok(r, eff)
+            })
+            .collect();
+
+        let grpc_on: Vec<&GrpcRouteSnap> = snapshot
+            .grpc_routes
+            .iter()
+            .filter(|r| {
+                grpc_route_attachment_keys(r, snapshot, attached_ls).contains(lk)
+                    && grpc_route_listener_hostname_ok(r, eff)
+            })
+            .collect();
+
+        for h in &http_on {
+            for g in &grpc_on {
+                let hh = hosts_for_route_on_listener(h, eff);
+                let gh = hosts_for_grpc_route_on_listener(g, eff);
+                if !host_sets_overlap(&hh, &gh) {
+                    continue;
+                }
+                if grpc_route_loses_http_conflict(h, g) {
+                    losers.push(HttpGrpcConflictLoser {
+                        route_kind: "GRPCRoute".into(),
+                        route_namespace: g.namespace.clone(),
+                        route_name: g.name.clone(),
+                        listener: lk.clone(),
+                    });
+                } else if http_route_loses_grpc_conflict(h, g) {
+                    losers.push(HttpGrpcConflictLoser {
+                        route_kind: "HTTPRoute".into(),
+                        route_namespace: h.namespace.clone(),
+                        route_name: h.name.clone(),
+                        listener: lk.clone(),
+                    });
+                }
+            }
+        }
+    }
+
+    losers.sort_by(|a, b| {
+        (&a.route_kind, &a.route_namespace, &a.route_name, &a.listener).cmp(&(
+            &b.route_kind,
+            &b.route_namespace,
+            &b.route_name,
+            &b.listener,
+        ))
+    });
+    losers.dedup_by(|a, b| {
+        a.route_kind == b.route_kind
+            && a.route_namespace == b.route_namespace
+            && a.route_name == b.route_name
+            && a.listener == b.listener
+    });
+    losers
+}
+
+fn resolve_weighted_backends(
+    route: &HttpRouteSnap,
+    rule: &HttpRouteRuleSnap,
+    _rule_idx: usize,
+    snapshot: &ClusterSnapshot,
+    report: &mut CompileReport,
+) -> Vec<WeightedBackendIr> {
+    resolve_http_route_backends(route, rule, snapshot, report)
+}
+
 fn hosts_for_route_on_listener(route: &HttpRouteSnap, eff: &EffectiveListenerSnap) -> Vec<String> {
     let Some(intersected) = intersect_route_listener_hosts(&route.hostnames, &eff.hostname) else {
         return Vec::new();
@@ -482,6 +904,9 @@ pub fn ir_from_cluster(snapshot: &ClusterSnapshot) -> (IrSnapshot, CompileReport
         .map(|ls| (ls.namespace.clone(), ls.name.clone()))
         .collect();
 
+    report.http_grpc_conflict_losers =
+        compute_http_grpc_conflict_losers(snapshot, &attached_ls);
+
     let mut listeners = Vec::new();
     for e in &snapshot.effective_listeners {
         let (tls_mode, tls_cert_pem, tls_key_pem) = listener_tls_ir_fields(e, snapshot, &mut report);
@@ -506,6 +931,7 @@ pub fn ir_from_cluster(snapshot: &ClusterSnapshot) -> (IrSnapshot, CompileReport
             hostname: e.hostname.clone(),
             tls_cert_pem,
             tls_key_pem,
+            allowed_route_group_kinds: allowed_route_group_kinds_for_effective(e),
         });
     }
 
@@ -565,6 +991,10 @@ pub fn ir_from_cluster(snapshot: &ClusterSnapshot) -> (IrSnapshot, CompileReport
                 if eff.conflicted {
                     continue;
                 }
+                if report.http_grpc_conflict_loser_at("HTTPRoute", &route.namespace, &route.name, lk)
+                {
+                    continue;
+                }
                 let hosts = hosts_for_route_on_listener(route, eff);
                 if intersect_route_listener_hosts(&route.hostnames, &eff.hostname).is_none() {
                     continue;
@@ -580,16 +1010,102 @@ pub fn ir_from_cluster(snapshot: &ClusterSnapshot) -> (IrSnapshot, CompileReport
                         ts: meta_ts.clone(),
                         route_ns: route.namespace.clone(),
                         route_name: route.name.clone(),
+                        route_kind_order: 0,
                         rule_idx,
                         seq,
                     },
                     RouteRuleIr {
                         name: route_name,
+                        route_family: RouteFamily::Http,
                         hosts,
                         matches: matches_ir.clone(),
                         backends: backends_ir.clone(),
                         request_redirect: redirect_ir.clone(),
                         request_header_modifier: hdr_mod_ir.clone(),
+                        response_header_modifier: None,
+                        listener: Some(lk.clone()),
+                    },
+                ));
+                report.record_listener_route_attachment(lk);
+                seq += 1;
+            }
+        }
+    }
+
+    for route in &snapshot.grpc_routes {
+        let attach_keys = grpc_route_attachment_keys(route, snapshot, &attached_ls);
+        if attach_keys.is_empty() {
+            continue;
+        }
+
+        for (rule_idx, rule) in route.rules.iter().enumerate() {
+            let Some(matches_ir) =
+                validate_and_convert_grpc_matches(route, rule_idx, &rule.matches, &mut report)
+            else {
+                continue;
+            };
+
+            let (hdr_mod_ir, resp_hdr_ir) =
+                extract_grpc_rule_filters(route, rule, rule_idx, &mut report);
+
+            let backends_ir = resolve_grpc_route_backends(route, rule, snapshot, &mut report);
+
+            if backends_ir.is_empty() && rule.filters.is_empty() {
+                continue;
+            }
+
+            if backends_ir.is_empty() {
+                report.errors.push(grpcroute_obj_err(
+                    route,
+                    format!("Invalid: rule {rule_idx} has no valid backends"),
+                ));
+                continue;
+            }
+
+            let meta_ts = route
+                .creation_timestamp_rfc3339
+                .clone()
+                .unwrap_or_default();
+
+            for lk in &attach_keys {
+                let Some(eff) = find_effective_for_key(snapshot, lk) else {
+                    continue;
+                };
+                if eff.conflicted {
+                    continue;
+                }
+                if report.http_grpc_conflict_loser_at("GRPCRoute", &route.namespace, &route.name, lk)
+                {
+                    continue;
+                }
+                let hosts = hosts_for_grpc_route_on_listener(route, eff);
+                if intersect_route_listener_hosts(&route.hostnames, &eff.hostname).is_none() {
+                    continue;
+                }
+
+                let route_name = format!(
+                    "grpc/{}/{}/{}:{}",
+                    route.namespace, route.name, rule_idx, lk.section_name
+                );
+
+                staged.push((
+                    RouteSortMeta {
+                        ts: meta_ts.clone(),
+                        route_ns: route.namespace.clone(),
+                        route_name: route.name.clone(),
+                        route_kind_order: 1,
+                        rule_idx,
+                        seq,
+                    },
+                    RouteRuleIr {
+                        name: route_name,
+                        route_family: RouteFamily::Grpc,
+                        hosts,
+                        matches: matches_ir.clone(),
+                        backends: backends_ir.clone(),
+                        request_redirect: None,
+                        request_header_modifier: hdr_mod_ir.clone(),
+                        response_header_modifier: resp_hdr_ir.clone(),
                         listener: Some(lk.clone()),
                     },
                 ));
@@ -672,10 +1188,11 @@ pub fn ir_from_cluster(snapshot: &ClusterSnapshot) -> (IrSnapshot, CompileReport
 mod tests {
     use super::*;
     use crate::listener_merge::merge_effective_listeners;
+    use crate::ir::RouteFamily;
     use crate::snapshot::{
-        EndpointPortSnap, EndpointSliceSnap, EndpointSnap, GatewayListenerSnap, HttpBackendRefSnap,
-        HttpPathMatchSnap, HttpRouteRuleSnap, ListenerSetSnap, ParentRefSnap, ServicePortSnap,
-        ServiceSnap,
+        EndpointPortSnap, EndpointSliceSnap, EndpointSnap, GatewayListenerSnap, GrpcRouteRuleSnap,
+        GrpcRouteSnap, HttpBackendRefSnap, HttpPathMatchSnap, HttpRouteRuleSnap, ListenerSetSnap,
+        ParentRefSnap, ServicePortSnap, ServiceSnap,
     };
 
     fn minimal_cluster() -> ClusterSnapshot {
@@ -733,6 +1250,7 @@ mod tests {
                     }],
                 }],
             }],
+            grpc_routes: vec![],
             services: vec![ServiceSnap {
                 namespace: "default".into(),
                 name: "svc".into(),
@@ -831,6 +1349,7 @@ mod tests {
                     }],
                 }],
             }],
+            grpc_routes: vec![],
             services: vec![ServiceSnap {
                 namespace: "default".into(),
                 name: "svc".into(),
@@ -1032,5 +1551,82 @@ mod tests {
         let (ir, rep) = ir_from_cluster(&c);
         assert!(!rep.has_errors(), "{:?}", rep.errors);
         assert!(ir.routes.iter().any(|r| r.request_redirect.is_some() && r.backends.is_empty()));
+    }
+
+    #[test]
+    fn grpc_route_compiles_parallel_to_http() {
+        let mut c = minimal_cluster();
+        c.grpc_routes.push(GrpcRouteSnap {
+            namespace: "default".into(),
+            name: "gr1".into(),
+            generation: 1,
+            creation_timestamp_rfc3339: Some("2022-01-01T00:00:00Z".into()),
+            parent_refs: vec![ParentRefSnap {
+                group: Some("gateway.networking.k8s.io".into()),
+                kind: Some("Gateway".into()),
+                namespace: None,
+                name: "gw".into(),
+                section_name: None,
+                port: None,
+            }],
+            hostnames: vec!["other.example.com".into()],
+            rules: vec![GrpcRouteRuleSnap {
+                matches: vec![],
+                filters: vec![],
+                backend_refs: vec![HttpBackendRefSnap {
+                    group: None,
+                    kind: Some("Service".into()),
+                    namespace: None,
+                    name: "svc".into(),
+                    port: Some(80),
+                    port_name: None,
+                    weight: None,
+                }],
+            }],
+        });
+        let (ir, rep) = ir_from_cluster(&c);
+        assert!(!rep.has_errors(), "{:?}", rep.errors);
+        assert!(ir.routes.iter().any(|r| r.route_family == RouteFamily::Grpc));
+        assert!(ir.routes.iter().any(|r| r.route_family == RouteFamily::Http));
+    }
+
+    #[test]
+    fn http_grpc_hostname_conflict_drops_newer_grpc() {
+        let mut c = minimal_cluster();
+        c.http_routes[0].creation_timestamp_rfc3339 = Some("2020-01-01T00:00:00Z".into());
+        c.grpc_routes.push(GrpcRouteSnap {
+            namespace: "default".into(),
+            name: "gr1".into(),
+            generation: 1,
+            creation_timestamp_rfc3339: Some("2021-01-01T00:00:00Z".into()),
+            parent_refs: vec![ParentRefSnap {
+                group: Some("gateway.networking.k8s.io".into()),
+                kind: Some("Gateway".into()),
+                namespace: None,
+                name: "gw".into(),
+                section_name: None,
+                port: None,
+            }],
+            hostnames: vec!["example.com".into()],
+            rules: vec![GrpcRouteRuleSnap {
+                matches: vec![],
+                filters: vec![],
+                backend_refs: vec![HttpBackendRefSnap {
+                    group: None,
+                    kind: Some("Service".into()),
+                    namespace: None,
+                    name: "svc".into(),
+                    port: Some(80),
+                    port_name: None,
+                    weight: None,
+                }],
+            }],
+        });
+        let (ir, rep) = ir_from_cluster(&c);
+        assert!(!rep.has_errors(), "{:?}", rep.errors);
+        assert!(ir.routes.iter().all(|r| r.route_family != RouteFamily::Grpc));
+        assert!(rep.http_grpc_conflict_losers.iter().any(|l| {
+            l.route_kind == "GRPCRoute" && l.route_name == "gr1"
+        }));
     }
 }

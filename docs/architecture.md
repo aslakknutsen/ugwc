@@ -14,7 +14,7 @@ Rust workspace (`Cargo.toml` `[workspace]`) with these members:
 
 ## Gateway API compatibility
 
-Target **Gateway API** bundle: **v1.5.x standard channel** (see [Gateway API releases](https://github.com/kubernetes-sigs/gateway-api/releases)). Install e.g. `standard-install.yaml` for the pinned minor. ugwc focuses on `Gateway` / `HTTPRoute` / `ListenerSet` / `ReferenceGrant`, with HTTPS listeners terminating TLS using `listener.tls.certificateRefs` → `Secret` (`tls.crt` / `tls.key`), optional `Gateway.spec.addresses` validation, and `Gateway.spec.infrastructure.labels` merged into per-gateway Praxis workload labels.
+Target **Gateway API** bundle: **v1.5.x standard channel** (see [Gateway API releases](https://github.com/kubernetes-sigs/gateway-api/releases)). Install e.g. `standard-install.yaml` for the pinned minor. ugwc focuses on `Gateway` / `HTTPRoute` / `GRPCRoute` / `ListenerSet` / `ReferenceGrant`, with HTTPS listeners terminating TLS using `listener.tls.certificateRefs` → `Secret` (`tls.crt` / `tls.key`), optional `Gateway.spec.addresses` validation, and `Gateway.spec.infrastructure.labels` merged into per-gateway Praxis workload labels.
 
 ## Diagrams
 
@@ -45,7 +45,7 @@ flowchart TB
     end
 
     subgraph k8s_crate["ugwc-k8s"]
-        Watch["Watchers:\nGateway, HTTPRoute,\nEndpointSlice, GatewayClass"]
+        Watch["Watchers:\nGateway, HTTPRoute, GRPCRoute,\nListenerSet, ReferenceGrant,\nEndpointSlice, GatewayClass"]
         Load["load_cluster_snapshot"]
         Status["apply_*_status"]
     end
@@ -117,15 +117,16 @@ flowchart TD
 
 ### Kubernetes controller: watch fan-in
 
-Four independent watchers enqueue the same reconcile key `(namespace, gateway_name)`. A single consumer loop `recv`s keys and invokes the shared **`ReconcileFn`**.
+Several parallel watchers enqueue the same reconcile key `(namespace, gateway_name)`. A single consumer loop `recv`s keys and invokes the shared **`ReconcileFn`**.
 
 ```mermaid
 flowchart LR
     subgraph watchers["Parallel watcher tasks"]
         W1["Gateway watcher\n→ (ns, name)"]
-        W2["HTTPRoute watcher\n→ parent Gateway keys"]
-        W3["EndpointSlice watcher\n→ debounce → list all Gateways\n→ enqueue each"]
-        W4["GatewayClass watcher\n→ owned class → list Gateways\nof that class → enqueue"]
+        W2["HTTPRoute / GRPCRoute\n→ parent Gateway keys"]
+        W3["ListenerSet / ReferenceGrant\n→ affected gateways"]
+        W4["EndpointSlice watcher\n→ debounce → list all Gateways\n→ enqueue each"]
+        W5["GatewayClass watcher\n→ owned class → list Gateways\nof that class → enqueue"]
     end
 
     Q["mpsc channel\n256 capacity"]
@@ -135,6 +136,7 @@ flowchart LR
     W2 --> Q
     W3 --> Q
     W4 --> Q
+    W5 --> Q
     Q --> Loop
 ```
 

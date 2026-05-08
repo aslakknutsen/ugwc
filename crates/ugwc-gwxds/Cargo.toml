@@ -11,5 +11,8 @@ build = "build.rs"
 ugwc-core = { path = "../ugwc-core" }
 prost.workspace = true
 
+[dev-dependencies]
+uuid.workspace = true
+
 [build-dependencies]
 prost-build.workspace = true

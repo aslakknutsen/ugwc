@@ -244,6 +244,68 @@ pub struct HttpRouteSnap {
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+pub struct GrpcMethodMatchSnap {
+    #[serde(rename = "type", default)]
+    pub match_type: Option<String>,
+    #[serde(default)]
+    pub service: Option<String>,
+    #[serde(default)]
+    pub method: Option<String>,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+pub struct GrpcHeaderMatchSnap {
+    #[serde(rename = "type", default)]
+    pub match_type: Option<String>,
+    pub name: String,
+    pub value: String,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+pub struct GrpcRouteMatchSnap {
+    #[serde(default)]
+    pub method: Option<GrpcMethodMatchSnap>,
+    #[serde(default)]
+    pub headers: Vec<GrpcHeaderMatchSnap>,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+pub struct GrpcRouteFilterSnap {
+    #[serde(rename = "type")]
+    pub filter_type: String,
+    #[serde(rename = "requestHeaderModifier", default)]
+    pub request_header_modifier: Option<HttpHeaderFilterSnap>,
+    #[serde(rename = "responseHeaderModifier", default)]
+    pub response_header_modifier: Option<HttpHeaderFilterSnap>,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+pub struct GrpcRouteRuleSnap {
+    #[serde(default)]
+    pub matches: Vec<GrpcRouteMatchSnap>,
+    #[serde(default)]
+    pub filters: Vec<GrpcRouteFilterSnap>,
+    #[serde(rename = "backendRefs", default)]
+    pub backend_refs: Vec<HttpBackendRefSnap>,
+}
+
+/// One `GRPCRoute` document relevant to compilation.
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+pub struct GrpcRouteSnap {
+    pub namespace: String,
+    pub name: String,
+    pub generation: i64,
+    #[serde(rename = "creationTimestamp", default)]
+    pub creation_timestamp_rfc3339: Option<String>,
+    #[serde(rename = "parentRefs", default)]
+    pub parent_refs: Vec<ParentRefSnap>,
+    #[serde(default)]
+    pub hostnames: Vec<String>,
+    #[serde(default)]
+    pub rules: Vec<GrpcRouteRuleSnap>,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
 pub struct ServicePortSnap {
     pub name: String,
     pub port: u16,
@@ -380,6 +442,8 @@ pub struct ClusterSnapshot {
     pub allowed_listeners: Option<AllowedListenersSnap>,
     #[serde(rename = "httpRoutes", default)]
     pub http_routes: Vec<HttpRouteSnap>,
+    #[serde(rename = "grpcRoutes", default)]
+    pub grpc_routes: Vec<GrpcRouteSnap>,
     #[serde(default)]
     pub services: Vec<ServiceSnap>,
     #[serde(rename = "endpointSlices", default)]

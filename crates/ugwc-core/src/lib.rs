@@ -15,8 +15,9 @@ pub mod publish;
 pub mod snapshot;
 
 pub use compile::{
-    compile, http_route_resolved_refs_row, CompileInput, CompileOutcome, CompileReport, CoreError,
-    ObjectRefErr,
+    compile, grpc_route_accepted_condition_for_parent, grpc_route_resolved_refs_row,
+    http_route_accepted_condition_for_parent, http_route_resolved_refs_row, CompileInput,
+    CompileOutcome, CompileReport, CoreError, ObjectRefErr,
 };
 pub use failure_policy::FailurePolicy;
 pub use from_cluster::ir_from_cluster;

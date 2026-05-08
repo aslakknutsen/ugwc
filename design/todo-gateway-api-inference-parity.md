@@ -2,7 +2,7 @@
 
 **Goal:** Track latest **Gateway API** (standard + extended channel semantics where relevant) and **Gateway API Inference Extension** so the controller observes, loads into `ClusterSnapshot`, compiles, publishes IR/xDS, and writes status for all resource kinds required for parity—not only `HTTPRoute` + `Service`.
 
-**Baseline (current code):** Watches `Gateway`, `HTTPRoute` (parents may be `Gateway` or `ListenerSet`), `ListenerSet`, `EndpointSlice` (debounced full-gateway fan-out), `GatewayClass` (owned classes). Snapshot loads merged listeners (`Gateway` + attached `ListenerSet` when `allowedListeners` permits), `HTTPRoute`s attached to either parent kind, `Service` backends, `EndpointSlice`s, `GatewayClass`. No `ReferenceGrant`, no other route kinds, no policy APIs, no `InferencePool`.
+**Baseline (current code):** Watches `Gateway`, `HTTPRoute`, `GRPCRoute` (parents may be `Gateway` or `ListenerSet`), `ListenerSet`, `ReferenceGrant`, `EndpointSlice` (debounced full-gateway fan-out), `GatewayClass` (owned classes). Snapshot loads merged listeners (`Gateway` + attached `ListenerSet` when `allowedListeners` permits), HTTP and GRPC routes attached to either parent kind, `Service` backends, `EndpointSlice`s, relevant `ReferenceGrant`s, `GatewayClass`. Policy APIs, non-Service backend kinds, and `InferencePool` are out of scope for this note.
 
 ---
 
@@ -17,7 +17,7 @@ For each new resource type, define:
 Concrete additions:
 
 - [ ] **`ReferenceGrant`** (`gateway.networking.k8s.io`) — reconcile when cross-namespace refs depend on grants; map affected namespaces/routes/gateways (may require an index of refs → gateways).
-- [ ] **`GRPCRoute`** — parent refs to `Gateway`; same attachment rules as `HTTPRoute`; reconcile key from parent Gateway.
+- [x] **`GRPCRoute`** — parent refs to `Gateway`; same attachment rules as `HTTPRoute`; reconcile key from parent Gateway.
 - [ ] **`TLSRoute`** / **`TCPRoute`** / **`UDPRoute`** (as applicable to supported protocols) — watch + map + snapshot fields.
 - [ ] **`BackendTLSPolicy`** — watch; resolve targets that reference `Service` / `HTTPRoute` / backends used by owned Gateways; reconcile affected gateways.
 - [x] **`ListenerSet`** — watch + merge into listener resolution (**Gateway API standard channel v1.5.x**; `Gateway.spec.allowedListeners` required for attachment).
@@ -31,8 +31,8 @@ Concrete additions:
 Extend types and `load_cluster_snapshot` (or successor) to include:
 
 - [x] **ListenerSet merge + effective listeners** on `ClusterSnapshot` (`listener_sets`, `effective_listeners`, `allowedListeners` snapshot fields).
-- [ ] **Routes:** `GRPCRoute` (and TLS/TCP/UDP as scoped).
-- [ ] **Grants:** relevant `ReferenceGrant` documents for allowed cross-namespace reference pairs touching that Gateway’s scope.
+- [x] **Routes:** `GRPCRoute` (and TLS/TCP/UDP as scoped).
+- [ ] **Grants:** relevant `ReferenceGrant` documents for allowed cross-namespace reference pairs touching that Gateway’s scope (partial: HTTPRoute + GRPCRoute Service refs).
 - [ ] **TLS:** resolved `BackendTLSPolicy` blobs (or normalized TLS IR inputs) for backends that require upstream TLS.
 - [ ] **Inference:** `InferencePool` specs (selector, `targetPorts`, `appProtocol`, `endpointPickerRef`, failure modes) for pools referenced by routes; optional **InferenceObjective** if part of routing.
 
@@ -45,8 +45,8 @@ Ensure:
 
 ## 3. Core compile / IR
 
-- [ ] **Normalize** GRPC (and other L4/L7) routes into IR alongside HTTP.
-- [ ] **Enforce ReferenceGrant** semantics in compile reports (conditions / errors when refs are illegal).
+- [x] **Normalize** GRPC (and other L4/L7) routes into IR alongside HTTP (core filters / exact matches; extended filters tracked separately).
+- [ ] **Enforce ReferenceGrant** semantics in compile reports (conditions / errors when refs are illegal) (partial for Service backends from HTTPRoute/GRPCRoute).
 - [ ] **Backend TLS:** map `BackendTLSPolicy` → IR/TLS fields used by publish backends.
 - [ ] **Inference:** map `InferencePool` → IR (cluster/upstream + ext_proc/EPP wiring per `ugwc-gwxds` / design); handle `endpointPickerRef` and failure modes.
 - [ ] **InferenceObjective:** if request-scoped objectives affect routing or filters, thread through IR and the data plane contract.
@@ -55,7 +55,7 @@ Ensure:
 
 ## 4. Status writers
 
-- [ ] Extend Gateway / route / parent status patches for **GRPCRoute** and other route kinds per Gateway API status patterns.
+- [x] Extend Gateway / route / parent status patches for **GRPCRoute** and other route kinds per Gateway API status patterns (GRPCRoute parent merge + supported kinds; other kinds still open).
 - [ ] **InferencePool** `status.parents` / conditions (`Accepted`, `ResolvedRefs`, …) per inference extension spec.
 - [ ] **BackendTLSPolicy** status if this controller owns or participates in those conditions.
 
@@ -63,7 +63,7 @@ Ensure:
 
 ## 5. xDS / gwxds output
 
-- [ ] Ensure published IR matches proto expectations in `gwxds.proto` (`InferencePool`, `BackendTLS`, etc.).
+- [x] Ensure published IR matches proto expectations in `gwxds.proto` (`Route.grpc_route`, `RouteMatch.grpc_*`, listener `allowed_routes`; `InferencePool`, `BackendTLS`, etc. still future work).
 - [ ] Verify Envoy/Praxis dataplane contract for **ext_proc / EPP** when InferencePool is active.
 
 ---

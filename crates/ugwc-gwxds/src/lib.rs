@@ -12,7 +12,7 @@ use istio::gwxds::{
     Backend, HeaderNameValue, Listener, Protocol, RequestHeaderModifier, RequestRedirect, Resource,
     Route, RouteMatch, TlsConfig,
 };
-use ugwc_core::ir::TlsMode;
+use ugwc_core::ir::{RouteFamily, TlsMode};
 use ugwc_core::IrSnapshot;
 
 /// ADS `type_url` for gwxds resources (matches Praxis `xds-client`).
@@ -71,13 +71,24 @@ fn header_modifier_proto(h: &ugwc_core::ir::RequestHeaderModifierIr) -> RequestH
     }
 }
 
-fn route_matches_proto(matches: &[ugwc_core::ir::RouteMatchIr]) -> Vec<RouteMatch> {
-    let src = if matches.is_empty() {
-        vec![ugwc_core::ir::RouteMatchIr {
-            path_prefix: Some("/".into()),
-            path_exact: None,
-            headers_exact: Default::default(),
-        }]
+fn route_matches_proto(family: RouteFamily, matches: &[ugwc_core::ir::RouteMatchIr]) -> Vec<RouteMatch> {
+    let src: Vec<ugwc_core::ir::RouteMatchIr> = if matches.is_empty() {
+        match family {
+            RouteFamily::Grpc => vec![ugwc_core::ir::RouteMatchIr {
+                path_prefix: None,
+                path_exact: None,
+                headers_exact: Default::default(),
+                grpc_service: None,
+                grpc_method: None,
+            }],
+            RouteFamily::Http => vec![ugwc_core::ir::RouteMatchIr {
+                path_prefix: Some("/".into()),
+                path_exact: None,
+                headers_exact: Default::default(),
+                grpc_service: None,
+                grpc_method: None,
+            }],
+        }
     } else {
         matches.to_vec()
     };
@@ -86,8 +97,14 @@ fn route_matches_proto(matches: &[ugwc_core::ir::RouteMatchIr]) -> Vec<RouteMatc
             path_prefix: m.path_prefix.clone().unwrap_or_default(),
             path_exact: m.path_exact.clone().unwrap_or_default(),
             path_regex: String::new(),
-            headers: m.headers_exact.iter().map(|(k, v)| (k.clone(), v.clone())).collect(),
+            headers: m
+                .headers_exact
+                .iter()
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect(),
             methods: vec![],
+            grpc_service: m.grpc_service.clone().unwrap_or_default(),
+            grpc_method: m.grpc_method.clone().unwrap_or_default(),
         })
         .collect()
 }
@@ -128,13 +145,21 @@ pub fn encode_ir(ir: &IrSnapshot) -> Vec<Resource> {
         } else {
             None
         };
+        let allowed_routes = if ln.allowed_route_group_kinds.is_empty() {
+            vec![
+                "gateway.networking.k8s.io/HTTPRoute".into(),
+                "gateway.networking.k8s.io/GRPCRoute".into(),
+            ]
+        } else {
+            ln.allowed_route_group_kinds.clone()
+        };
         let listener = Listener {
             key: listener_key.clone(),
             hostname,
             port: u32::from(ln.bind_port),
             protocol,
             tls,
-            allowed_routes: vec!["gateway.networking.k8s.io/HTTPRoute".into()],
+            allowed_routes,
         };
 
         let mut routes = Vec::new();
@@ -156,7 +181,7 @@ pub fn encode_ir(ir: &IrSnapshot) -> Vec<Resource> {
                 r.hosts.clone()
             };
 
-            let matches_pb = route_matches_proto(&r.matches);
+            let matches_pb = route_matches_proto(r.route_family.clone(), &r.matches);
 
             let mut backends_pb = Vec::new();
             let mut invalid_backend_ref = false;
@@ -194,6 +219,11 @@ pub fn encode_ir(ir: &IrSnapshot) -> Vec<Resource> {
                 .request_header_modifier
                 .as_ref()
                 .map(header_modifier_proto);
+            let response_header_modifier = r
+                .response_header_modifier
+                .as_ref()
+                .map(header_modifier_proto);
+            let grpc_route = matches!(r.route_family, RouteFamily::Grpc);
 
             routes.push(Route {
                 key: route_key,
@@ -204,6 +234,8 @@ pub fn encode_ir(ir: &IrSnapshot) -> Vec<Resource> {
                 request_redirect,
                 request_header_modifier,
                 invalid_backend_ref,
+                response_header_modifier,
+                grpc_route,
             });
         }
 
@@ -247,6 +279,8 @@ mod tests {
         assert_eq!(rt.backends.len(), 1);
         assert_eq!(rt.backends[0].weight, 1);
         assert!(rt.matches.iter().any(|m| !m.path_prefix.is_empty()));
+        let ln = r[0].listener.as_ref().expect("listener");
+        assert!(ln.allowed_routes.iter().any(|x| x.contains("GRPCRoute")));
     }
 
     #[test]
@@ -259,6 +293,94 @@ mod tests {
         let m = &r[0].routes[0].matches[0];
         assert_eq!(m.path_exact, "/foo");
         assert!(m.path_prefix.is_empty());
+    }
+
+    #[test]
+    fn encode_grpc_route_family_sets_grpc_match_and_flag() {
+        use std::collections::BTreeMap;
+
+        use ugwc_core::ir::{
+            BackendEndpointIr, BackendIr, IrRevision, IrScopeId, ListenerAttachmentIr, ListenerIr,
+            RouteFamily, RouteMatchIr, RouteRuleIr, SnapshotMeta, WeightedBackendIr, IR_VERSION,
+        };
+        use ugwc_core::IrSnapshot;
+
+        let scope = IrScopeId::new("default", "gw");
+        let listener = ListenerIr {
+            section_name: "https".into(),
+            bind_port: 443,
+            tls: TlsMode::Terminate,
+            parent_kind: "Gateway".into(),
+            parent_namespace: "default".into(),
+            parent_name: "gw".into(),
+            conflicted: false,
+            hostname: Some("gw.example.com".into()),
+            tls_cert_pem: b"C".to_vec(),
+            tls_key_pem: b"K".to_vec(),
+            allowed_route_group_kinds: vec![
+                "gateway.networking.k8s.io/HTTPRoute".into(),
+                "gateway.networking.k8s.io/GRPCRoute".into(),
+            ],
+        };
+        let attach = ListenerAttachmentIr {
+            parent_kind: "Gateway".into(),
+            parent_namespace: "default".into(),
+            parent_name: "gw".into(),
+            section_name: "https".into(),
+            port: 443,
+        };
+        let mut backends_map = BTreeMap::new();
+        backends_map.insert(
+            "default/svc/443".into(),
+            vec![BackendEndpointIr {
+                address: "10.0.0.2".into(),
+                port: 8443,
+            }],
+        );
+        let ir = IrSnapshot {
+            ir_version: IR_VERSION,
+            revision: IrRevision::Sequence(0),
+            scope,
+            listeners: vec![listener],
+            routes: vec![RouteRuleIr {
+                name: "grpc/x".into(),
+                route_family: RouteFamily::Grpc,
+                hosts: vec!["svc.example.com".into()],
+                matches: vec![RouteMatchIr {
+                    path_prefix: None,
+                    path_exact: None,
+                    headers_exact: BTreeMap::new(),
+                    grpc_service: Some("hello.Greeter".into()),
+                    grpc_method: Some("SayHello".into()),
+                }],
+                backends: vec![WeightedBackendIr {
+                    backend: BackendIr {
+                        service_namespace: "default".into(),
+                        service_name: "svc".into(),
+                        port_name: None,
+                        port_number: Some(443),
+                    },
+                    weight: 1,
+                }],
+                request_redirect: None,
+                request_header_modifier: None,
+                response_header_modifier: None,
+                listener: Some(attach),
+            }],
+            backends: backends_map,
+            meta: SnapshotMeta {
+                correlation_id: uuid::Uuid::nil(),
+                has_errors: false,
+            },
+            policy: Default::default(),
+            inference: Default::default(),
+        };
+        let enc = encode_ir(&ir);
+        let rt = &enc[0].routes[0];
+        assert!(rt.grpc_route);
+        let m = &rt.matches[0];
+        assert_eq!(m.grpc_service, "hello.Greeter");
+        assert_eq!(m.grpc_method, "SayHello");
     }
 
     #[test]

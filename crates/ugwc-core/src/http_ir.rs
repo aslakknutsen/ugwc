@@ -36,14 +36,18 @@ impl HttpCompileFixture {
                 hostname: None,
                 tls_cert_pem: vec![],
                 tls_key_pem: vec![],
+                allowed_route_group_kinds: vec![],
             }],
             routes: vec![RouteRuleIr {
                 name: "hr".into(),
+                route_family: crate::ir::RouteFamily::Http,
                 hosts: vec!["example.com".into()],
                 matches: vec![RouteMatchIr {
                     path_prefix: Some("/".into()),
                     path_exact: None,
                     headers_exact: BTreeMap::new(),
+                    grpc_service: None,
+                    grpc_method: None,
                 }],
                 backends: vec![WeightedBackendIr {
                     backend: BackendIr {
@@ -56,6 +60,7 @@ impl HttpCompileFixture {
                 }],
                 request_redirect: None,
                 request_header_modifier: None,
+                response_header_modifier: None,
                 listener: Some(crate::ir::ListenerAttachmentIr {
                     parent_kind: "Gateway".into(),
                     parent_namespace: "default".into(),

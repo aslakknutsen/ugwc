@@ -1,17 +1,21 @@
 //! Pure compile pipeline: [`crate::ir::IrSnapshot`] + [`CompileReport`].
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 use crate::failure_policy::FailurePolicy;
 use crate::from_cluster::ir_from_cluster;
+use crate::http_route_attachment::{
+    attachment_keys_for_parent_ref, find_effective_for_key, grpc_attachment_keys_for_parent_ref,
+    grpc_route_listener_hostname_ok, route_listener_hostname_ok,
+};
 use crate::http_ir::{build_http_ir_from_fixture, HttpCompileFixture};
 use crate::inference::InferenceIr;
 use crate::ir::{IrRevision, IrSnapshot, SnapshotMeta, IR_VERSION};
 use crate::policy::PolicyOverlayIr;
-use crate::snapshot::{ClusterSnapshot, HttpRouteSnap};
+use crate::snapshot::{ClusterSnapshot, GrpcRouteSnap, HttpRouteSnap, ParentRefSnap};
 
 /// Stable cross-layer reference to a Kubernetes object when something goes wrong.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -30,18 +34,45 @@ pub enum CoreError {
     InvalidInput(String),
 }
 
+/// HTTPRoute vs GRPCRoute hostname conflict loser (per listener attachment); used for route status.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct HttpGrpcConflictLoser {
+    pub route_kind: String,
+    pub route_namespace: String,
+    pub route_name: String,
+    pub listener: crate::ir::ListenerAttachmentIr,
+}
+
 /// Collected non-fatal issues during compile (per-object bookkeeping).
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct CompileReport {
     pub errors: Vec<ObjectRefErr>,
-    /// Count of compiled HTTPRoute rules attached per listener (`parent_kind|parent_ns|parent_name|section|port`).
+    /// Count of compiled route rules attached per listener (`parent_kind|parent_ns|parent_name|section|port`).
     pub listener_route_attachment_counts: BTreeMap<String, u32>,
+    /// Routes rejected because another route kind won HTTP-vs-gRPC hostname conflict on the same listener.
+    pub http_grpc_conflict_losers: Vec<HttpGrpcConflictLoser>,
 }
 
 impl CompileReport {
     #[must_use]
     pub fn has_errors(&self) -> bool {
         !self.errors.is_empty()
+    }
+
+    #[must_use]
+    pub fn http_grpc_conflict_loser_at(
+        &self,
+        route_kind: &str,
+        route_namespace: &str,
+        route_name: &str,
+        lk: &crate::ir::ListenerAttachmentIr,
+    ) -> bool {
+        self.http_grpc_conflict_losers.iter().any(|x| {
+            x.route_kind == route_kind
+                && x.route_namespace == route_namespace
+                && x.route_name == route_name
+                && x.listener == *lk
+        })
     }
 
     pub fn record_listener_route_attachment(&mut self, lk: &crate::ir::ListenerAttachmentIr) {
@@ -62,6 +93,120 @@ impl CompileReport {
             .get(&k)
             .copied()
             .unwrap_or(0) as i32
+    }
+}
+
+/// `Accepted` condition tuple for one HTTPRoute `parentRef`, including HTTP-vs-gRPC hostname conflicts.
+#[must_use]
+pub fn http_route_accepted_condition_for_parent(
+    route: &HttpRouteSnap,
+    parent: &ParentRefSnap,
+    snapshot: &ClusterSnapshot,
+    attached_ls: &HashSet<(String, String)>,
+    report: &CompileReport,
+) -> (&'static str, &'static str, &'static str) {
+    let keys = attachment_keys_for_parent_ref(route, parent, snapshot, attached_ls);
+    if keys.is_empty() {
+        return (
+            "False",
+            "NotAcceptedByListeners",
+            "route not accepted by listener hostname intersection or allowedRoutes policy",
+        );
+    }
+    let mut eligible = false;
+    let mut accepted = false;
+    for lk in &keys {
+        let Some(eff) = find_effective_for_key(snapshot, lk) else {
+            continue;
+        };
+        if eff.conflicted {
+            continue;
+        }
+        if !route_listener_hostname_ok(route, eff) {
+            continue;
+        }
+        eligible = true;
+        if report.http_grpc_conflict_loser_at("HTTPRoute", &route.namespace, &route.name, lk) {
+            continue;
+        }
+        accepted = true;
+        break;
+    }
+    if accepted {
+        (
+            "True",
+            "Accepted",
+            "ugwc reconciled parent attachment",
+        )
+    } else if eligible {
+        (
+            "False",
+            "HTTPGRPCHostnameConflict",
+            "HTTPRoute lost hostname precedence vs GRPCRoute on all matching listeners",
+        )
+    } else {
+        (
+            "False",
+            "NotAcceptedByListeners",
+            "route not accepted by listener hostname intersection or allowedRoutes policy",
+        )
+    }
+}
+
+/// `Accepted` condition tuple for one GRPCRoute `parentRef`, including HTTP-vs-gRPC hostname conflicts.
+#[must_use]
+pub fn grpc_route_accepted_condition_for_parent(
+    route: &GrpcRouteSnap,
+    parent: &ParentRefSnap,
+    snapshot: &ClusterSnapshot,
+    attached_ls: &HashSet<(String, String)>,
+    report: &CompileReport,
+) -> (&'static str, &'static str, &'static str) {
+    let keys = grpc_attachment_keys_for_parent_ref(route, parent, snapshot, attached_ls);
+    if keys.is_empty() {
+        return (
+            "False",
+            "NotAcceptedByListeners",
+            "route not accepted by listener hostname intersection or allowedRoutes policy",
+        );
+    }
+    let mut eligible = false;
+    let mut accepted = false;
+    for lk in &keys {
+        let Some(eff) = find_effective_for_key(snapshot, lk) else {
+            continue;
+        };
+        if eff.conflicted {
+            continue;
+        }
+        if !grpc_route_listener_hostname_ok(route, eff) {
+            continue;
+        }
+        eligible = true;
+        if report.http_grpc_conflict_loser_at("GRPCRoute", &route.namespace, &route.name, lk) {
+            continue;
+        }
+        accepted = true;
+        break;
+    }
+    if accepted {
+        (
+            "True",
+            "Accepted",
+            "ugwc reconciled parent attachment",
+        )
+    } else if eligible {
+        (
+            "False",
+            "HTTPGRPCHostnameConflict",
+            "GRPCRoute lost hostname precedence vs HTTPRoute on all matching listeners",
+        )
+    } else {
+        (
+            "False",
+            "NotAcceptedByListeners",
+            "route not accepted by listener hostname intersection or allowedRoutes policy",
+        )
     }
 }
 
@@ -94,7 +239,7 @@ pub fn http_route_resolved_refs_row(
     let backends = http_route_service_backends(route);
     for e in &report.errors {
         if e.kind == "HTTPRoute" && e.namespace == route.namespace && e.name == route.name {
-            let reason = httproute_error_reason(&e.reason);
+            let reason = route_ref_error_reason(&e.reason);
             return (
                 "False",
                 reason,
@@ -125,7 +270,67 @@ pub fn http_route_resolved_refs_row(
     ("True", "ResolvedRefs", "refs resolved for v0 slice")
 }
 
-fn httproute_error_reason(reason: &str) -> &'static str {
+/// `ResolvedRefs` condition fields for one `GRPCRoute` vs [`CompileReport`] errors.
+#[must_use]
+pub fn grpc_route_resolved_refs_row(
+    report: &CompileReport,
+    route: &GrpcRouteSnap,
+) -> (&'static str, &'static str, &'static str) {
+    let backends = grpc_route_service_backends(route);
+    for e in &report.errors {
+        if e.kind == "GRPCRoute" && e.namespace == route.namespace && e.name == route.name {
+            let reason = route_ref_error_reason(&e.reason);
+            return (
+                "False",
+                reason,
+                "compile report lists ref issues for this GRPCRoute",
+            );
+        }
+        if e.kind == "Service"
+            && e.reason == "BackendNotFound"
+            && backends
+                .iter()
+                .any(|(ns, n)| ns == &e.namespace && n == &e.name)
+        {
+            return ("False", "BackendNotFound", "backend Service not found");
+        }
+        if e.kind == "Endpoints"
+            && e.reason == "NoReadyEndpoints"
+            && backends
+                .iter()
+                .any(|(ns, n)| ns == &e.namespace && n == &e.name)
+        {
+            return (
+                "False",
+                "NoReadyEndpoints",
+                "no ready endpoints for backend Service",
+            );
+        }
+    }
+    ("True", "ResolvedRefs", "refs resolved for v0 slice")
+}
+
+fn grpc_route_service_backends(route: &GrpcRouteSnap) -> Vec<(String, String)> {
+    let mut v = Vec::new();
+    for rule in &route.rules {
+        for br in &rule.backend_refs {
+            if br.kind.as_deref().unwrap_or("Service") != "Service" {
+                continue;
+            }
+            let ns = br
+                .namespace
+                .as_deref()
+                .unwrap_or(route.namespace.as_str())
+                .to_string();
+            v.push((ns, br.name.clone()));
+        }
+    }
+    v.sort();
+    v.dedup();
+    v
+}
+
+fn route_ref_error_reason(reason: &str) -> &'static str {
     match reason {
         "UnsupportedBackendKind" => "UnsupportedBackendKind",
         "BackendNotFound" => "BackendNotFound",
@@ -169,6 +374,7 @@ pub fn compile(policy: &FailurePolicy, input: &CompileInput) -> Result<CompileOu
     let mut report = CompileReport {
         errors: input.invalid_refs.clone(),
         listener_route_attachment_counts: BTreeMap::new(),
+        http_grpc_conflict_losers: Vec::new(),
     };
 
     let mut snapshot = if let Some(fix) = &input.fixture {
@@ -178,6 +384,7 @@ pub fn compile(policy: &FailurePolicy, input: &CompileInput) -> Result<CompileOu
         snap.scope = scope.clone();
         report.errors.extend(cluster_report.errors);
         report.listener_route_attachment_counts = cluster_report.listener_route_attachment_counts;
+        report.http_grpc_conflict_losers = cluster_report.http_grpc_conflict_losers;
         snap
     } else {
         IrSnapshot {

@@ -1,10 +1,10 @@
-//! HTTPRoute attachment — listener keys, hostname intersection, `allowedRoutes`, ReferenceGrant helpers.
+//! Route attachment — listener keys, hostname intersection, `allowedRoutes`, ReferenceGrant helpers.
 
 use std::collections::{BTreeMap, HashSet};
 
 use crate::snapshot::{
-    AllowedRoutesSnap, ClusterSnapshot, EffectiveListenerSnap, HttpRouteSnap, ListenerParentSnap,
-    ParentRefSnap, ReferenceGrantSnap,
+    AllowedRoutesSnap, ClusterSnapshot, EffectiveListenerSnap, GrpcRouteSnap, HttpRouteSnap,
+    ListenerParentSnap, ParentRefSnap, ReferenceGrantSnap,
 };
 
 pub(crate) fn gateway_api_group(g: &Option<String>) -> bool {
@@ -62,12 +62,12 @@ pub fn reference_grant_permits_service_ref(
     route_namespace: &str,
     service_namespace: &str,
     service_name: &str,
+    route_kind: &str,
 ) -> bool {
     if route_namespace == service_namespace {
         return true;
     }
     const G_FROM: &str = "gateway.networking.k8s.io";
-    const K_FROM: &str = "HTTPRoute";
 
     for g in grants {
         if g.namespace != service_namespace {
@@ -76,10 +76,7 @@ pub fn reference_grant_permits_service_ref(
         let mut from_ok = false;
         for fr in &g.from {
             let fg = fr.group.as_deref().unwrap_or(G_FROM);
-            if fg == G_FROM
-                && fr.kind == K_FROM
-                && fr.namespace == route_namespace
-            {
+            if fg == G_FROM && fr.kind == route_kind && fr.namespace == route_namespace {
                 from_ok = true;
                 break;
             }
@@ -151,9 +148,13 @@ pub fn reference_grant_permits_gateway_secret_ref(
     false
 }
 
-/// Whether `route_namespace` may attach to this listener per `allowedRoutes` (defaults = Same + inferred kinds).
+/// Whether `route_namespace` may attach to this listener per `allowedRoutes`.
+///
+/// `route_kind` is `HTTPRoute` or `GRPCRoute`. When `allowedRoutes.kinds` is empty and the protocol
+/// is HTTP-like, both route kinds are permitted (ugwc implements GRPCRoute on HTTP/HTTPS listeners).
 #[must_use]
-pub fn listener_accepts_http_route(
+pub fn listener_accepts_route_kind(
+    route_kind: &str,
     route_namespace: &str,
     gateway_namespace: &str,
     protocol: &str,
@@ -197,12 +198,31 @@ pub fn listener_accepts_http_route(
 
     let kinds = allowed.map(|a| &a.kinds[..]).unwrap_or(&[]);
     if kinds.is_empty() {
-        return http_like;
+        return http_like && matches!(route_kind, "HTTPRoute" | "GRPCRoute");
     }
     kinds.iter().any(|k| {
         let g = k.group.as_deref().unwrap_or("gateway.networking.k8s.io");
-        g == "gateway.networking.k8s.io" && k.kind == "HTTPRoute"
+        g == "gateway.networking.k8s.io" && k.kind == route_kind
     })
+}
+
+/// Whether an [`HTTPRoute`] may attach (same as [`listener_accepts_route_kind`] with `HTTPRoute`).
+#[must_use]
+pub fn listener_accepts_http_route(
+    route_namespace: &str,
+    gateway_namespace: &str,
+    protocol: &str,
+    allowed: Option<&AllowedRoutesSnap>,
+    namespace_labels: &BTreeMap<String, BTreeMap<String, String>>,
+) -> bool {
+    listener_accepts_route_kind(
+        "HTTPRoute",
+        route_namespace,
+        gateway_namespace,
+        protocol,
+        allowed,
+        namespace_labels,
+    )
 }
 
 pub(crate) fn hosts_match_route_listener(route_host: &str, listener_host: &str) -> bool {
@@ -260,14 +280,19 @@ pub fn route_listener_hostname_ok(route: &HttpRouteSnap, eff: &EffectiveListener
     intersect_route_listener_hosts(&route.hostnames, &eff.hostname).is_some()
 }
 
+#[must_use]
+pub fn grpc_route_listener_hostname_ok(route: &GrpcRouteSnap, eff: &EffectiveListenerSnap) -> bool {
+    intersect_route_listener_hosts(&route.hostnames, &eff.hostname).is_some()
+}
+
 /// Collect attachment keys from one route `parentRef` relevant to this Gateway reconcile scope.
-pub(crate) fn attachment_keys_for_parent_ref(
-    route: &HttpRouteSnap,
+pub(crate) fn attachment_keys_for_parent_ref_ns(
+    route_ns: &str,
+    route_kind: &str,
     p: &ParentRefSnap,
     snapshot: &ClusterSnapshot,
     attached_ls: &HashSet<(String, String)>,
 ) -> Vec<crate::ir::ListenerAttachmentIr> {
-    let route_ns = &route.namespace;
     let mut keys = Vec::new();
 
     let g = p.group.as_deref().unwrap_or("gateway.networking.k8s.io");
@@ -295,7 +320,8 @@ pub(crate) fn attachment_keys_for_parent_ref(
                     continue;
                 }
             }
-            if !listener_accepts_http_route(
+            if !listener_accepts_route_kind(
+                route_kind,
                 route_ns,
                 &snapshot.gateway_namespace,
                 &e.protocol,
@@ -344,7 +370,8 @@ pub(crate) fn attachment_keys_for_parent_ref(
                     continue;
                 }
             }
-            if !listener_accepts_http_route(
+            if !listener_accepts_route_kind(
+                route_kind,
                 route_ns,
                 &snapshot.gateway_namespace,
                 &e.protocol,
@@ -366,6 +393,24 @@ pub(crate) fn attachment_keys_for_parent_ref(
     keys
 }
 
+pub(crate) fn attachment_keys_for_parent_ref(
+    route: &HttpRouteSnap,
+    p: &ParentRefSnap,
+    snapshot: &ClusterSnapshot,
+    attached_ls: &HashSet<(String, String)>,
+) -> Vec<crate::ir::ListenerAttachmentIr> {
+    attachment_keys_for_parent_ref_ns(&route.namespace, "HTTPRoute", p, snapshot, attached_ls)
+}
+
+pub(crate) fn grpc_attachment_keys_for_parent_ref(
+    route: &GrpcRouteSnap,
+    p: &ParentRefSnap,
+    snapshot: &ClusterSnapshot,
+    attached_ls: &HashSet<(String, String)>,
+) -> Vec<crate::ir::ListenerAttachmentIr> {
+    attachment_keys_for_parent_ref_ns(&route.namespace, "GRPCRoute", p, snapshot, attached_ls)
+}
+
 pub(crate) fn route_attachment_keys(
     route: &HttpRouteSnap,
     snapshot: &ClusterSnapshot,
@@ -374,6 +419,25 @@ pub(crate) fn route_attachment_keys(
     let mut keys: Vec<crate::ir::ListenerAttachmentIr> = Vec::new();
     for p in &route.parent_refs {
         keys.extend(attachment_keys_for_parent_ref(
+            route,
+            p,
+            snapshot,
+            attached_ls,
+        ));
+    }
+    keys.sort();
+    keys.dedup();
+    keys
+}
+
+pub(crate) fn grpc_route_attachment_keys(
+    route: &GrpcRouteSnap,
+    snapshot: &ClusterSnapshot,
+    attached_ls: &HashSet<(String, String)>,
+) -> Vec<crate::ir::ListenerAttachmentIr> {
+    let mut keys: Vec<crate::ir::ListenerAttachmentIr> = Vec::new();
+    for p in &route.parent_refs {
+        keys.extend(grpc_attachment_keys_for_parent_ref(
             route,
             p,
             snapshot,
@@ -405,6 +469,32 @@ pub fn route_accepted_for_parent_ref(
             continue;
         }
         if !route_listener_hostname_ok(route, eff) {
+            continue;
+        }
+        return true;
+    }
+    false
+}
+
+#[must_use]
+pub fn grpc_route_accepted_for_parent_ref(
+    route: &GrpcRouteSnap,
+    parent: &ParentRefSnap,
+    snapshot: &ClusterSnapshot,
+    attached_ls: &HashSet<(String, String)>,
+) -> bool {
+    let keys = grpc_attachment_keys_for_parent_ref(route, parent, snapshot, attached_ls);
+    if keys.is_empty() {
+        return false;
+    }
+    for lk in &keys {
+        let Some(eff) = find_effective_for_key(snapshot, lk) else {
+            continue;
+        };
+        if eff.conflicted {
+            continue;
+        }
+        if !grpc_route_listener_hostname_ok(route, eff) {
             continue;
         }
         return true;

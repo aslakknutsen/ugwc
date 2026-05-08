@@ -395,3 +395,74 @@ pub struct HTTPRouteStatus {
     #[serde(default)]
     pub parents: Vec<serde_json::Value>,
 }
+
+/// `GRPCRoute` — parentRefs + rules (Gateway API v1).
+#[derive(CustomResource, Clone, Debug, Deserialize, Serialize)]
+#[kube(
+    group = "gateway.networking.k8s.io",
+    version = "v1",
+    kind = "GRPCRoute",
+    namespaced,
+    status = "GRPCRouteStatus",
+    schema = "disabled"
+)]
+pub struct GRPCRouteSpec {
+    #[serde(rename = "hostnames", default)]
+    pub hostnames: Vec<String>,
+    #[serde(rename = "parentRefs", default)]
+    pub parent_refs: Vec<ParentReferenceSpec>,
+    #[serde(default)]
+    pub rules: Vec<GRPCRouteRuleSpec>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+pub struct GRPCRouteRuleSpec {
+    #[serde(default)]
+    pub matches: Vec<GRPCRouteMatchSpec>,
+    #[serde(default)]
+    pub filters: Vec<GRPCRouteFilterSpec>,
+    #[serde(rename = "backendRefs", default)]
+    pub backend_refs: Vec<HTTPBackendRefSpec>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+pub struct GRPCRouteMatchSpec {
+    #[serde(default)]
+    pub method: Option<GRPCMethodMatchSpec>,
+    #[serde(default)]
+    pub headers: Vec<GRPCHeaderMatchSpec>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+pub struct GRPCMethodMatchSpec {
+    #[serde(rename = "type", default)]
+    pub match_type: Option<String>,
+    #[serde(default)]
+    pub service: Option<String>,
+    #[serde(default)]
+    pub method: Option<String>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+pub struct GRPCHeaderMatchSpec {
+    #[serde(rename = "type", default)]
+    pub match_type: Option<String>,
+    pub name: String,
+    pub value: String,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+pub struct GRPCRouteFilterSpec {
+    #[serde(rename = "type")]
+    pub filter_type: String,
+    #[serde(rename = "requestHeaderModifier", default)]
+    pub request_header_modifier: Option<HTTPHeaderFilterSpec>,
+    #[serde(rename = "responseHeaderModifier", default)]
+    pub response_header_modifier: Option<HTTPHeaderFilterSpec>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+pub struct GRPCRouteStatus {
+    #[serde(default)]
+    pub parents: Vec<serde_json::Value>,
+}

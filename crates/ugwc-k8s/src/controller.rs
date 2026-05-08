@@ -1,4 +1,4 @@
-//! Multi-watch controller graph: `Gateway`, `HTTPRoute`, `EndpointSlice` → reconcile key.
+//! Multi-watch controller graph: `Gateway`, `HTTPRoute`, `GRPCRoute`, `EndpointSlice` → reconcile key.
 
 use std::future::Future;
 use std::pin::Pin;
@@ -19,7 +19,7 @@ use tracing::{info, instrument, warn};
 
 use crate::resources::{
     gateway_spec_references_secret, listenerset_spec_references_secret, Gateway, GatewayClass,
-    HTTPRoute, ListenerSet, ReferenceGrant,
+    GRPCRoute, HTTPRoute, ListenerSet, ParentReferenceSpec, ReferenceGrant,
 };
 
 pub type ReconcileFuture = Pin<Box<dyn Future<Output = Result<(), String>> + Send>>;
@@ -37,14 +37,19 @@ fn is_listenerset_parent(p: &crate::resources::ParentReferenceSpec) -> bool {
     g == "gateway.networking.k8s.io" && k == "ListenerSet"
 }
 
-async fn gateway_targets_for_route(client: &Client, route: &HTTPRoute) -> HashSet<(String, String)> {
+async fn gateway_targets_from_parent_refs(
+    client: &Client,
+    route_namespace: Option<String>,
+    route_log_name: &str,
+    parent_refs: &[ParentReferenceSpec],
+) -> HashSet<(String, String)> {
     let mut targets = HashSet::new();
-    for p in &route.spec.parent_refs {
+    for p in parent_refs {
         if is_gateway_parent(p) {
             let pns = p
                 .namespace
                 .clone()
-                .or(route.metadata.namespace.clone())
+                .or_else(|| route_namespace.clone())
                 .unwrap_or_default();
             targets.insert((pns, p.name.clone()));
             continue;
@@ -55,7 +60,7 @@ async fn gateway_targets_for_route(client: &Client, route: &HTTPRoute) -> HashSe
         let ls_ns = p
             .namespace
             .clone()
-            .or(route.metadata.namespace.clone())
+            .or_else(|| route_namespace.clone())
             .unwrap_or_default();
         let ls_api: Api<ListenerSet> = Api::namespaced(client.clone(), &ls_ns);
         match ls_api.get(&p.name).await {
@@ -77,8 +82,8 @@ async fn gateway_targets_for_route(client: &Client, route: &HTTPRoute) -> HashSe
             Err(e) => {
                 warn!(
                     error = %e,
-                    route = %route.name_any(),
-                    "httproute listenerset parent resolve"
+                    route = %route_log_name,
+                    "route listenerset parent resolve"
                 );
             }
         }
@@ -86,7 +91,30 @@ async fn gateway_targets_for_route(client: &Client, route: &HTTPRoute) -> HashSe
     targets
 }
 
-/// Observe `Gateway`, `HTTPRoute`, `ListenerSet`, `ReferenceGrant`, `EndpointSlice`, and `GatewayClass` (owned classes) cluster-wide until cancelled.
+async fn gateway_targets_for_route(client: &Client, route: &HTTPRoute) -> HashSet<(String, String)> {
+    gateway_targets_from_parent_refs(
+        client,
+        route.metadata.namespace.clone(),
+        route.name_any().as_ref(),
+        &route.spec.parent_refs,
+    )
+    .await
+}
+
+async fn gateway_targets_for_grpc_route(
+    client: &Client,
+    route: &GRPCRoute,
+) -> HashSet<(String, String)> {
+    gateway_targets_from_parent_refs(
+        client,
+        route.metadata.namespace.clone(),
+        route.name_any().as_ref(),
+        &route.spec.parent_refs,
+    )
+    .await
+}
+
+/// Observe `Gateway`, `HTTPRoute`, `GRPCRoute`, `ListenerSet`, `ReferenceGrant`, `EndpointSlice`, and `GatewayClass` (owned classes) cluster-wide until cancelled.
 #[instrument(skip(client, shutdown, reconcile))]
 pub async fn run_gateway_controller(
     client: Client,
@@ -154,6 +182,35 @@ pub async fn run_gateway_controller(
         info!("httproute watcher shutdown");
     });
 
+    let sd_gr = shutdown.clone();
+    let c_gr = client.clone();
+    let tx_gr = tx.clone();
+    tokio::spawn(async move {
+        let api: Api<GRPCRoute> = Api::all(c_gr.clone());
+        let cfg = WatcherConfig::default().any_semantic();
+        let mut stream = Box::pin(watcher(api, cfg).applied_objects());
+        loop {
+            tokio::select! {
+                _ = sd_gr.cancelled() => break,
+                ev = stream.next() => {
+                    match ev {
+                        Some(Ok(route)) => {
+                            let targets = gateway_targets_for_grpc_route(&c_gr, &route).await;
+                            for (pns, pname) in targets {
+                                if tx_gr.send((pns, pname)).await.is_err() {
+                                    return;
+                                }
+                            }
+                        }
+                        Some(Err(e)) => warn!(error = %e, "grpcroute watch stream"),
+                        None => break,
+                    }
+                }
+            }
+        }
+        info!("grpcroute watcher shutdown");
+    });
+
     let sd_rg = shutdown.clone();
     let c_rg = client.clone();
     let tx_rg = tx.clone();
@@ -180,6 +237,21 @@ pub async fn run_gateway_controller(
                                     }
                                 }
                                 Err(e) => warn!(error = %e, "list httproute after referencegrant change"),
+                            }
+                            let gr_api: Api<GRPCRoute> = Api::all(c_rg.clone());
+                            match gr_api.list(&ListParams::default()).await {
+                                Ok(list) => {
+                                    for route in list.items {
+                                        let targets =
+                                            gateway_targets_for_grpc_route(&c_rg, &route).await;
+                                        for (pns, pname) in targets {
+                                            if tx_rg.send((pns, pname)).await.is_err() {
+                                                return;
+                                            }
+                                        }
+                                    }
+                                }
+                                Err(e) => warn!(error = %e, "list grpcroute after referencegrant change"),
                             }
                         }
                         Some(Err(e)) => warn!(error = %e, "referencegrant watch stream"),
