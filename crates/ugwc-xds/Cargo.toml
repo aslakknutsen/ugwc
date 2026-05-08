@@ -9,6 +9,8 @@ description = "xDS gRPC server and encoding for ugwc"
 [dependencies]
 ugwc-core = { path = "../ugwc-core" }
 ugwc-gwxds = { path = "../ugwc-gwxds" }
+metrics.workspace = true
+parking_lot.workspace = true
 arc-swap.workspace = true
 tonic.workspace = true
 prost.workspace = true

@@ -111,4 +111,23 @@ impl IrSnapshot {
             self.revision.as_prefix_hex()
         )
     }
+
+    /// Empty routing state for `scope` (e.g. xDS client requested an unknown scope key).
+    #[must_use]
+    pub fn empty_for_scope(scope: IrScopeId) -> Self {
+        Self {
+            ir_version: IR_VERSION,
+            revision: IrRevision::Sequence(0),
+            scope,
+            listeners: vec![],
+            routes: vec![],
+            backends: Default::default(),
+            meta: SnapshotMeta {
+                correlation_id: Uuid::nil(),
+                has_errors: false,
+            },
+            policy: crate::policy::PolicyOverlayIr::default(),
+            inference: crate::inference::InferenceIr::default(),
+        }
+    }
 }

@@ -2593,6 +2593,8 @@ version = "0.1.0"
 dependencies = [
  "arc-swap",
  "futures",
+ "metrics",
+ "parking_lot",
  "prost",
  "prost-types",
  "tokio",

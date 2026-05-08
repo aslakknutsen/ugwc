@@ -7,4 +7,4 @@
 
 **Intro and goals:** [README.md](README.md)
 
-**Deeper design drafts** (working notes in-repo): [`../design/`](../design/) — e.g. implementation plan, output distribution, controller architecture.
+**Deeper design drafts** (working notes in-repo): [`../design/`](../design/) — e.g. implementation plan, output distribution, [dataplane provisioning](../design/dataplane-provisioning.md), controller architecture.

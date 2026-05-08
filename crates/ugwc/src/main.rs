@@ -4,6 +4,7 @@ use clap::Parser;
 
 mod admin;
 mod config;
+mod implementation_profiles;
 mod leader;
 mod logging;
 mod metrics;

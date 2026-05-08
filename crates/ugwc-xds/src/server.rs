@@ -13,7 +13,7 @@ use tonic::{Request, Response, Status, Streaming};
 use tracing::{info, warn};
 use ugwc_core::IrSnapshot;
 
-use crate::cache::SnapshotCache;
+use crate::cache::XdsSnapshotSource;
 use xds_api::pb::envoy::service::discovery::v3::aggregated_discovery_service_server::{
     AggregatedDiscoveryService, AggregatedDiscoveryServiceServer,
 };
@@ -41,14 +41,14 @@ pub struct XdsServerConfig {
     pub xds_wire: String,
 }
 
-struct AdsService<C: SnapshotCache + 'static> {
-    cache: Arc<C>,
+struct AdsService {
+    cache: Arc<dyn XdsSnapshotSource>,
     allow_delta: bool,
     xds_wire: String,
 }
 
 #[tonic::async_trait]
-impl<C: SnapshotCache + 'static> AggregatedDiscoveryService for AdsService<C> {
+impl AggregatedDiscoveryService for AdsService {
     type StreamAggregatedResourcesStream =
         Pin<Box<dyn Stream<Item = Result<DiscoveryResponse, Status>> + Send>>;
     type DeltaAggregatedResourcesStream =
@@ -72,7 +72,12 @@ impl<C: SnapshotCache + 'static> AggregatedDiscoveryService for AdsService<C> {
             loop {
                 match inbound.message().await {
                     Ok(Some(req)) => {
-                        let snap = cache.current();
+                        let node_id = req
+                            .node
+                            .as_ref()
+                            .map(|n| n.id.as_str())
+                            .filter(|s| !s.is_empty());
+                        let snap = cache.resolve_for_discovery(node_id);
                         let resp = discovery_response(&snap, &wire, req.type_url.as_str());
                         if tx.send(Ok(resp)).await.is_err() {
                             break;
@@ -151,9 +156,9 @@ fn discovery_response(ir: &IrSnapshot, xds_wire: &str, req_type_url: &str) -> Di
 }
 
 /// Run until `shutdown` triggers or the server errors.
-pub async fn serve<C: SnapshotCache + 'static>(
+pub async fn serve(
     cfg: XdsServerConfig,
-    cache: Arc<C>,
+    cache: Arc<dyn XdsSnapshotSource>,
     shutdown: tokio_util::sync::CancellationToken,
 ) -> Result<(), tonic::transport::Error> {
     if cfg.security.allow_insecure {

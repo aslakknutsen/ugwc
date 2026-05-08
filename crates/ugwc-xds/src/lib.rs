@@ -5,7 +5,7 @@ pub mod cache;
 pub mod encode;
 pub mod server;
 
-pub use cache::{SharedSnapshot, SnapshotCache};
+pub use cache::{MultiScopeSnapshot, SharedSnapshot, SnapshotCache, XdsSnapshotSource};
 pub use encode::{encode_delta, encode_sotw, XdsSnapshot};
 pub use server::{serve, shutdown_gracefully, XdsSecurityConfig, XdsServerConfig};
 

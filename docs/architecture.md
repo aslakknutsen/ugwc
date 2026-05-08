@@ -29,7 +29,7 @@ flowchart TB
     subgraph ugwc_bin["ugwc binary"]
         Admin["admin::serve\n(metrics + health)"]
         XdsSrv["ugwc_xds::serve\ngRPC ADS"]
-        Cache["SharedSnapshot\n(Arc)"]
+        Cache["MultiScopeSnapshot\n(global + per-scope)"]
         Ctrl["run_gateway_controller\n(optional)"]
         Recon["Reconcile closure\nper Gateway ns/name"]
     end
@@ -95,11 +95,11 @@ flowchart TD
     Config --> Metrics[metrics::install]
     Metrics --> Leader[LeaderState:\nelection stub or always-leader]
     Leader --> InitCompile["compile(CompileInput\ndefault / empty gateway)"]
-    InitCompile --> CacheCreate["SharedSnapshot::new\n(initial IrSnapshot)"]
+    InitCompile --> CacheCreate["MultiScopeSnapshot::new\n(global stub IrSnapshot)"]
     CacheCreate --> ShutdownTok["CancellationToken::new"]
     ShutdownTok --> SpawnAdmin[spawn admin_task]
     ShutdownTok --> SpawnXds[spawn xds_task]
-    SpawnXds --> CacheClone["xDS task holds Arc clone\nof SharedSnapshot"]
+    SpawnXds --> CacheClone["xDS uses XdsSnapshotSource\n(node.id → scope)"]
     SpawnAdmin --> KubeCheck{kube_enable?}
     KubeCheck -->|no| WaitOnly[wait_shutdown:\nadmin + xds]
     KubeCheck -->|yes| KubeClient[kube::Client::try_default]
@@ -145,7 +145,7 @@ sequenceDiagram
     participant Load as ugwc_k8s::load_cluster_snapshot
     participant Core as ugwc_core::compile
     participant Plan as plan_publish
-    participant Cache as SharedSnapshot
+    participant Cache as MultiScopeSnapshot
     participant St as status writers
     participant Xds as xDS server tasks
 
@@ -155,19 +155,21 @@ sequenceDiagram
     Load-->>Loop: ClusterSnapshot or None
     Loop->>Core: compile(FailurePolicy, CompileInput)
     Core-->>Loop: CompileOutcome (report + IrSnapshot)
-    Loop->>Plan: plan_publish(prev from Cache, next snapshot, policy)
-    Plan-->>Loop: PublishPlan (action)
     alt not leader
-        Loop-->>Loop: skip publish + skip cache store
+        Loop-->>Loop: skip publish status provision
     else leader
+        Loop->>Cache: previous_for_scope(next.scope)
+        Loop->>Plan: plan_publish(prev, next, policy)
+        Plan-->>Loop: PublishPlan (action)
         Loop->>St: apply_gateway_reconciled_status
         Loop->>St: apply_http_route_parent_status (per route)
         St->>API: PATCH status subresources
         alt PublishAction::FullReplace
-            Loop->>Cache: store(new IrSnapshot)
+            Loop->>Cache: store_scoped(new IrSnapshot)
         end
+        Note over Loop: optional dataplane provision (profile)
     end
-    Note over Cache,Xds: xDS readers observe snapshot\nwithout participating in reconcile
+    Note over Cache,Xds: xDS resolves node.id to per-scope or global snapshot
 ```
 
 ### Compile → publish → cache → xDS (data flow)
@@ -190,7 +192,7 @@ flowchart LR
         Delta["Delta\n(stub / future)"]
     end
 
-    Store["SharedSnapshot::store"]
+    Store["MultiScopeSnapshot::store_scoped"]
     Read["Snapshot readers\n(xDS encode path)"]
 
     GW --> CI
@@ -208,7 +210,7 @@ flowchart LR
 At a high level:
 
 1. **Startup** — Load config, initialize logging/metrics, optionally elect or assume leader (stub paths exist).
-2. **IR cache** — Holds the current `IrSnapshot`; xDS and other publishers read from this shared cache.
+2. **IR cache** — `MultiScopeSnapshot`: a global snapshot plus per-gateway keys; xDS selects by `node.id`.
 3. **Compile loop** — Core `compile` consumes `CompileInput` (from fixtures, tests, or cluster-derived snapshots) and produces `CompileOutcome` + snapshot.
 4. **Publish planning** — `plan_publish` compares previous and next snapshots with `FailurePolicy` to decide actions (full replace, skip, etc.).
 5. **Kubernetes path** (when enabled) — Controller reconciles Gateway (and related) objects, feeds the compiler, updates shared cache and status.

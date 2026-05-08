@@ -14,6 +14,7 @@ This index tracks the **order of design work**, links each sub-document, and rec
 |------|----------|---------|
 | — | [`implementation-plan.md`](implementation-plan.md) | **Build order:** scaffolding → merge points → conformance; parallel lanes |
 | 1 | [`controller-architecture.md`](controller-architecture.md) | End-to-end shape: watches → IR → **distribution**; HA, failure modes |
+| 1b | [`dataplane-provisioning.md`](dataplane-provisioning.md) | Optional **provision** strategies; **xDS subscription scope** (all / one gateway); Praxis bootstrap |
 | 2 | [`output-distribution.md`](output-distribution.md) | **Any output**: GatewayClass → output backends; xDS as one protocol among several |
 | 3 | [`component-design.md`](component-design.md) | Reconciler, IR compiler, snapshot store, **output backend coordinator**, webhooks |
 | 4 | [`scale-performance.md`](scale-performance.md) | Fan-out, incremental distribution, caching, debouncing, resource limits |
@@ -86,6 +87,7 @@ Update this section as packages land.
 
 | Area | Package / directory |
 |------|---------------------|
-| *TBD* | *Link reconciler entrypoint* |
-| *TBD* | *Link output backend registry / coordinator* |
-| *TBD* | *Link xDS backend (if in tree)* |
+| Binary / wiring | `crates/ugwc` (`run.rs`, `config.rs`, `implementation_profiles.rs`) |
+| xDS + scoped cache | `crates/ugwc-xds` (`cache.rs`, `server.rs`) |
+| K8s provisioner | `crates/ugwc-k8s` (`provision/`) |
+| Design | [`dataplane-provisioning.md`](dataplane-provisioning.md) |

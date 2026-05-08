@@ -41,3 +41,11 @@ pub fn observe_compile_seconds(seconds: f64) {
 pub fn observe_snapshot_load_seconds(seconds: f64) {
     histogram!("ugwc_snapshot_load_duration_seconds").record(seconds);
 }
+
+pub fn record_dataplane_apply() {
+    counter!("ugwc_dataplane_apply_total").increment(1);
+}
+
+pub fn record_dataplane_error() {
+    counter!("ugwc_dataplane_error_total").increment(1);
+}

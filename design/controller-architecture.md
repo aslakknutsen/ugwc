@@ -2,7 +2,8 @@
 
 **Parent index:** [`control-plane-design-index.md`](control-plane-design-index.md)  
 **Background:** [`research.md`](research.md)  
-**Distribution detail:** [`output-distribution.md`](output-distribution.md)
+**Distribution detail:** [`output-distribution.md`](output-distribution.md)  
+**Dataplane lifecycle & xDS scope:** [`dataplane-provisioning.md`](dataplane-provisioning.md)
 
 ---
 
@@ -55,10 +56,13 @@ API Server (multi-CRD watches)
         │
         ├──► Status patches (Gateway, Route, Policy, …)
         │
+        ├──► Optional dataplane provisioner (profile-gated): Deployment/Service
+        │    per Gateway or external/shared strategies — see dataplane-provisioning.md
+        │
         ▼
  Output coordinator: route snapshot to backend(s) per GatewayClass / profile
         │
-        ├──► xDS (streams)     ──► Envoy / Agentgateway / proxyless gRPC …
+        ├──► xDS (streams, scoped or global node id) ──► Envoy / Praxis / proxyless gRPC …
         ├──► K8s writer      ──► ConfigMaps / CRDs / …
         └──► … other backends (pull API, object store, bus, …)
 ```

@@ -10,10 +10,11 @@ use ugwc_core::publish::plan_publish;
 use ugwc_core::{http_route_resolved_refs_row, CompileInput, FailurePolicy, PublishAction};
 use ugwc_k8s::resources::Gateway;
 use ugwc_xds::{
-    serve as serve_xds, SharedSnapshot, SnapshotCache, XdsSecurityConfig, XdsServerConfig,
+    serve as serve_xds, MultiScopeSnapshot, XdsSecurityConfig, XdsServerConfig, XdsSnapshotSource,
 };
 
 use crate::config::Config;
+use crate::implementation_profiles::{self, DataPlaneKind};
 use crate::leader::LeaderState;
 use crate::metrics;
 
@@ -37,7 +38,7 @@ pub async fn run(cfg: Config) -> Result<(), Box<dyn std::error::Error + Send + S
             ..Default::default()
         },
     )?;
-    let cache: Arc<SharedSnapshot> = Arc::new(SharedSnapshot::new(initial_out.snapshot));
+    let cache: Arc<MultiScopeSnapshot> = Arc::new(MultiScopeSnapshot::new(initial_out.snapshot));
 
     let shutdown = tokio_util::sync::CancellationToken::new();
     let admin_sd = shutdown.child_token();
@@ -59,7 +60,7 @@ pub async fn run(cfg: Config) -> Result<(), Box<dyn std::error::Error + Send + S
         xds_wire: cfg.xds_wire.clone(),
     };
 
-    let cache_xds: Arc<SharedSnapshot> = cache.clone();
+    let cache_xds: Arc<dyn XdsSnapshotSource> = cache.clone();
     let xds_task = tokio::spawn(async move {
         if let Err(e) = serve_xds(xds_cfg, cache_xds, xds_sd).await {
             tracing::error!(error = %e, "xds server exited");
@@ -87,6 +88,14 @@ pub async fn run(cfg: Config) -> Result<(), Box<dyn std::error::Error + Send + S
             .first()
             .cloned()
             .unwrap_or_else(|| "unknown".into());
+        let impl_profiles = cfg.implementation_profiles.clone();
+        let dataplane_enable = cfg.dataplane_enable;
+        let control_plane_xds = cfg
+            .control_plane_xds_bootstrap_addr
+            .clone()
+            .unwrap_or_default();
+        let xds_insecure = cfg.xds_insecure;
+        let xds_wire = cfg.xds_wire.clone();
         let status_cache: std::sync::Arc<
             std::sync::Mutex<std::collections::HashMap<String, String>>,
         > = std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new()));
@@ -100,6 +109,11 @@ pub async fn run(cfg: Config) -> Result<(), Box<dyn std::error::Error + Send + S
                 let client_inner = reconcile_client.clone();
                 let primary_controller = primary_controller.clone();
                 let status_cache = status_cache_k.clone();
+                let impl_profiles = impl_profiles.clone();
+                let dataplane_enable = dataplane_enable;
+                let control_plane_xds = control_plane_xds.clone();
+                let xds_insecure = xds_insecure;
+                let xds_wire = xds_wire.clone();
                 Box::pin(async move {
                     let api: Api<Gateway> = Api::namespaced(client_inner.clone(), &ns);
                     let latest = api.get(&name).await.map_err(|e| e.to_string())?;
@@ -124,12 +138,6 @@ pub async fn run(cfg: Config) -> Result<(), Box<dyn std::error::Error + Send + S
                     let co = ugwc_core::compile(&fp_k, &input).map_err(|e| e.to_string())?;
                     metrics::observe_compile_seconds(t_compile.elapsed().as_secs_f64());
 
-                    let plan = plan_publish(
-                        Some(SnapshotCache::current(cache_k.as_ref()).as_ref()),
-                        &co.snapshot,
-                        &fp_k,
-                    );
-
                     if co.report.has_errors() {
                         metrics::record_compile_error();
                     }
@@ -140,6 +148,10 @@ pub async fn run(cfg: Config) -> Result<(), Box<dyn std::error::Error + Send + S
                     }
 
                     let programmed_ok = !co.report.has_errors() && !co.snapshot.meta.has_errors;
+
+                    let prev = cache_k.previous_for_scope(&co.snapshot.scope);
+                    let plan = plan_publish(prev.as_deref(), &co.snapshot, &fp_k);
+
                     if let Err(e) = ugwc_k8s::apply_gateway_reconciled_status(
                         &api,
                         &latest,
@@ -180,12 +192,73 @@ pub async fn run(cfg: Config) -> Result<(), Box<dyn std::error::Error + Send + S
                     match plan.action {
                         PublishAction::Skip => metrics::record_publish_skipped(),
                         PublishAction::FullReplace => {
-                            cache_k.store(co.snapshot);
+                            cache_k.store_scoped(co.snapshot.clone());
                             metrics::record_publish_applied();
                         }
                         PublishAction::Delta => {}
                         _ => {}
                     }
+
+                    let controller_name = input
+                        .cluster
+                        .as_ref()
+                        .and_then(|c| c.gateway_class.as_ref())
+                        .map(|gc| gc.controller_name.as_str());
+                    let profile =
+                        implementation_profiles::resolve_for_controller(&impl_profiles, controller_name);
+
+                    match &profile.data_plane {
+                        DataPlaneKind::External => {}
+                        DataPlaneKind::SharedDeployment => {
+                            ugwc_k8s::reconcile_shared_deployment_stub(&name);
+                        }
+                        DataPlaneKind::PerGatewayPraxis => {
+                            if !dataplane_enable {
+                                ugwc_k8s::warn_per_gateway_without_enable(&name);
+                            } else if programmed_ok {
+                                let Some(img) = profile.proxy_image.as_deref() else {
+                                    warn!(%name, "per_gateway_praxis missing proxy_image");
+                                    metrics::record_dataplane_error();
+                                    return Ok(());
+                                };
+                                if control_plane_xds.trim().is_empty() {
+                                    warn!(%name, "dataplane enabled but bootstrap xDS addr empty");
+                                    metrics::record_dataplane_error();
+                                    return Ok(());
+                                }
+                                let service_port = latest
+                                    .spec
+                                    .listeners
+                                    .first()
+                                    .map(|l| l.port)
+                                    .filter(|p| *p > 0)
+                                    .unwrap_or(8080);
+                                let scope = format!("{ns}/{name}");
+                                let args = ugwc_k8s::PraxisProvisionArgs {
+                                    proxy_image: img.to_string(),
+                                    xds_bootstrap_addr: control_plane_xds.trim().to_string(),
+                                    xds_insecure,
+                                    xds_wire: xds_wire.clone(),
+                                    gateway_scope: scope,
+                                    service_port,
+                                };
+                                match ugwc_k8s::reconcile_per_gateway_praxis(
+                                    &client_inner,
+                                    &latest,
+                                    &args,
+                                )
+                                .await
+                                {
+                                    Ok(()) => metrics::record_dataplane_apply(),
+                                    Err(e) => {
+                                        warn!(error = %e, %ns, %name, "dataplane provision");
+                                        metrics::record_dataplane_error();
+                                    }
+                                }
+                            }
+                        }
+                    }
+
                     Ok(())
                 })
             });

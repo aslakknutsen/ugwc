@@ -1,10 +1,13 @@
 //! Environment-backed configuration (`UGWC_…` prefix via `envy`).
 
+use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
+
+use crate::implementation_profiles::{DataPlaneKind, ImplementationProfile};
 
 fn default_admin() -> String {
     "127.0.0.1:8080".into()
@@ -54,6 +57,18 @@ pub struct Config {
     /// xDS wire profile for ADS responses: `gwxds` (Praxis) or `envoy` (RDS-only slice).
     #[serde(default = "default_xds_wire")]
     pub xds_wire: String,
+    /// JSON file: `profiles` map from `controllerName` → dataplane + subscription defaults.
+    #[serde(default)]
+    pub implementation_profiles_path: Option<PathBuf>,
+    /// Apply `PerGatewayPraxis` workloads when reconciling (also requires profile + bootstrap addr).
+    #[serde(default)]
+    pub dataplane_enable: bool,
+    /// Host:port provisioned proxies use to dial xDS (e.g. `ugwc.ugwc-system.svc:18000`).
+    #[serde(default)]
+    pub control_plane_xds_bootstrap_addr: Option<String>,
+    /// Populated from [`implementation_profiles_path`](Self::implementation_profiles_path); not from env directly.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub implementation_profiles: HashMap<String, ImplementationProfile>,
 }
 
 #[derive(Debug, Error)]
@@ -66,16 +81,55 @@ pub enum ConfigError {
     TlsMismatch,
     #[error("production profile cannot run with plaintext xDS")]
     InsecureProd,
+    #[error("implementation profiles: {0}")]
+    Profiles(String),
+    #[error("UGWC_DATAPLANE_ENABLE requires UGWC_CONTROL_PLANE_XDS_BOOTSTRAP_ADDR when a profile uses per_gateway_praxis")]
+    BootstrapAddrRequired,
+    #[error("per_gateway_praxis profile requires non-empty proxy_image for controller {0:?}")]
+    ProxyImageRequired(String),
 }
 
 impl Config {
     /// Load from process environment (`UGWC_` prefix).
     pub fn from_env() -> Result<Self, ConfigError> {
-        let cfg: Config = envy::prefixed("UGWC_")
+        let mut cfg: Config = envy::prefixed("UGWC_")
             .from_env()
             .map_err(|e: envy::Error| ConfigError::Addr("UGWC_*".into(), e.to_string()))?;
+
+        cfg.implementation_profiles = match &cfg.implementation_profiles_path {
+            Some(p) => crate::implementation_profiles::load_from_path(p)
+                .map_err(ConfigError::Profiles)?,
+            None => HashMap::new(),
+        };
+
+        cfg.validate_profiles()?;
         cfg.validate()?;
         Ok(cfg)
+    }
+
+    fn validate_profiles(&self) -> Result<(), ConfigError> {
+        for (cn, p) in &self.implementation_profiles {
+            if matches!(p.data_plane, DataPlaneKind::PerGatewayPraxis) {
+                let img = p.proxy_image.as_deref().unwrap_or("").trim();
+                if img.is_empty() {
+                    return Err(ConfigError::ProxyImageRequired(cn.clone()));
+                }
+            }
+        }
+
+        if self.dataplane_enable {
+            let needs_addr = self
+                .implementation_profiles
+                .values()
+                .any(|p| matches!(p.data_plane, DataPlaneKind::PerGatewayPraxis));
+            if needs_addr {
+                let addr = self.control_plane_xds_bootstrap_addr.as_deref().unwrap_or("").trim();
+                if addr.is_empty() {
+                    return Err(ConfigError::BootstrapAddrRequired);
+                }
+            }
+        }
+        Ok(())
     }
 
     fn validate(&self) -> Result<(), ConfigError> {
@@ -123,7 +177,7 @@ impl Config {
     #[must_use]
     pub fn log_summary(&self) -> String {
         format!(
-            "admin={} xds={} kube={} kube_watch=cluster insecure={} delta={} profile={} leader={} debounce_ms={} xds_wire={} controllers={:?}",
+            "admin={} xds={} kube={} kube_watch=cluster insecure={} delta={} profile={} leader={} debounce_ms={} xds_wire={} controllers={:?} dataplane={} profiles={}",
             self.admin_listen_addr,
             self.xds_listen_addr,
             self.kube_enable,
@@ -134,6 +188,8 @@ impl Config {
             self.endpoint_debounce_ms,
             self.xds_wire,
             self.controller_name_list(),
+            self.dataplane_enable,
+            self.implementation_profiles.len(),
         )
     }
 }
@@ -172,6 +228,10 @@ mod tests {
             leader_election: false,
             endpoint_debounce_ms: default_endpoint_debounce_ms(),
             xds_wire: default_xds_wire(),
+            implementation_profiles_path: None,
+            dataplane_enable: false,
+            control_plane_xds_bootstrap_addr: None,
+            implementation_profiles: HashMap::new(),
         }
     }
 }

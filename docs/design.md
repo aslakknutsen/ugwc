@@ -18,6 +18,10 @@ Data planes differ: Envoy-style proxies want **xDS**; others may want Kubernetes
 - **GatewayClass** and controller configuration define which gateways this instance owns (see implementation plan for v1 defaults: controller name, env-based profile).
 - **Status** — Reconciler contributes conditions that reflect compile and distribution health where supported (`ugwc-k8s`).
 
+## Data plane lifecycle (optional)
+
+Profiles map `GatewayClass.spec.controllerName` → **data plane strategy** (external, per-gateway Praxis provisioning, shared deployment stub) and default **subscription scope** for xDS (`all` vs `one` gateway via node id). Provisioned Praxis proxies receive bootstrap env (xDS address, `UGWC_XDS_NODE_ID` = `namespace/name`) and only receive IR for that gateway. See [`../design/dataplane-provisioning.md`](../design/dataplane-provisioning.md).
+
 ## Security and operations
 
 - xDS may be TLS-terminated or insecure for prototypes; production expects an explicit security model (TLS, authn/z), not accidental plaintext defaults.
