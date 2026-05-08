@@ -103,6 +103,54 @@ pub fn reference_grant_permits_service_ref(
     false
 }
 
+/// Cross-namespace `Secret` certificate ref from a `Gateway` requires a [`ReferenceGrant`] in the Secret namespace.
+#[must_use]
+pub fn reference_grant_permits_gateway_secret_ref(
+    grants: &[ReferenceGrantSnap],
+    gateway_namespace: &str,
+    secret_namespace: &str,
+    secret_name: &str,
+) -> bool {
+    if gateway_namespace == secret_namespace {
+        return true;
+    }
+    const G_FROM: &str = "gateway.networking.k8s.io";
+    const K_FROM: &str = "Gateway";
+
+    for g in grants {
+        if g.namespace != secret_namespace {
+            continue;
+        }
+        let mut from_ok = false;
+        for fr in &g.from {
+            let fg = fr.group.as_deref().unwrap_or(G_FROM);
+            if fg == G_FROM && fr.kind == K_FROM && fr.namespace == gateway_namespace {
+                from_ok = true;
+                break;
+            }
+        }
+        if !from_ok {
+            continue;
+        }
+        for to in &g.to {
+            if to.kind != "Secret" {
+                continue;
+            }
+            let tg = to.group.as_deref().unwrap_or("");
+            if !tg.is_empty() {
+                continue;
+            }
+            match &to.name {
+                None => return true,
+                Some(n) if n.is_empty() => return true,
+                Some(n) if n == secret_name => return true,
+                _ => {}
+            }
+        }
+    }
+    false
+}
+
 /// Whether `route_namespace` may attach to this listener per `allowedRoutes` (defaults = Same + inferred kinds).
 #[must_use]
 pub fn listener_accepts_http_route(
@@ -362,4 +410,51 @@ pub fn route_accepted_for_parent_ref(
         return true;
     }
     false
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::snapshot::ReferenceGrantSnap;
+
+    #[test]
+    fn gateway_secret_grant_same_namespace_implicit() {
+        let grants: Vec<ReferenceGrantSnap> = vec![];
+        assert!(reference_grant_permits_gateway_secret_ref(
+            &grants,
+            "ns-a",
+            "ns-a",
+            "tls-secret"
+        ));
+    }
+
+    #[test]
+    fn gateway_secret_grant_cross_namespace() {
+        let grants = vec![ReferenceGrantSnap {
+            namespace: "ns-b".into(),
+            name: "g".into(),
+            from: vec![crate::snapshot::ReferenceGrantFromSnap {
+                group: Some("gateway.networking.k8s.io".into()),
+                kind: "Gateway".into(),
+                namespace: "ns-a".into(),
+            }],
+            to: vec![crate::snapshot::ReferenceGrantToSnap {
+                group: Some("".into()),
+                kind: "Secret".into(),
+                name: Some("tls-secret".into()),
+            }],
+        }];
+        assert!(reference_grant_permits_gateway_secret_ref(
+            &grants,
+            "ns-a",
+            "ns-b",
+            "tls-secret"
+        ));
+        assert!(!reference_grant_permits_gateway_secret_ref(
+            &grants,
+            "ns-a",
+            "ns-b",
+            "other"
+        ));
+    }
 }

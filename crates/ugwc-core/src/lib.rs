@@ -20,12 +20,15 @@ pub use compile::{
 };
 pub use failure_policy::FailurePolicy;
 pub use from_cluster::ir_from_cluster;
-pub use http_route_attachment::{reference_grant_permits_service_ref, route_accepted_for_parent_ref};
+pub use http_route_attachment::{
+    reference_grant_permits_gateway_secret_ref, reference_grant_permits_service_ref,
+    route_accepted_for_parent_ref,
+};
 pub use http_ir::{build_http_ir_from_fixture, HttpCompileFixture};
 pub use ir::{
     BackendEndpointIr, BackendIr, IrRevision, IrScopeId, IrSnapshot, ListenerAttachmentIr,
     ListenerIr, NamedHeaderIr, RequestHeaderModifierIr, RequestRedirectIr, RouteMatchIr,
-    RouteRuleIr, SnapshotMeta, WeightedBackendIr, IR_VERSION,
+    RouteRuleIr, SnapshotMeta, TlsMode, WeightedBackendIr, IR_VERSION,
 };
 pub use listener_merge::merge_effective_listeners;
 pub use publish::{plan_publish, PublishAction, PublishPlan};

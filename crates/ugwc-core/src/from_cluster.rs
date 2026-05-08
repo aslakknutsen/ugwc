@@ -68,6 +68,93 @@ fn httproute_obj_err(route: &HttpRouteSnap, reason: impl Into<String>) -> Object
     }
 }
 
+fn gateway_obj_err(snapshot: &ClusterSnapshot, reason: impl Into<String>) -> ObjectRefErr {
+    ObjectRefErr {
+        group: "gateway.networking.k8s.io".into(),
+        version: "v1".into(),
+        kind: "Gateway".into(),
+        namespace: snapshot.gateway_namespace.clone(),
+        name: snapshot.gateway_name.clone(),
+        reason: reason.into(),
+    }
+}
+
+fn validate_gateway_addresses(snapshot: &ClusterSnapshot, report: &mut CompileReport) {
+    for (i, a) in snapshot.gateway_addresses.iter().enumerate() {
+        let t = a.type_.as_deref().unwrap_or("IPAddress");
+        if t != "IPAddress" && t != "Hostname" {
+            report.errors.push(gateway_obj_err(
+                snapshot,
+                format!("UnsupportedAddress: spec.addresses[{i}] type {t}"),
+            ));
+        }
+    }
+}
+
+fn listener_tls_ir_fields(
+    e: &EffectiveListenerSnap,
+    snapshot: &ClusterSnapshot,
+    report: &mut CompileReport,
+) -> (TlsMode, Vec<u8>, Vec<u8>) {
+    let proto = normalize_protocol(&e.protocol);
+    match proto.as_str() {
+        "HTTP" => {
+            if e.tls.is_some() {
+                report.errors.push(gateway_obj_err(
+                    snapshot,
+                    "Invalid: HTTP listener must not set tls",
+                ));
+            }
+            (TlsMode::Plaintext, Vec::new(), Vec::new())
+        }
+        "HTTPS" => {
+            let mode = e
+                .tls
+                .as_ref()
+                .and_then(|t| t.mode.as_deref())
+                .unwrap_or("Terminate");
+            if mode.eq_ignore_ascii_case("Passthrough") {
+                report.errors.push(gateway_obj_err(
+                    snapshot,
+                    "UnsupportedValue: HTTPS TLS Passthrough",
+                ));
+                return (TlsMode::Plaintext, Vec::new(), Vec::new());
+            }
+            if let Some(ref err) = e.tls_resolve_error {
+                report.errors.push(gateway_obj_err(snapshot, err.as_str()));
+                return (TlsMode::Terminate, Vec::new(), Vec::new());
+            }
+            if e.tls_cert_pem.is_empty() || e.tls_key_pem.is_empty() {
+                report.errors.push(gateway_obj_err(
+                    snapshot,
+                    "InvalidCertificateRef: missing TLS certificate material",
+                ));
+                return (TlsMode::Terminate, Vec::new(), Vec::new());
+            }
+            (
+                TlsMode::Terminate,
+                e.tls_cert_pem.clone(),
+                e.tls_key_pem.clone(),
+            )
+        }
+        "TLS" => {
+            report.errors.push(gateway_obj_err(
+                snapshot,
+                "UnsupportedProtocol: TLS listener requires TLSRoute",
+            ));
+            (TlsMode::Plaintext, Vec::new(), Vec::new())
+        }
+        "TCP" | "UDP" => (TlsMode::Plaintext, Vec::new(), Vec::new()),
+        other => {
+            report.errors.push(gateway_obj_err(
+                snapshot,
+                format!("UnsupportedProtocol: {other}"),
+            ));
+            (TlsMode::Plaintext, Vec::new(), Vec::new())
+        }
+    }
+}
+
 fn validate_and_convert_matches(
     route: &HttpRouteSnap,
     rule_idx: usize,
@@ -387,6 +474,7 @@ pub fn ir_from_cluster(snapshot: &ClusterSnapshot) -> (IrSnapshot, CompileReport
     let mut report = CompileReport::default();
 
     record_listener_conflicts(snapshot, &mut report);
+    validate_gateway_addresses(snapshot, &mut report);
 
     let attached_ls: HashSet<(String, String)> = snapshot
         .listener_sets
@@ -396,11 +484,7 @@ pub fn ir_from_cluster(snapshot: &ClusterSnapshot) -> (IrSnapshot, CompileReport
 
     let mut listeners = Vec::new();
     for e in &snapshot.effective_listeners {
-        let tls = if normalize_protocol(&e.protocol) == "HTTPS" {
-            TlsMode::Terminate
-        } else {
-            TlsMode::Plaintext
-        };
+        let (tls_mode, tls_cert_pem, tls_key_pem) = listener_tls_ir_fields(e, snapshot, &mut report);
         let (pk, pns, pn) = match &e.parent {
             ListenerParentSnap::InlineGateway => (
                 "Gateway".to_string(),
@@ -414,11 +498,14 @@ pub fn ir_from_cluster(snapshot: &ClusterSnapshot) -> (IrSnapshot, CompileReport
         listeners.push(ListenerIr {
             section_name: e.section_name.clone(),
             bind_port: e.port,
-            tls,
+            tls: tls_mode,
             parent_kind: pk,
             parent_namespace: pns,
             parent_name: pn,
             conflicted: e.conflicted,
+            hostname: e.hostname.clone(),
+            tls_cert_pem,
+            tls_key_pem,
         });
     }
 
@@ -506,6 +593,7 @@ pub fn ir_from_cluster(snapshot: &ClusterSnapshot) -> (IrSnapshot, CompileReport
                         listener: Some(lk.clone()),
                     },
                 ));
+                report.record_listener_route_attachment(lk);
                 seq += 1;
             }
         }
@@ -597,6 +685,7 @@ mod tests {
             protocol: "HTTP".into(),
             hostname: None,
             allowed_routes: None,
+            tls: None,
         }];
         let effective_listeners = merge_effective_listeners(&listeners, &[]);
         ClusterSnapshot {
@@ -604,6 +693,8 @@ mod tests {
             gateway_name: "gw".into(),
             gateway_class_name: "gc".into(),
             gateway_generation: 1,
+            gateway_addresses: vec![],
+            gateway_infrastructure: None,
             listeners,
             effective_listeners,
             listener_sets: vec![],
@@ -677,6 +768,7 @@ mod tests {
             protocol: "HTTP".into(),
             hostname: None,
             allowed_routes: None,
+            tls: None,
         }];
         let listener_sets = vec![ListenerSetSnap {
             namespace: "default".into(),
@@ -685,11 +777,12 @@ mod tests {
             creation_timestamp_rfc3339: None,
             parent_refs: vec![],
             listeners: vec![GatewayListenerSnap {
-                name: "https".into(),
+                name: "alt".into(),
                 port: 443,
-                protocol: "HTTPS".into(),
+                protocol: "HTTP".into(),
                 hostname: None,
                 allowed_routes: None,
+                tls: None,
             }],
         }];
         let effective_listeners = merge_effective_listeners(&listeners, &listener_sets);
@@ -698,6 +791,8 @@ mod tests {
             gateway_name: "gw".into(),
             gateway_class_name: "gc".into(),
             gateway_generation: 1,
+            gateway_addresses: vec![],
+            gateway_infrastructure: None,
             listeners,
             effective_listeners,
             listener_sets,
@@ -767,10 +862,73 @@ mod tests {
             ir.routes.iter().any(|r| r
                 .listener
                 .as_ref()
-                .is_some_and(|l| l.section_name == "https" && l.parent_kind == "ListenerSet")),
+                .is_some_and(|l| l.section_name == "alt" && l.parent_kind == "ListenerSet")),
             "{:?}",
             ir.routes
         );
+    }
+
+    #[test]
+    fn https_listener_errors_without_pem() {
+        let listeners = vec![GatewayListenerSnap {
+            name: "https".into(),
+            port: 443,
+            protocol: "HTTPS".into(),
+            hostname: None,
+            allowed_routes: None,
+            tls: Some(crate::snapshot::GatewayListenerTlsSnap {
+                mode: Some("Terminate".into()),
+                certificate_refs: vec![],
+            }),
+        }];
+        let effective_listeners = merge_effective_listeners(&listeners, &[]);
+        let mut snap = minimal_cluster();
+        snap.listeners = listeners;
+        snap.effective_listeners = effective_listeners;
+        let (_, rep) = ir_from_cluster(&snap);
+        assert!(rep.has_errors());
+    }
+
+    #[test]
+    fn https_listener_ok_with_resolved_pem() {
+        let listeners = vec![GatewayListenerSnap {
+            name: "https".into(),
+            port: 443,
+            protocol: "HTTPS".into(),
+            hostname: None,
+            allowed_routes: None,
+            tls: Some(crate::snapshot::GatewayListenerTlsSnap {
+                mode: Some("Terminate".into()),
+                certificate_refs: vec![],
+            }),
+        }];
+        let mut effective_listeners = merge_effective_listeners(&listeners, &[]);
+        effective_listeners[0].tls_cert_pem = b"CERT".to_vec();
+        effective_listeners[0].tls_key_pem = b"KEY".to_vec();
+        let mut snap = minimal_cluster();
+        snap.listeners = listeners;
+        snap.effective_listeners = effective_listeners;
+        let (ir, rep) = ir_from_cluster(&snap);
+        assert!(!rep.has_errors(), "{:?}", rep.errors);
+        assert!(ir
+            .listeners
+            .iter()
+            .any(|l| l.bind_port == 443 && !l.tls_cert_pem.is_empty()));
+    }
+
+    #[test]
+    fn route_attachment_counts_recorded() {
+        let (ir, rep) = ir_from_cluster(&minimal_cluster());
+        assert!(!rep.listener_route_attachment_counts.is_empty());
+        let lk = crate::ir::ListenerAttachmentIr {
+            parent_kind: "Gateway".into(),
+            parent_namespace: "default".into(),
+            parent_name: "gw".into(),
+            section_name: "http".into(),
+            port: 80,
+        };
+        assert!(rep.attachment_count_for_listener_key(&lk) >= 1);
+        assert!(!ir.routes.is_empty());
     }
 
     #[test]

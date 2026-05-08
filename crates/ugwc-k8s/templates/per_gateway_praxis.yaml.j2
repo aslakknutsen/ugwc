@@ -11,6 +11,9 @@ metadata:
     gateway.networking.k8s.io/gateway-name: {{ gateway_name }}
     gateway.networking.k8s.io/gateway-class-name: {{ gateway_class }}
     gateway.ugwc.io/managed: ugwc-per-gateway
+{% for il in infrastructure_labels %}
+    {{ il.key }}: {{ il.value_json }}
+{% endfor %}
   ownerReferences:
     - apiVersion: gateway.networking.k8s.io/v1
       kind: Gateway
@@ -32,6 +35,9 @@ metadata:
     gateway.networking.k8s.io/gateway-name: {{ gateway_name }}
     gateway.networking.k8s.io/gateway-class-name: {{ gateway_class }}
     gateway.ugwc.io/managed: ugwc-per-gateway
+{% for il in infrastructure_labels %}
+    {{ il.key }}: {{ il.value_json }}
+{% endfor %}
   ownerReferences:
     - apiVersion: gateway.networking.k8s.io/v1
       kind: Gateway
@@ -53,6 +59,9 @@ spec:
         gateway.networking.k8s.io/gateway-class-name: {{ gateway_class }}
         gateway.ugwc.io/managed: ugwc-per-gateway
         sidecar.istio.io/inject: "false"
+{% for il in infrastructure_labels %}
+        {{ il.key }}: {{ il.value_json }}
+{% endfor %}
       annotations:
         prometheus.io/path: /metrics
         prometheus.io/port: "15021"

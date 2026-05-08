@@ -1,5 +1,7 @@
 //! Pure compile pipeline: [`crate::ir::IrSnapshot`] + [`CompileReport`].
 
+use std::collections::BTreeMap;
+
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
@@ -32,12 +34,34 @@ pub enum CoreError {
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct CompileReport {
     pub errors: Vec<ObjectRefErr>,
+    /// Count of compiled HTTPRoute rules attached per listener (`parent_kind|parent_ns|parent_name|section|port`).
+    pub listener_route_attachment_counts: BTreeMap<String, u32>,
 }
 
 impl CompileReport {
     #[must_use]
     pub fn has_errors(&self) -> bool {
         !self.errors.is_empty()
+    }
+
+    pub fn record_listener_route_attachment(&mut self, lk: &crate::ir::ListenerAttachmentIr) {
+        let k = format!(
+            "{}|{}|{}|{}|{}",
+            lk.parent_kind, lk.parent_namespace, lk.parent_name, lk.section_name, lk.port
+        );
+        *self.listener_route_attachment_counts.entry(k).or_insert(0) += 1;
+    }
+
+    #[must_use]
+    pub fn attachment_count_for_listener_key(&self, lk: &crate::ir::ListenerAttachmentIr) -> i32 {
+        let k = format!(
+            "{}|{}|{}|{}|{}",
+            lk.parent_kind, lk.parent_namespace, lk.parent_name, lk.section_name, lk.port
+        );
+        self.listener_route_attachment_counts
+            .get(&k)
+            .copied()
+            .unwrap_or(0) as i32
     }
 }
 
@@ -144,6 +168,7 @@ pub fn compile(policy: &FailurePolicy, input: &CompileInput) -> Result<CompileOu
 
     let mut report = CompileReport {
         errors: input.invalid_refs.clone(),
+        listener_route_attachment_counts: BTreeMap::new(),
     };
 
     let mut snapshot = if let Some(fix) = &input.fixture {
@@ -152,6 +177,7 @@ pub fn compile(policy: &FailurePolicy, input: &CompileInput) -> Result<CompileOu
         let (mut snap, cluster_report) = ir_from_cluster(cluster);
         snap.scope = scope.clone();
         report.errors.extend(cluster_report.errors);
+        report.listener_route_attachment_counts = cluster_report.listener_route_attachment_counts;
         snap
     } else {
         IrSnapshot {
@@ -258,6 +284,7 @@ mod tests {
                 name: "svc".into(),
                 reason: "BackendNotFound".into(),
             }],
+            ..Default::default()
         };
         assert_eq!(
             http_route_resolved_refs_row(&report, &route),
@@ -282,6 +309,7 @@ mod tests {
                 name: "r".into(),
                 reason: "RefNotPermitted".into(),
             }],
+            ..Default::default()
         };
         assert_eq!(
             http_route_resolved_refs_row(&report, &route),

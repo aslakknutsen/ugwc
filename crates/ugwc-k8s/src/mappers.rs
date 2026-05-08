@@ -85,6 +85,8 @@ mod tests {
                 gateway_class_name: "cls".into(),
                 listeners: vec![],
                 allowed_listeners: None,
+                addresses: vec![],
+                infrastructure: None,
             },
             status: Default::default(),
         };

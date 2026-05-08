@@ -15,7 +15,7 @@ use tracing::{debug, warn};
 
 use crate::resources::Gateway;
 
-pub use template::NamePort;
+pub use template::{InfraLabelRow, NamePort};
 
 #[derive(Debug, Error)]
 pub enum ProvisionError {
@@ -200,6 +200,21 @@ pub async fn reconcile_per_gateway_praxis(
     let container_ports = container_port_rows(&listener_pairs);
     let service_ports = service_port_rows(&listener_pairs);
 
+    let infrastructure_labels: Vec<InfraLabelRow> = gateway
+        .spec
+        .infrastructure
+        .as_ref()
+        .map(|inf| {
+            inf.labels
+                .iter()
+                .map(|(k, v)| InfraLabelRow {
+                    key: k.clone(),
+                    value_json: json_scalar(v.as_str()),
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+
     let insecure_str = if args.xds_insecure { "true" } else { "false" };
 
     let ctx = template::PerGatewayTemplateContext {
@@ -217,6 +232,7 @@ pub async fn reconcile_per_gateway_praxis(
         gateway_name_json: json_scalar(gw_name),
         container_ports: &container_ports,
         service_ports: &service_ports,
+        infrastructure_labels: &infrastructure_labels,
     };
 
     let rendered = template::render_per_gateway_praxis(&ctx)?;

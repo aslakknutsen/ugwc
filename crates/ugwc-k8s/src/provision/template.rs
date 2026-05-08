@@ -22,6 +22,13 @@ pub struct NamePort {
     pub port: i32,
 }
 
+/// Key/value row for `Gateway.spec.infrastructure.labels` merged into workload labels.
+#[derive(Clone, Serialize)]
+pub struct InfraLabelRow {
+    pub key: String,
+    pub value_json: String,
+}
+
 /// Values substituted into [`PER_GATEWAY_PRAXIS_TEMPLATE`].
 #[derive(Serialize)]
 pub struct PerGatewayTemplateContext<'a> {
@@ -40,6 +47,7 @@ pub struct PerGatewayTemplateContext<'a> {
     pub gateway_name_json: String,
     pub container_ports: &'a [NamePort],
     pub service_ports: &'a [NamePort],
+    pub infrastructure_labels: &'a [InfraLabelRow],
 }
 
 pub fn render_per_gateway_praxis(
@@ -140,6 +148,7 @@ mod tests {
             gateway_name_json: serde_json::to_string("gw1").unwrap(),
             container_ports: &ports,
             service_ports: &ports[1..],
+            infrastructure_labels: &[],
         };
         let out = render_per_gateway_praxis(&ctx).expect("render");
         assert!(out.contains("kind: ServiceAccount"));

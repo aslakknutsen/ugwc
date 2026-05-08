@@ -2,22 +2,24 @@
 
 use std::collections::{BTreeMap, HashSet};
 
-use k8s_openapi::api::core::v1::{Namespace, Service};
+use k8s_openapi::api::core::v1::{Namespace, Secret, Service};
 use k8s_openapi::api::discovery::v1::EndpointSlice;
 use k8s_openapi::apimachinery::pkg::util::intstr::IntOrString;
 use kube::api::ListParams;
 use kube::{Api, Client};
 use thiserror::Error;
 use tracing::warn;
+use ugwc_core::http_route_attachment::reference_grant_permits_gateway_secret_ref;
 use ugwc_core::listener_merge::merge_effective_listeners;
 use ugwc_core::snapshot::{
     AllowedListenersSnap, AllowedRoutesNamespacesSnap, AllowedRoutesSnap, ClusterSnapshot,
-    EndpointPortSnap, EndpointSliceSnap, EndpointSnap, GatewayClassSnap, GatewayListenerSnap,
+    EffectiveListenerSnap, EndpointPortSnap, EndpointSliceSnap, EndpointSnap, GatewayAddressSnap,
+    GatewayClassSnap, GatewayInfrastructureSnap, GatewayListenerSnap, GatewayListenerTlsSnap,
     HttpBackendRefSnap, HttpHeaderFilterSnap, HttpHeaderMatchSnap, HttpHeaderNameValueSnap,
     HttpPathMatchSnap, HttpPathModifierSnap, HttpRequestMatchSnap, HttpRequestRedirectFilterSnap,
     HttpRouteFilterSnap, HttpRouteRuleSnap, HttpRouteSnap, ListenerNamespacesSnap, ListenerSetSnap,
     ParentRefSnap, ReferenceGrantFromSnap, ReferenceGrantSnap, ReferenceGrantToSnap,
-    RouteGroupKindSnap, ServicePortSnap, ServiceSnap,
+    RouteGroupKindSnap, SecretObjectReferenceSnap, ServicePortSnap, ServiceSnap,
 };
 
 use crate::resources::{
@@ -148,7 +150,103 @@ fn gateway_listener_to_snap(l: &crate::resources::GatewayListenerSpec) -> Gatewa
         },
         hostname: l.hostname.clone(),
         allowed_routes: l.allowed_routes.as_ref().map(allowed_routes_snap),
+        tls: l.tls.as_ref().map(listener_tls_to_snap),
     }
+}
+
+fn listener_tls_to_snap(t: &crate::resources::ListenerTlsSpec) -> GatewayListenerTlsSnap {
+    GatewayListenerTlsSnap {
+        mode: t.mode.clone(),
+        certificate_refs: t
+            .certificate_refs
+            .iter()
+            .map(|r| SecretObjectReferenceSnap {
+                group: r.group.clone(),
+                kind: r.kind.clone(),
+                name: r.name.clone(),
+                namespace: r.namespace.clone(),
+            })
+            .collect(),
+    }
+}
+
+fn extract_tls_pem_from_secret(sec: &Secret) -> Result<(Vec<u8>, Vec<u8>), String> {
+    let data = sec
+        .data
+        .as_ref()
+        .ok_or_else(|| "Secret has no data".to_string())?;
+    let crt = data
+        .get("tls.crt")
+        .map(|b| b.0.clone())
+        .ok_or_else(|| "missing tls.crt".to_string())?;
+    let key = data
+        .get("tls.key")
+        .map(|b| b.0.clone())
+        .ok_or_else(|| "missing tls.key".to_string())?;
+    Ok((crt, key))
+}
+
+/// Resolve `certificateRefs` into PEM material on HTTPS listeners (same-namespace or via ReferenceGrant).
+async fn resolve_gateway_listener_tls(
+    client: &Client,
+    gateway_ns: &str,
+    grants: &[ReferenceGrantSnap],
+    effective: &mut [EffectiveListenerSnap],
+) -> Result<(), LoaderError> {
+    for e in effective.iter_mut() {
+        if e.conflicted {
+            continue;
+        }
+        let proto = e.protocol.trim().to_ascii_uppercase();
+        if proto != "HTTPS" {
+            continue;
+        }
+        let mode = e
+            .tls
+            .as_ref()
+            .and_then(|t| t.mode.as_deref())
+            .unwrap_or("Terminate");
+        if mode.eq_ignore_ascii_case("Passthrough") {
+            e.tls_resolve_error = Some("UnsupportedValue: HTTPS TLS Passthrough".into());
+            continue;
+        }
+        let refs = e.tls.as_ref().map(|t| &t.certificate_refs[..]).unwrap_or(&[]);
+        if refs.is_empty() {
+            e.tls_resolve_error =
+                Some("InvalidCertificateRef: HTTPS listener requires certificateRefs".into());
+            continue;
+        }
+        let r = &refs[0];
+        let kind = r.kind.as_deref().unwrap_or("Secret");
+        let group = r.group.as_deref().unwrap_or("");
+        if kind != "Secret" || (!group.is_empty() && group != "") {
+            e.tls_resolve_error = Some(format!(
+                "InvalidCertificateRef: unsupported certificate ref {group}/{kind}"
+            ));
+            continue;
+        }
+        let secret_ns = r.namespace.as_deref().unwrap_or(gateway_ns);
+        if !reference_grant_permits_gateway_secret_ref(grants, gateway_ns, secret_ns, &r.name) {
+            e.tls_resolve_error = Some("RefNotPermitted".into());
+            continue;
+        }
+        let api: Api<Secret> = Api::namespaced(client.clone(), secret_ns);
+        match api.get(&r.name).await {
+            Ok(sec) => match extract_tls_pem_from_secret(&sec) {
+                Ok((crt, key)) => {
+                    e.tls_cert_pem = crt;
+                    e.tls_key_pem = key;
+                }
+                Err(msg) => {
+                    e.tls_resolve_error = Some(format!("InvalidCertificateRef: {msg}"));
+                }
+            },
+            Err(_) => {
+                e.tls_resolve_error = Some("InvalidCertificateRef: Secret not found".into());
+            }
+        }
+    }
+    Ok(())
 }
 
 fn http_header_filter_snap(h: &crate::resources::HTTPHeaderFilterSpec) -> HttpHeaderFilterSnap {
@@ -399,7 +497,7 @@ pub async fn load_cluster_snapshot(
         .map(|ls| (ls.namespace.clone(), ls.name.clone()))
         .collect();
 
-    let effective_listeners = merge_effective_listeners(&listeners, &listener_sets);
+    let mut effective_listeners = merge_effective_listeners(&listeners, &listener_sets);
 
     let route_api: Api<HTTPRoute> = Api::all(client.clone());
     let routes_list = route_api.list(&ListParams::default()).await?;
@@ -539,6 +637,14 @@ pub async fn load_cluster_snapshot(
         }
     }
 
+    resolve_gateway_listener_tls(
+        client,
+        gateway_ns,
+        &reference_grants,
+        &mut effective_listeners,
+    )
+    .await?;
+
     let gateway_class = if gw.spec.gateway_class_name.is_empty() {
         None
     } else {
@@ -558,6 +664,19 @@ pub async fn load_cluster_snapshot(
         gateway_name: gateway_name.to_string(),
         gateway_class_name: gw.spec.gateway_class_name.clone(),
         gateway_generation: gw.metadata.generation.unwrap_or(0),
+        gateway_addresses: gw
+            .spec
+            .addresses
+            .iter()
+            .map(|a| GatewayAddressSnap {
+                type_: a.type_.clone(),
+                value: a.value.clone(),
+            })
+            .collect(),
+        gateway_infrastructure: gw.spec.infrastructure.as_ref().map(|inf| GatewayInfrastructureSnap {
+            labels: inf.labels.clone(),
+            annotations: inf.annotations.clone(),
+        }),
         listeners,
         effective_listeners,
         listener_sets,

@@ -5,7 +5,7 @@ use std::collections::BTreeMap;
 use uuid::Uuid;
 
 /// Schema version embedded on every snapshot (bump when wire/IR changes).
-pub const IR_VERSION: u32 = 2;
+pub const IR_VERSION: u32 = 3;
 
 /// Per-dataplane scope identity for sharded xDS versions (see module docs).
 #[derive(Clone, Debug, Eq, Hash, PartialEq, Ord, PartialOrd)]
@@ -59,6 +59,15 @@ pub struct ListenerIr {
     pub parent_name: String,
     #[serde(default)]
     pub conflicted: bool,
+    /// Listener hostname (SNI / virtual host); unset ⇒ wildcard in xDS.
+    #[serde(default)]
+    pub hostname: Option<String>,
+    /// PEM TLS certificate (terminate mode), resolved by loader.
+    #[serde(default)]
+    pub tls_cert_pem: Vec<u8>,
+    /// PEM TLS private key (terminate mode), resolved by loader.
+    #[serde(default)]
+    pub tls_key_pem: Vec<u8>,
 }
 
 /// Route binding to a specific effective listener (parent + `sectionName` + port).

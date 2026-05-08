@@ -33,6 +33,9 @@ impl HttpCompileFixture {
                 parent_namespace: "default".into(),
                 parent_name: "gw".into(),
                 conflicted: false,
+                hostname: None,
+                tls_cert_pem: vec![],
+                tls_key_pem: vec![],
             }],
             routes: vec![RouteRuleIr {
                 name: "hr".into(),

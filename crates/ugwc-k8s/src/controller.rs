@@ -9,6 +9,7 @@ use std::collections::HashSet;
 
 use futures::StreamExt;
 use k8s_openapi::api::discovery::v1::EndpointSlice;
+use k8s_openapi::api::core::v1::Secret;
 use kube::api::ListParams;
 use kube::runtime::watcher::{watcher, Config as WatcherConfig};
 use kube::runtime::WatchStreamExt;
@@ -16,7 +17,10 @@ use kube::{Api, Client, ResourceExt};
 use tokio::sync::mpsc;
 use tracing::{info, instrument, warn};
 
-use crate::resources::{Gateway, GatewayClass, HTTPRoute, ListenerSet, ReferenceGrant};
+use crate::resources::{
+    gateway_spec_references_secret, listenerset_spec_references_secret, Gateway, GatewayClass,
+    HTTPRoute, ListenerSet, ReferenceGrant,
+};
 
 pub type ReconcileFuture = Pin<Box<dyn Future<Output = Result<(), String>> + Send>>;
 pub type ReconcileFn = Arc<dyn Fn(String, String) -> ReconcileFuture + Send + Sync>;
@@ -313,6 +317,72 @@ pub async fn run_gateway_controller(
             }
         }
         info!("gatewayclass watcher shutdown");
+    });
+
+    let sd_sec = shutdown.clone();
+    let c_sec = client.clone();
+    let tx_sec = tx.clone();
+    tokio::spawn(async move {
+        let api: Api<Secret> = Api::all(c_sec.clone());
+        let cfg = WatcherConfig::default().any_semantic();
+        let mut stream = Box::pin(watcher(api, cfg).applied_objects());
+        loop {
+            tokio::select! {
+                _ = sd_sec.cancelled() => break,
+                ev = stream.next() => {
+                    match ev {
+                        Some(Ok(sec)) => {
+                            let sns = sec.namespace().unwrap_or_default();
+                            let sn = sec.name_any();
+                            let gw_api: Api<Gateway> = Api::all(c_sec.clone());
+                            match gw_api.list(&ListParams::default()).await {
+                                Ok(list) => {
+                                    for gw in list.items {
+                                        let gwns = gw.namespace().unwrap_or_default();
+                                        if gateway_spec_references_secret(&gw.spec, &gwns, &sns, &sn) {
+                                            if tx_sec.send((gwns, gw.name_any())).await.is_err() {
+                                                return;
+                                            }
+                                        }
+                                    }
+                                }
+                                Err(e) => warn!(error = %e, "list gateways after secret change"),
+                            }
+                            let ls_api: Api<ListenerSet> = Api::all(c_sec.clone());
+                            match ls_api.list(&ListParams::default()).await {
+                                Ok(ls_list) => {
+                                    for ls in ls_list.items {
+                                        let ls_ns = ls.namespace().unwrap_or_default();
+                                        if !listenerset_spec_references_secret(&ls.spec, &ls_ns, &sns, &sn) {
+                                            continue;
+                                        }
+                                        for pr in &ls.spec.parent_refs {
+                                            let pg = pr.group.as_deref().unwrap_or("gateway.networking.k8s.io");
+                                            let pk = pr.kind.as_deref().unwrap_or("Gateway");
+                                            if pg != "gateway.networking.k8s.io" || pk != "Gateway" {
+                                                continue;
+                                            }
+                                            let gwns = pr
+                                                .namespace
+                                                .clone()
+                                                .or(ls.metadata.namespace.clone())
+                                                .unwrap_or_default();
+                                            if tx_sec.send((gwns, pr.name.clone())).await.is_err() {
+                                                return;
+                                            }
+                                        }
+                                    }
+                                }
+                                Err(e) => warn!(error = %e, "list listenersets after secret change"),
+                            }
+                        }
+                        Some(Err(e)) => warn!(error = %e, "secret watch stream"),
+                        None => break,
+                    }
+                }
+            }
+        }
+        info!("secret watcher shutdown");
     });
 
     loop {

@@ -5,6 +5,28 @@
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
+/// TLS stanza on a Gateway API listener (`ListenerTLSConfig` subset).
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+pub struct GatewayListenerTlsSnap {
+    /// `Terminate` | `Passthrough` when set.
+    #[serde(default)]
+    pub mode: Option<String>,
+    #[serde(rename = "certificateRefs", default)]
+    pub certificate_refs: Vec<SecretObjectReferenceSnap>,
+}
+
+/// Reference to a Kubernetes `Secret` (TLS certs).
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct SecretObjectReferenceSnap {
+    #[serde(default)]
+    pub group: Option<String>,
+    #[serde(default)]
+    pub kind: Option<String>,
+    pub name: String,
+    #[serde(default)]
+    pub namespace: Option<String>,
+}
+
 /// One `Gateway.spec.listeners[]` row (HTTP/HTTPS focused).
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
 pub struct GatewayListenerSnap {
@@ -16,6 +38,26 @@ pub struct GatewayListenerSnap {
     pub hostname: Option<String>,
     #[serde(rename = "allowedRoutes", default)]
     pub allowed_routes: Option<AllowedRoutesSnap>,
+    #[serde(default)]
+    pub tls: Option<GatewayListenerTlsSnap>,
+}
+
+/// Requested `Gateway.spec.addresses[]` entry.
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+pub struct GatewayAddressSnap {
+    #[serde(rename = "type", default)]
+    pub type_: Option<String>,
+    #[serde(default)]
+    pub value: String,
+}
+
+/// `Gateway.spec.infrastructure` subset for dataplane objects.
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+pub struct GatewayInfrastructureSnap {
+    #[serde(default)]
+    pub labels: BTreeMap<String, String>,
+    #[serde(default)]
+    pub annotations: BTreeMap<String, String>,
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
@@ -301,6 +343,15 @@ pub struct EffectiveListenerSnap {
     pub conflicted: bool,
     #[serde(rename = "allowedRoutes", default)]
     pub allowed_routes: Option<AllowedRoutesSnap>,
+    #[serde(default)]
+    pub tls: Option<GatewayListenerTlsSnap>,
+    /// Resolved `tls.crt` / `tls.key` from referenced Secret (loader-only).
+    #[serde(default)]
+    pub tls_cert_pem: Vec<u8>,
+    #[serde(default)]
+    pub tls_key_pem: Vec<u8>,
+    #[serde(default)]
+    pub tls_resolve_error: Option<String>,
 }
 
 /// Bounded cluster state for compiling one `Gateway`.
@@ -312,6 +363,12 @@ pub struct ClusterSnapshot {
     pub gateway_class_name: String,
     #[serde(rename = "gatewayGeneration", default)]
     pub gateway_generation: i64,
+    /// `Gateway.spec.addresses` (requested frontend addresses).
+    #[serde(rename = "gatewayAddresses", default)]
+    pub gateway_addresses: Vec<GatewayAddressSnap>,
+    /// `Gateway.spec.infrastructure` labels/annotations for provisioned workloads.
+    #[serde(rename = "gatewayInfrastructure", default)]
+    pub gateway_infrastructure: Option<GatewayInfrastructureSnap>,
     /// Inline `Gateway.spec.listeners` only (status rows match this list).
     #[serde(default)]
     pub listeners: Vec<GatewayListenerSnap>,

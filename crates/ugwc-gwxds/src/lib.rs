@@ -10,7 +10,7 @@ pub mod istio {
 
 use istio::gwxds::{
     Backend, HeaderNameValue, Listener, Protocol, RequestHeaderModifier, RequestRedirect, Resource,
-    Route, RouteMatch,
+    Route, RouteMatch, TlsConfig,
 };
 use ugwc_core::ir::TlsMode;
 use ugwc_core::IrSnapshot;
@@ -110,12 +110,30 @@ pub fn encode_ir(ir: &IrSnapshot) -> Vec<Resource> {
         } else {
             Protocol::Http as i32
         };
+        let hostname = ln
+            .hostname
+            .clone()
+            .filter(|h| !h.trim().is_empty())
+            .unwrap_or_else(|| "*".into());
+        let tls = if matches!(ln.tls, TlsMode::Terminate)
+            && !ln.tls_cert_pem.is_empty()
+            && !ln.tls_key_pem.is_empty()
+        {
+            Some(TlsConfig {
+                cert_pem: ln.tls_cert_pem.clone(),
+                key_pem: ln.tls_key_pem.clone(),
+                ca_pem: vec![],
+                min_version: String::new(),
+            })
+        } else {
+            None
+        };
         let listener = Listener {
             key: listener_key.clone(),
-            hostname: String::new(),
+            hostname,
             port: u32::from(ln.bind_port),
             protocol,
-            tls: None,
+            tls,
             allowed_routes: vec!["gateway.networking.k8s.io/HTTPRoute".into()],
         };
 
@@ -201,7 +219,7 @@ pub fn encode_ir(ir: &IrSnapshot) -> Vec<Resource> {
             key: listener_key.clone(),
             listener: Some(Listener {
                 key: listener_key,
-                hostname: String::new(),
+                hostname: "*".into(),
                 port: 80,
                 protocol: Protocol::Http as i32,
                 tls: None,
@@ -216,6 +234,7 @@ pub fn encode_ir(ir: &IrSnapshot) -> Vec<Resource> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ugwc_core::ir::TlsMode;
     use ugwc_core::http_ir::HttpCompileFixture;
 
     #[test]
@@ -240,5 +259,22 @@ mod tests {
         let m = &r[0].routes[0].matches[0];
         assert_eq!(m.path_exact, "/foo");
         assert!(m.path_prefix.is_empty());
+    }
+
+    #[test]
+    fn encode_https_tls_and_hostname() {
+        let mut f = HttpCompileFixture::minimal_http();
+        f.listeners[0].tls = TlsMode::Terminate;
+        f.listeners[0].hostname = Some("gw.example.com".into());
+        f.listeners[0].tls_cert_pem = b"BEGIN CERT".to_vec();
+        f.listeners[0].tls_key_pem = b"BEGIN KEY".to_vec();
+        let ir = ugwc_core::http_ir::build_http_ir_from_fixture(&f);
+        let r = encode_ir(&ir);
+        let l = r[0].listener.as_ref().expect("listener");
+        assert_eq!(l.hostname, "gw.example.com");
+        assert!(
+            l.tls.as_ref().is_some_and(|t| !t.cert_pem.is_empty()),
+            "{l:?}"
+        );
     }
 }

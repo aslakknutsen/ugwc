@@ -1,6 +1,6 @@
 //! Merge `Gateway.spec.listeners` with attached [`crate::snapshot::ListenerSetSnap`] rows.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use crate::snapshot::{
     EffectiveListenerSnap, GatewayListenerSnap, ListenerParentSnap, ListenerSetSnap,
@@ -31,6 +31,10 @@ pub fn merge_effective_listeners(
             hostname: l.hostname.clone(),
             conflicted: false,
             allowed_routes: l.allowed_routes.clone(),
+            tls: l.tls.clone(),
+            tls_cert_pem: Vec::new(),
+            tls_key_pem: Vec::new(),
+            tls_resolve_error: None,
         })
         .collect();
 
@@ -47,11 +51,16 @@ pub fn merge_effective_listeners(
                 hostname: l.hostname.clone(),
                 conflicted: false,
                 allowed_routes: l.allowed_routes.clone(),
+                tls: l.tls.clone(),
+                tls_cert_pem: Vec::new(),
+                tls_key_pem: Vec::new(),
+                tls_resolve_error: None,
             });
         }
     }
 
     mark_distinctness_conflicts(&mut out);
+    mark_tcp_layer7_port_conflicts(&mut out);
     out
 }
 
@@ -84,6 +93,28 @@ fn mark_distinctness_conflicts(effective: &mut [EffectiveListenerSnap]) {
     }
 }
 
+/// Gateway API: TCP listeners sharing a port with HTTP/HTTPS/TLS listeners are indistinct.
+fn mark_tcp_layer7_port_conflicts(effective: &mut [EffectiveListenerSnap]) {
+    let mut tcp_ports: HashSet<u16> = HashSet::new();
+    for e in effective.iter() {
+        if e.protocol == "TCP" {
+            tcp_ports.insert(e.port);
+        }
+    }
+    if tcp_ports.is_empty() {
+        return;
+    }
+    for e in effective.iter_mut() {
+        if !tcp_ports.contains(&e.port) {
+            continue;
+        }
+        let l7 = matches!(e.protocol.as_str(), "HTTP" | "HTTPS" | "TLS");
+        if e.protocol == "TCP" || l7 {
+            e.conflicted = true;
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -97,6 +128,7 @@ mod tests {
             protocol: "HTTP".into(),
             hostname: None,
             allowed_routes: None,
+            tls: None,
         }];
         let ls = vec![
             ListenerSetSnap {
@@ -111,6 +143,7 @@ mod tests {
                     protocol: "HTTP".into(),
                     hostname: None,
                     allowed_routes: None,
+                    tls: None,
                 }],
             },
             ListenerSetSnap {
@@ -125,6 +158,7 @@ mod tests {
                     protocol: "HTTP".into(),
                     hostname: None,
                     allowed_routes: None,
+                    tls: None,
                 }],
             },
         ];
@@ -144,6 +178,7 @@ mod tests {
                 protocol: "HTTP".into(),
                 hostname: Some("h.example.com".into()),
                 allowed_routes: None,
+                tls: None,
             },
             GatewayListenerSnap {
                 name: "y".into(),
@@ -151,10 +186,35 @@ mod tests {
                 protocol: "HTTP".into(),
                 hostname: Some("h.example.com".into()),
                 allowed_routes: None,
+                tls: None,
             },
         ];
         let m = merge_effective_listeners(&gw, &[]);
         assert!(m[0].conflicted);
         assert!(m[1].conflicted);
+    }
+
+    #[test]
+    fn tcp_and_https_same_port_conflict() {
+        let gw = vec![
+            GatewayListenerSnap {
+                name: "tcp".into(),
+                port: 443,
+                protocol: "TCP".into(),
+                hostname: None,
+                allowed_routes: None,
+                tls: None,
+            },
+            GatewayListenerSnap {
+                name: "https".into(),
+                port: 443,
+                protocol: "HTTPS".into(),
+                hostname: None,
+                allowed_routes: None,
+                tls: None,
+            },
+        ];
+        let m = merge_effective_listeners(&gw, &[]);
+        assert!(m.iter().all(|e| e.conflicted), "{m:?}");
     }
 }

@@ -11,6 +11,52 @@ use crate::loader::parent_reference_to_snap;
 use crate::resources::{Gateway, GatewayClass, HTTPRoute, ListenerSet};
 use ugwc_core::route_accepted_for_parent_ref;
 
+fn supported_kinds_json(
+    eff: Option<&ugwc_core::snapshot::EffectiveListenerSnap>,
+) -> Vec<serde_json::Value> {
+    let Some(e) = eff else {
+        return vec![serde_json::json!({"group": "gateway.networking.k8s.io", "kind": "HTTPRoute"})];
+    };
+    let proto = e.protocol.trim().to_ascii_uppercase();
+    let http_like = proto == "HTTP" || proto == "HTTPS";
+    if !http_like {
+        return vec![];
+    }
+    let kinds = e.allowed_routes.as_ref().map(|a| &a.kinds[..]).unwrap_or(&[]);
+    if kinds.is_empty() {
+        return vec![serde_json::json!({"group": "gateway.networking.k8s.io", "kind": "HTTPRoute"})];
+    }
+    kinds
+        .iter()
+        .map(|k| {
+            serde_json::json!({"group": k.group.as_deref().unwrap_or("gateway.networking.k8s.io"), "kind": &k.kind})
+        })
+        .collect()
+}
+
+fn gateway_listener_https_cert_unresolved(
+    cluster: Option<&ugwc_core::ClusterSnapshot>,
+    lname: &str,
+) -> bool {
+    let Some(c) = cluster else {
+        return false;
+    };
+    let Some(eff) = c.effective_listeners.iter().find(|e| {
+        matches!(
+            e.parent,
+            ugwc_core::snapshot::ListenerParentSnap::InlineGateway
+        ) && e.section_name == lname
+    }) else {
+        return false;
+    };
+    if eff.protocol.trim().to_ascii_uppercase() != "HTTPS" {
+        return false;
+    }
+    eff.tls_resolve_error.is_some()
+        || eff.tls_cert_pem.is_empty()
+        || eff.tls_key_pem.is_empty()
+}
+
 /// Apply Gateway + listener status after a compile/reconcile pass.
 ///
 /// Conformance helpers require every condition to carry `observedGeneration`
@@ -29,13 +75,8 @@ pub async fn apply_gateway_reconciled_status(
     }
 
     let gen = gateway.metadata.generation.unwrap_or(0);
+    let gw_ns = gateway.metadata.namespace.as_deref().unwrap_or("");
     let programmed_ok = !outcome.report.has_errors() && !outcome.snapshot.meta.has_errors;
-    let refs_broken = outcome.report.errors.iter().any(|e| {
-        e.reason == "BackendNotFound"
-            || e.reason == "NoReadyEndpoints"
-            || e.reason == "UnsupportedBackendKind"
-            || e.reason == "RefNotPermitted"
-    });
     let reason = if programmed_ok {
         "Programmed"
     } else {
@@ -70,10 +111,62 @@ pub async fn apply_gateway_reconciled_status(
             .unwrap_or(false)
     };
 
+    let inline_listener_conflicted = cluster
+        .map(|c| {
+            c.effective_listeners.iter().any(|e| {
+                matches!(
+                    e.parent,
+                    ugwc_core::snapshot::ListenerParentSnap::InlineGateway
+                ) && e.conflicted
+            })
+        })
+        .unwrap_or(false);
+
+    let gateway_spec_errors = outcome.report.errors.iter().any(|e| {
+        e.kind == "Gateway" && e.namespace == gw_ns && e.name == name
+    });
+
+    let (gw_acc_status, gw_acc_reason, gw_acc_msg) = if inline_listener_conflicted {
+        (
+            "False",
+            "ListenersNotValid",
+            "one or more inline listeners are conflicted",
+        )
+    } else if gateway_spec_errors {
+        (
+            "False",
+            "Invalid",
+            "gateway has spec or TLS resolution errors — see compile report",
+        )
+    } else {
+        ("True", "Accepted", "ugwc reconciled gateway")
+    };
+
     let listener_status: Vec<serde_json::Value> = listener_names
         .iter()
         .map(|lname| {
             let conflicted = gateway_listener_conflicted(lname);
+            let spec_row = gateway.spec.listeners.iter().find(|l| l.name == *lname);
+            let port = spec_row.map(|l| l.port).unwrap_or(0);
+            let lk = ugwc_core::ListenerAttachmentIr {
+                parent_kind: "Gateway".into(),
+                parent_namespace: gw_ns.to_string(),
+                parent_name: name.to_string(),
+                section_name: (*lname).clone(),
+                port,
+            };
+            let attached = outcome.report.attachment_count_for_listener_key(&lk);
+
+            let eff = cluster.and_then(|c| {
+                c.effective_listeners.iter().find(|e| {
+                    matches!(
+                        e.parent,
+                        ugwc_core::snapshot::ListenerParentSnap::InlineGateway
+                    ) && e.section_name == *lname
+                })
+            });
+            let supported = supported_kinds_json(eff);
+
             let (prog_status, prog_reason) = if programmed_ok && !conflicted {
                 ("True", "Programmed")
             } else {
@@ -88,14 +181,15 @@ pub async fn apply_gateway_reconciled_status(
             } else {
                 ("True", "Accepted", "ugwc reconciled listener")
             };
-            let (res_status, res_reason, res_msg) = if refs_broken {
+            let cert_broken = gateway_listener_https_cert_unresolved(cluster, lname);
+            let (res_status, res_reason, res_msg) = if cert_broken {
                 (
                     "False",
-                    "BackendNotFound",
-                    "compile report lists backend/ref issues",
+                    "InvalidCertificateRef",
+                    "TLS certificate could not be resolved for this listener",
                 )
             } else {
-                ("True", "ResolvedRefs", "refs resolved for v0 slice")
+                ("True", "ResolvedRefs", "listener certificate refs resolved")
             };
             let mut conditions = vec![
                 serde_json::json!({
@@ -138,8 +232,8 @@ pub async fn apply_gateway_reconciled_status(
             }
             serde_json::json!({
                 "name": lname,
-                "supportedKinds": [],
-                "attachedRoutes": 0,
+                "supportedKinds": supported,
+                "attachedRoutes": attached,
                 "conditions": conditions
             })
         })
@@ -158,9 +252,9 @@ pub async fn apply_gateway_reconciled_status(
             "conditions": [
                 {
                     "type": "Accepted",
-                    "status": "True",
-                    "reason": "Accepted",
-                    "message": "ugwc reconciled gateway",
+                    "status": gw_acc_status,
+                    "reason": gw_acc_reason,
+                    "message": gw_acc_msg,
                     "lastTransitionTime": now,
                     "observedGeneration": gen
                 },
@@ -447,6 +541,33 @@ pub async fn apply_listenerset_reconciled_status(
                 ) && e.section_name == l.name
                     && e.conflicted
             });
+            let eff = snapshot.effective_listeners.iter().find(|e| {
+                matches!(
+                    &e.parent,
+                    ugwc_core::snapshot::ListenerParentSnap::ListenerSet {
+                        namespace,
+                        name,
+                    } if namespace == &ls_ns_name.0 && name == &ls_ns_name.1
+                ) && e.section_name == l.name
+            });
+            let supported = supported_kinds_json(eff);
+            let cert_broken = eff
+                .map(|e| {
+                    e.protocol.trim().to_ascii_uppercase() == "HTTPS"
+                        && (e.tls_resolve_error.is_some()
+                            || e.tls_cert_pem.is_empty()
+                            || e.tls_key_pem.is_empty())
+                })
+                .unwrap_or(false);
+            let lk = ugwc_core::ListenerAttachmentIr {
+                parent_kind: "ListenerSet".into(),
+                parent_namespace: ls_ns_name.0.clone(),
+                parent_name: ls_ns_name.1.clone(),
+                section_name: l.name.clone(),
+                port: l.port,
+            };
+            let attached = outcome.report.attachment_count_for_listener_key(&lk);
+
             let (acc_s, acc_r, acc_m) = if conflicted {
                 (
                     "False",
@@ -461,12 +582,29 @@ pub async fn apply_listenerset_reconciled_status(
             } else {
                 ("False", "Invalid")
             };
+            let (res_s, res_r, res_m) = if cert_broken {
+                (
+                    "False",
+                    "InvalidCertificateRef",
+                    "TLS certificate could not be resolved for this listener",
+                )
+            } else {
+                ("True", "ResolvedRefs", "listener certificate refs resolved")
+            };
             let mut conditions = vec![
                 serde_json::json!({
                     "type": "Accepted",
                     "status": acc_s,
                     "reason": acc_r,
                     "message": acc_m,
+                    "lastTransitionTime": now,
+                    "observedGeneration": gen
+                }),
+                serde_json::json!({
+                    "type": "ResolvedRefs",
+                    "status": res_s,
+                    "reason": res_r,
+                    "message": res_m,
                     "lastTransitionTime": now,
                     "observedGeneration": gen
                 }),
@@ -494,6 +632,8 @@ pub async fn apply_listenerset_reconciled_status(
             }
             serde_json::json!({
                 "name": l.name,
+                "supportedKinds": supported,
+                "attachedRoutes": attached,
                 "conditions": conditions
             })
         })

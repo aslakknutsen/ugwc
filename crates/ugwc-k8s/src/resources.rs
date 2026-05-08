@@ -24,6 +24,12 @@ pub struct GatewaySpec {
     /// Which namespaces may attach `ListenerSet` resources (default: none).
     #[serde(rename = "allowedListeners", default)]
     pub allowed_listeners: Option<AllowedListenersSpec>,
+    /// Requested addresses for this Gateway (Extended).
+    #[serde(default)]
+    pub addresses: Vec<GatewayAddressSpec>,
+    /// Labels/annotations for implementation-managed infrastructure (Extended).
+    #[serde(default)]
+    pub infrastructure: Option<GatewayInfrastructureSpec>,
 }
 
 /// Subset of `Gateway.spec.listeners[]` needed for status writes.
@@ -39,6 +45,46 @@ pub struct GatewayListenerSpec {
     /// [`Gateway` listener `allowedRoutes`](https://gateway-api.sigs.k8s.io/reference/spec/#gateway.networking.k8s.io/v1.Listener).
     #[serde(rename = "allowedRoutes", default)]
     pub allowed_routes: Option<AllowedRoutesSpec>,
+    #[serde(default)]
+    pub tls: Option<ListenerTlsSpec>,
+}
+
+/// Subset of `ListenerTLSConfig`.
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+pub struct ListenerTlsSpec {
+    #[serde(default)]
+    pub mode: Option<String>,
+    #[serde(rename = "certificateRefs", default)]
+    pub certificate_refs: Vec<SecretObjectReferenceSpec>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+pub struct SecretObjectReferenceSpec {
+    #[serde(default)]
+    pub group: Option<String>,
+    #[serde(default)]
+    pub kind: Option<String>,
+    pub name: String,
+    #[serde(default)]
+    pub namespace: Option<String>,
+}
+
+/// `Gateway.spec.addresses[]`.
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+pub struct GatewayAddressSpec {
+    #[serde(rename = "type", default)]
+    pub type_: Option<String>,
+    #[serde(default)]
+    pub value: String,
+}
+
+/// `Gateway.spec.infrastructure`.
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+pub struct GatewayInfrastructureSpec {
+    #[serde(default)]
+    pub labels: BTreeMap<String, String>,
+    #[serde(default)]
+    pub annotations: BTreeMap<String, String>,
 }
 
 /// `Listener.allowedRoutes` — which routes may attach.
@@ -111,6 +157,50 @@ pub struct ListenerSetSpec {
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 pub struct ListenerSetStatus {}
+
+/// Returns true if any listener TLS `certificateRefs` targets `secret_ns`/`secret_name`.
+#[must_use]
+pub fn gateway_spec_references_secret(
+    spec: &GatewaySpec,
+    gateway_ns: &str,
+    secret_ns: &str,
+    secret_name: &str,
+) -> bool {
+    for l in &spec.listeners {
+        let Some(ref tls) = l.tls else {
+            continue;
+        };
+        for r in &tls.certificate_refs {
+            let ns = r.namespace.as_deref().unwrap_or(gateway_ns);
+            if ns == secret_ns && r.name == secret_name {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// Same as [`gateway_spec_references_secret`] for a `ListenerSet` spec (namespace defaults to ListenerSet namespace).
+#[must_use]
+pub fn listenerset_spec_references_secret(
+    spec: &ListenerSetSpec,
+    listenerset_ns: &str,
+    secret_ns: &str,
+    secret_name: &str,
+) -> bool {
+    for l in &spec.listeners {
+        let Some(ref tls) = l.tls else {
+            continue;
+        };
+        for r in &tls.certificate_refs {
+            let ns = r.namespace.as_deref().unwrap_or(listenerset_ns);
+            if ns == secret_ns && r.name == secret_name {
+                return true;
+            }
+        }
+    }
+    false
+}
 
 /// Cluster-scoped `GatewayClass`.
 #[derive(CustomResource, Clone, Debug, Deserialize, Serialize)]
