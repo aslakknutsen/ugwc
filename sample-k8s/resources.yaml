@@ -1,0 +1,96 @@
+# Gateway API resources for manual testing of ugwc against cluster state (same layout as
+# praxis sample-xds/resources.yaml).
+#
+# GatewayClass name "istio-gwxds" and controller name "istio.io/gwxds-controller" match the
+# Istio fork constants (pkg/config/constants/constants.go) when testing together with istiod gwxds.
+#
+# ugwc: GatewayClass.spec.controllerName must appear in UGWC_CONTROLLER_NAMES (comma-separated).
+# With this file unchanged, run ugwc with e.g.:
+#
+#   UGWC_KUBE_ENABLE=1 \
+#   UGWC_KUBE_NAMESPACE=<same as GATEWAY_NAMESPACE> \
+#   UGWC_CONTROLLER_NAMES=istio.io/gwxds-controller \
+#   ugwc
+#
+# If you change spec.controllerName below to match crates/ugwc default (example.com/gateway-controller),
+# set UGWC_CONTROLLER_NAMES to that same string instead.
+#
+# GATEWAY_NAME and GATEWAY_NAMESPACE: replace manually or use envsubst:
+#
+#   GATEWAY_NAME=ugwc-gw GATEWAY_NAMESPACE=default envsubst < sample-k8s/resources.yaml | kubectl apply -f -
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: GatewayClass
+metadata:
+  name: ugwc-praxis
+spec:
+  controllerName: istio.io/gwxds-controller
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: Gateway
+metadata:
+  name: ${GATEWAY_NAME}
+  namespace: ${GATEWAY_NAMESPACE}
+spec:
+  gatewayClassName: ugwc-praxis 
+  listeners:
+    - name: http
+      port: 8080
+      protocol: HTTP
+      allowedRoutes:
+        namespaces:
+          from: Same
+---
+# Sample backend: a simple echo server to verify routing works end-to-end.
+apiVersion: v1
+kind: Service
+metadata:
+  name: echo
+  namespace: ${GATEWAY_NAMESPACE}
+spec:
+  selector:
+    app: echo
+  ports:
+    - port: 8080
+      targetPort: 3000
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: echo
+  namespace: ${GATEWAY_NAMESPACE}
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: echo
+  template:
+    metadata:
+      labels:
+        app: echo
+    spec:
+      containers:
+        - name: echo
+          image: registry.k8s.io/gateway-api/echo-basic:v20251204-v1.4.1
+          ports:
+            - containerPort: 3000
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: echo-route
+  namespace: ${GATEWAY_NAMESPACE}
+spec:
+  parentRefs:
+    - name: ${GATEWAY_NAME}
+      namespace: ${GATEWAY_NAMESPACE}
+  hostnames:
+    - "echo.example.com"
+  rules:
+    - matches:
+        - path:
+            type: PathPrefix
+            value: /
+      backendRefs:
+        - name: echo
+          port: 8080
