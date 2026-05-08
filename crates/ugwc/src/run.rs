@@ -226,13 +226,6 @@ pub async fn run(cfg: Config) -> Result<(), Box<dyn std::error::Error + Send + S
                                     metrics::record_dataplane_error();
                                     return Ok(());
                                 }
-                                let service_port = latest
-                                    .spec
-                                    .listeners
-                                    .first()
-                                    .map(|l| l.port)
-                                    .filter(|p| *p > 0)
-                                    .unwrap_or(8080);
                                 let scope = format!("{ns}/{name}");
                                 let args = ugwc_k8s::PraxisProvisionArgs {
                                     proxy_image: img.to_string(),
@@ -240,7 +233,7 @@ pub async fn run(cfg: Config) -> Result<(), Box<dyn std::error::Error + Send + S
                                     xds_insecure,
                                     xds_wire: xds_wire.clone(),
                                     gateway_scope: scope,
-                                    service_port,
+                                    gateway_class_name: latest.spec.gateway_class_name.clone(),
                                 };
                                 match ugwc_k8s::reconcile_per_gateway_praxis(
                                     &client_inner,

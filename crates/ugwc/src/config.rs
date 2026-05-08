@@ -66,7 +66,8 @@ pub struct Config {
     /// Host:port provisioned proxies use to dial xDS (e.g. `ugwc.ugwc-system.svc:18000`).
     #[serde(default)]
     pub control_plane_xds_bootstrap_addr: Option<String>,
-    /// Populated from [`implementation_profiles_path`](Self::implementation_profiles_path); not from env directly.
+    /// Built-in profiles merged with [`implementation_profiles_path`](Self::implementation_profiles_path)
+    /// (file entries override the same `controllerName` key). Not set directly from env.
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub implementation_profiles: HashMap<String, ImplementationProfile>,
 }
@@ -96,11 +97,14 @@ impl Config {
             .from_env()
             .map_err(|e: envy::Error| ConfigError::Addr("UGWC_*".into(), e.to_string()))?;
 
-        cfg.implementation_profiles = match &cfg.implementation_profiles_path {
+        let from_file = match &cfg.implementation_profiles_path {
             Some(p) => crate::implementation_profiles::load_from_path(p)
                 .map_err(ConfigError::Profiles)?,
             None => HashMap::new(),
         };
+        let mut profiles = crate::implementation_profiles::builtin_profiles();
+        profiles.extend(from_file);
+        cfg.implementation_profiles = profiles;
 
         cfg.validate_profiles()?;
         cfg.validate()?;

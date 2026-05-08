@@ -1,9 +1,31 @@
 //! Static JSON map: `GatewayClass.spec.controllerName` → implementation profile.
+//!
+//! Built-in profiles (see [`builtin_profiles`]) are merged at startup; entries from
+//! `UGWC_IMPLEMENTATION_PROFILES_PATH` override the same controller key.
 
 use std::collections::HashMap;
 use std::path::Path;
 
 use serde::{Deserialize, Serialize};
+
+/// `GatewayClass.spec.controllerName` for the built-in per-gateway profile (`sample-k8s/resources.yaml`).
+pub const BUILTIN_DEFAULT_CONTROLLER_NAME: &str = "ugwc.io/default-controller";
+
+/// Default Praxis image for the built-in per-gateway profile (matches Istio `gwxds.yaml`).
+pub const BUILTIN_PRAXIS_PROXY_IMAGE: &str = "quay.io/aslakknutsen/praxis:latest";
+
+/// Built-in POC profile: per-gateway Praxis, scoped xDS (`one_gateway`), default image.
+#[must_use]
+pub fn builtin_profiles() -> HashMap<String, ImplementationProfile> {
+    HashMap::from([(
+        BUILTIN_DEFAULT_CONTROLLER_NAME.to_string(),
+        ImplementationProfile {
+            data_plane: DataPlaneKind::PerGatewayPraxis,
+            subscription_default: SubscriptionScope::OneGateway,
+            proxy_image: Some(BUILTIN_PRAXIS_PROXY_IMAGE.to_string()),
+        },
+    )])
+}
 
 /// How workloads are (or are not) created for gateways using this controller name.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -99,5 +121,28 @@ mod tests {
         let p = resolve_for_controller(&m, Some("example.com/foo"));
         assert_eq!(p.data_plane, DataPlaneKind::External);
         fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn builtin_resolves_per_gateway_praxis_for_gwxds_controller() {
+        let m = builtin_profiles();
+        let p = resolve_for_controller(&m, Some(BUILTIN_DEFAULT_CONTROLLER_NAME));
+        assert_eq!(p.data_plane, DataPlaneKind::PerGatewayPraxis);
+        assert_eq!(p.subscription_default, SubscriptionScope::OneGateway);
+        assert_eq!(
+            p.proxy_image.as_deref(),
+            Some(BUILTIN_PRAXIS_PROXY_IMAGE)
+        );
+    }
+
+    #[test]
+    fn file_profile_overrides_builtin_for_same_controller() {
+        let mut m = builtin_profiles();
+        m.insert(
+            BUILTIN_DEFAULT_CONTROLLER_NAME.to_string(),
+            ImplementationProfile::default_external(),
+        );
+        let p = resolve_for_controller(&m, Some(BUILTIN_DEFAULT_CONTROLLER_NAME));
+        assert_eq!(p.data_plane, DataPlaneKind::External);
     }
 }

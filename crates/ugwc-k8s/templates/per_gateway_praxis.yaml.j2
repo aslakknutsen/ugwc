@@ -1,0 +1,237 @@
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ sa_name }}
+  namespace: {{ namespace }}
+  labels:
+    app.kubernetes.io/name: ugwc-praxis-dataplane
+    app.kubernetes.io/managed-by: ugwc
+    gateway.ugwc.io/gateway-namespace: {{ namespace }}
+    gateway.ugwc.io/gateway-name: {{ gateway_name }}
+    gateway.networking.k8s.io/gateway-name: {{ gateway_name }}
+    gateway.networking.k8s.io/gateway-class-name: {{ gateway_class }}
+    gateway.ugwc.io/managed: ugwc-per-gateway
+  ownerReferences:
+    - apiVersion: gateway.networking.k8s.io/v1
+      kind: Gateway
+      name: {{ gateway_name }}
+      uid: "{{ gateway_uid }}"
+      controller: true
+      blockOwnerDeletion: true
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ deployment_name }}
+  namespace: {{ namespace }}
+  labels:
+    app.kubernetes.io/name: ugwc-praxis-dataplane
+    app.kubernetes.io/managed-by: ugwc
+    gateway.ugwc.io/gateway-namespace: {{ namespace }}
+    gateway.ugwc.io/gateway-name: {{ gateway_name }}
+    gateway.networking.k8s.io/gateway-name: {{ gateway_name }}
+    gateway.networking.k8s.io/gateway-class-name: {{ gateway_class }}
+    gateway.ugwc.io/managed: ugwc-per-gateway
+  ownerReferences:
+    - apiVersion: gateway.networking.k8s.io/v1
+      kind: Gateway
+      name: {{ gateway_name }}
+      uid: "{{ gateway_uid }}"
+      controller: true
+      blockOwnerDeletion: true
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      gateway.ugwc.io/dataplane: {{ deployment_name }}
+  template:
+    metadata:
+      labels:
+        gateway.ugwc.io/dataplane: {{ deployment_name }}
+        app.kubernetes.io/name: ugwc-praxis-dataplane
+        gateway.networking.k8s.io/gateway-name: {{ gateway_name }}
+        gateway.networking.k8s.io/gateway-class-name: {{ gateway_class }}
+        gateway.ugwc.io/managed: ugwc-per-gateway
+        sidecar.istio.io/inject: "false"
+      annotations:
+        prometheus.io/path: /metrics
+        prometheus.io/port: "15021"
+        prometheus.io/scrape: "true"
+    spec:
+      serviceAccountName: {{ sa_name }}
+      securityContext:
+        sysctls:
+          - name: net.ipv4.ip_unprivileged_port_start
+            value: "0"
+      containers:
+        - name: praxis
+          image: {{ proxy_image_json }}
+          imagePullPolicy: IfNotPresent
+          ports:
+{% for p in container_ports %}
+            - containerPort: {{ p.port }}
+              name: {{ p.name }}
+              protocol: TCP
+{% endfor %}
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+            privileged: false
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            runAsUser: 10101
+            runAsGroup: 10101
+          env:
+            - name: UGWC_CONTROL_PLANE_XDS_BOOTSTRAP_ADDR
+              value: {{ xds_bootstrap_addr_json }}
+            - name: UGWC_XDS_NODE_ID
+              value: {{ gateway_scope_json }}
+            - name: UGWC_XDS_INSECURE
+              value: {{ xds_insecure_json }}
+            - name: UGWC_XDS_WIRE
+              value: {{ xds_wire_json }}
+            - name: GATEWAY_NAME
+              value: {{ gateway_name_json }}
+            - name: GATEWAY_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            - name: PRAXIS_ADMIN_ADDR
+              value: "0.0.0.0:15021"
+          startupProbe:
+            failureThreshold: 30
+            httpGet:
+              path: /healthy
+              port: 15021
+              scheme: HTTP
+            initialDelaySeconds: 1
+            periodSeconds: 1
+            successThreshold: 1
+            timeoutSeconds: 1
+          readinessProbe:
+            failureThreshold: 4
+            httpGet:
+              path: /ready
+              port: 15021
+              scheme: HTTP
+            initialDelaySeconds: 0
+            periodSeconds: 15
+            successThreshold: 1
+            timeoutSeconds: 1
+          volumeMounts:
+            - mountPath: /tmp
+              name: tmp
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 256Mi
+      volumes:
+        - name: tmp
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ deployment_name }}
+  namespace: {{ namespace }}
+  labels:
+    app.kubernetes.io/name: ugwc-praxis-dataplane
+    app.kubernetes.io/managed-by: ugwc
+    gateway.ugwc.io/gateway-namespace: {{ namespace }}
+    gateway.ugwc.io/gateway-name: {{ gateway_name }}
+    gateway.networking.k8s.io/gateway-name: {{ gateway_name }}
+    gateway.networking.k8s.io/gateway-class-name: {{ gateway_class }}
+    gateway.ugwc.io/managed: ugwc-per-gateway
+  ownerReferences:
+    - apiVersion: gateway.networking.k8s.io/v1
+      kind: Gateway
+      name: {{ gateway_name }}
+      uid: "{{ gateway_uid }}"
+      controller: true
+      blockOwnerDeletion: true
+spec:
+  type: ClusterIP
+  ipFamilyPolicy: PreferDualStack
+  selector:
+    gateway.ugwc.io/dataplane: {{ deployment_name }}
+  ports:
+{% for p in service_ports %}
+    - name: {{ p.name }}
+      port: {{ p.port }}
+      targetPort: {{ p.port }}
+      protocol: TCP
+{% endfor %}
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: {{ deployment_name }}
+  namespace: {{ namespace }}
+  labels:
+    app.kubernetes.io/name: ugwc-praxis-dataplane
+    app.kubernetes.io/managed-by: ugwc
+    gateway.ugwc.io/gateway-namespace: {{ namespace }}
+    gateway.ugwc.io/gateway-name: {{ gateway_name }}
+    gateway.networking.k8s.io/gateway-name: {{ gateway_name }}
+    gateway.networking.k8s.io/gateway-class-name: {{ gateway_class }}
+    gateway.ugwc.io/managed: ugwc-per-gateway
+  ownerReferences:
+    - apiVersion: gateway.networking.k8s.io/v1
+      kind: Gateway
+      name: {{ gateway_name }}
+      uid: "{{ gateway_uid }}"
+      controller: true
+      blockOwnerDeletion: true
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: {{ deployment_name }}
+  minReplicas: 1
+  maxReplicas: 1
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 80
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ deployment_name }}
+  namespace: {{ namespace }}
+  labels:
+    app.kubernetes.io/name: ugwc-praxis-dataplane
+    app.kubernetes.io/managed-by: ugwc
+    gateway.ugwc.io/gateway-namespace: {{ namespace }}
+    gateway.ugwc.io/gateway-name: {{ gateway_name }}
+    gateway.networking.k8s.io/gateway-name: {{ gateway_name }}
+    gateway.networking.k8s.io/gateway-class-name: {{ gateway_class }}
+    gateway.ugwc.io/managed: ugwc-per-gateway
+  ownerReferences:
+    - apiVersion: gateway.networking.k8s.io/v1
+      kind: Gateway
+      name: {{ gateway_name }}
+      uid: "{{ gateway_uid }}"
+      controller: true
+      blockOwnerDeletion: true
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      gateway.networking.k8s.io/gateway-name: {{ gateway_name }}

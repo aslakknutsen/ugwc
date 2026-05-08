@@ -1,13 +1,19 @@
 //! Optional dataplane workload reconciliation (e.g. Praxis proxy per `Gateway`).
+//!
+//! Per-gateway manifests are rendered from an embedded Minijinja template
+//! (`templates/per_gateway_praxis.yaml.j2`) and server-side applied as untyped
+//! [`kube::core::DynamicObject`] resources.
 
-use k8s_openapi::api::apps::v1::Deployment;
-use k8s_openapi::api::core::v1::Service;
-use kube::api::{Patch, PatchParams};
-use kube::{Api, Client};
+mod template;
+
+use kube::api::PatchParams;
+use kube::Client;
 use thiserror::Error;
 use tracing::{debug, warn};
 
 use crate::resources::Gateway;
+
+pub use template::NamePort;
 
 #[derive(Debug, Error)]
 pub enum ProvisionError {
@@ -26,7 +32,8 @@ pub struct PraxisProvisionArgs {
     pub xds_wire: String,
     /// `namespace/name` matching [`ugwc_core::ir::IrScopeId`] string form.
     pub gateway_scope: String,
-    pub service_port: u16,
+    /// `Gateway.spec.gatewayClassName` (for standard Gateway API labels).
+    pub gateway_class_name: String,
 }
 
 fn deployment_name(gateway_name: &str) -> String {
@@ -45,7 +52,91 @@ fn deployment_name(gateway_name: &str) -> String {
     raw.chars().take(63).collect()
 }
 
-/// Apply `Deployment` + `Service` for a per-gateway Praxis dataplane (idempotent server-side apply).
+fn service_account_name(dep_name: &str) -> String {
+    let raw = format!("{dep_name}-sa");
+    raw.chars().take(63).collect()
+}
+
+fn gateway_class_label(gateway_class_name: &str) -> String {
+    let t = gateway_class_name.trim();
+    if t.is_empty() {
+        "unknown".into()
+    } else {
+        t.to_string()
+    }
+}
+
+/// RFC 6335-ish port name: lowercase alnum + `-`, max 15 chars.
+fn sanitize_port_name(raw: &str, port: i32) -> String {
+    let base: String = raw
+        .to_ascii_lowercase()
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' {
+                c
+            } else {
+                '-'
+            }
+        })
+        .collect();
+    let base = base.trim_matches('-');
+    let s = if base.is_empty() {
+        format!("p{port}")
+    } else {
+        base.to_string()
+    };
+    s.chars().take(15).collect()
+}
+
+/// Listener-derived service ports; default `http` 8080 when none valid.
+fn collect_listener_ports(gateway: &Gateway) -> Vec<(String, i32)> {
+    let mut out = Vec::new();
+    for l in &gateway.spec.listeners {
+        let port = i32::from(l.port);
+        if port <= 0 {
+            continue;
+        }
+        let name = sanitize_port_name(&l.name, port);
+        out.push((name, port));
+    }
+    if out.is_empty() {
+        out.push(("http".into(), 8080));
+    }
+    out
+}
+
+fn container_port_rows(listener_ports: &[(String, i32)]) -> Vec<NamePort> {
+    let mut rows = vec![NamePort {
+        name: "status-port".into(),
+        port: 15021,
+    }];
+    for (name, p) in listener_ports {
+        if *p == 15021 {
+            continue;
+        }
+        rows.push(NamePort {
+            name: name.clone(),
+            port: *p,
+        });
+    }
+    rows
+}
+
+fn service_port_rows(listener_ports: &[(String, i32)]) -> Vec<NamePort> {
+    listener_ports
+        .iter()
+        .map(|(name, port)| NamePort {
+            name: name.clone(),
+            port: *port,
+        })
+        .collect()
+}
+
+fn json_scalar(s: &str) -> String {
+    serde_json::to_string(s).unwrap_or_else(|_| "\"\"".into())
+}
+
+/// Apply ServiceAccount, Deployment, Service, HPA, and PDB from the embedded template (SSA).
 pub async fn reconcile_per_gateway_praxis(
     client: &Client,
     gateway: &Gateway,
@@ -67,102 +158,36 @@ pub async fn reconcile_per_gateway_praxis(
         .ok_or_else(|| ProvisionError::Msg("gateway missing uid for ownerReference".into()))?;
 
     let dep_name = deployment_name(gw_name);
-    let labels = serde_json::json!({
-        "app.kubernetes.io/name": "ugwc-praxis-dataplane",
-        "app.kubernetes.io/managed-by": "ugwc",
-        "gateway.ugwc.io/gateway-namespace": ns,
-        "gateway.ugwc.io/gateway-name": gw_name,
-    });
+    let sa_name = service_account_name(&dep_name);
+    let gw_class = gateway_class_label(&args.gateway_class_name);
 
-    let owner = serde_json::json!([{
-        "apiVersion": "gateway.networking.k8s.io/v1",
-        "kind": "Gateway",
-        "name": gw_name,
-        "uid": uid,
-        "controller": true,
-        "blockOwnerDeletion": true
-    }]);
+    let listener_pairs = collect_listener_ports(gateway);
+    let container_ports = container_port_rows(&listener_pairs);
+    let service_ports = service_port_rows(&listener_pairs);
 
     let insecure_str = if args.xds_insecure { "true" } else { "false" };
-    let deployment_value = serde_json::json!({
-        "apiVersion": "apps/v1",
-        "kind": "Deployment",
-        "metadata": {
-            "name": dep_name,
-            "namespace": ns,
-            "labels": labels,
-            "ownerReferences": owner,
-        },
-        "spec": {
-            "replicas": 1,
-            "selector": {
-                "matchLabels": {
-                    "gateway.ugwc.io/dataplane": dep_name,
-                }
-            },
-            "template": {
-                "metadata": {
-                    "labels": {
-                        "gateway.ugwc.io/dataplane": dep_name,
-                        "app.kubernetes.io/name": "ugwc-praxis-dataplane",
-                    }
-                },
-                "spec": {
-                    "containers": [{
-                        "name": "proxy",
-                        "image": args.proxy_image,
-                        "ports": [{ "containerPort": args.service_port as i32, "name": "http" }],
-                        "env": [
-                            { "name": "UGWC_CONTROL_PLANE_XDS_BOOTSTRAP_ADDR", "value": args.xds_bootstrap_addr },
-                            { "name": "UGWC_XDS_NODE_ID", "value": args.gateway_scope },
-                            { "name": "UGWC_XDS_INSECURE", "value": insecure_str },
-                            { "name": "UGWC_XDS_WIRE", "value": args.xds_wire },
-                        ]
-                    }]
-                }
-            }
-        }
-    });
 
-    let dep: Deployment = serde_json::from_value(deployment_value)
-        .map_err(|e| ProvisionError::Msg(format!("deployment json: {e}")))?;
+    let ctx = template::PerGatewayTemplateContext {
+        namespace: ns,
+        gateway_name: gw_name,
+        gateway_uid: uid,
+        gateway_class: gw_class.as_str(),
+        deployment_name: dep_name.as_str(),
+        sa_name: sa_name.as_str(),
+        proxy_image_json: json_scalar(args.proxy_image.as_str()),
+        xds_bootstrap_addr_json: json_scalar(args.xds_bootstrap_addr.as_str()),
+        gateway_scope_json: json_scalar(args.gateway_scope.as_str()),
+        xds_insecure_json: json_scalar(insecure_str),
+        xds_wire_json: json_scalar(args.xds_wire.as_str()),
+        gateway_name_json: json_scalar(gw_name),
+        container_ports: &container_ports,
+        service_ports: &service_ports,
+    };
 
-    let dep_api: Api<Deployment> = Api::namespaced(client.clone(), ns);
+    let rendered = template::render_per_gateway_praxis(&ctx)?;
+    let documents = template::parse_manifest_documents(&rendered)?;
     let pp = PatchParams::apply("ugwc").force();
-    dep_api
-        .patch(&dep_name, &pp, &Patch::Apply(dep))
-        .await?;
-
-    let svc_value = serde_json::json!({
-        "apiVersion": "v1",
-        "kind": "Service",
-        "metadata": {
-            "name": dep_name,
-            "namespace": ns,
-            "labels": labels,
-            "ownerReferences": owner,
-        },
-        "spec": {
-            "selector": {
-                "gateway.ugwc.io/dataplane": dep_name,
-            },
-            "ports": [{
-                "name": "http",
-                "port": args.service_port as i32,
-                "targetPort": args.service_port as i32,
-                "protocol": "TCP"
-            }],
-            "type": "ClusterIP"
-        }
-    });
-
-    let svc: Service =
-        serde_json::from_value(svc_value).map_err(|e| ProvisionError::Msg(format!("service json: {e}")))?;
-
-    let svc_api: Api<Service> = Api::namespaced(client.clone(), ns);
-    svc_api
-        .patch(&dep_name, &pp, &Patch::Apply(svc))
-        .await?;
+    template::apply_manifests_dynamic(client, ns, documents, &pp).await?;
 
     Ok(())
 }

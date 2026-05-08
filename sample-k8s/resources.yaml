@@ -1,8 +1,12 @@
 # Gateway API resources for manual testing of ugwc against cluster state (same layout as
 # praxis sample-xds/resources.yaml).
 #
-# GatewayClass name "istio-gwxds" and controller name "istio.io/gwxds-controller" match the
-# Istio fork constants (pkg/config/constants/constants.go) when testing together with istiod gwxds.
+# GatewayClass uses controller name `ugwc.io/default-controller`, matching the ugwc built-in
+# per-gateway Praxis profile (`crates/ugwc/src/implementation_profiles.rs`).
+#
+# Built-in implementation profile: `ugwc.io/default-controller` maps to per-gateway Praxis with a
+# default proxy image; no JSON profiles file is required. To actually create dataplane workloads,
+# also set UGWC_DATAPLANE_ENABLE=1 and UGWC_CONTROL_PLANE_XDS_BOOTSTRAP_ADDR (reachable xDS host:port).
 #
 # ugwc: GatewayClass.spec.controllerName must appear in UGWC_CONTROLLER_NAMES (comma-separated).
 # Kubernetes watches are cluster-wide (Gateway, HTTPRoute, EndpointSlice, GatewayClass): grant
@@ -11,7 +15,7 @@
 # With this file unchanged, run ugwc with e.g.:
 #
 #   UGWC_KUBE_ENABLE=1 \
-#   UGWC_CONTROLLER_NAMES=istio.io/gwxds-controller \
+#   UGWC_CONTROLLER_NAMES=ugwc.io/default-controller \
 #   ugwc
 #
 # If you change spec.controllerName below to match crates/ugwc default (example.com/gateway-controller),
@@ -26,7 +30,7 @@ kind: GatewayClass
 metadata:
   name: ugwc-praxis
 spec:
-  controllerName: istio.io/gwxds-controller
+  controllerName: ugwc.io/default-controller
 ---
 apiVersion: gateway.networking.k8s.io/v1
 kind: Gateway

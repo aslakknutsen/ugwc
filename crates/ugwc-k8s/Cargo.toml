@@ -13,6 +13,8 @@ kube-runtime.workspace = true
 k8s-openapi.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+serde_yaml = { workspace = true }
+minijinja = { version = "2.5", default-features = false, features = ["serde"] }
 thiserror.workspace = true
 tracing.workspace = true
 tokio.workspace = true
