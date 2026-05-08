@@ -8,7 +8,10 @@ pub mod istio {
     }
 }
 
-use istio::gwxds::{Backend, Listener, Protocol, Resource, Route, RouteMatch};
+use istio::gwxds::{
+    Backend, HeaderNameValue, Listener, Protocol, RequestHeaderModifier, RequestRedirect, Resource,
+    Route, RouteMatch,
+};
 use ugwc_core::ir::TlsMode;
 use ugwc_core::IrSnapshot;
 
@@ -29,6 +32,64 @@ fn qualify_host(service_ns: &str, host: &str) -> String {
         return host.to_owned();
     }
     format!("{host}.{service_ns}.svc.cluster.local")
+}
+
+fn redirect_proto(r: &ugwc_core::ir::RequestRedirectIr) -> RequestRedirect {
+    let path = r
+        .path_replace_full
+        .clone()
+        .or_else(|| r.path_replace_prefix.clone())
+        .unwrap_or_default();
+    RequestRedirect {
+        hostname: r.hostname.clone().unwrap_or_default(),
+        path,
+        port: u32::from(r.port.unwrap_or(0)),
+        scheme: r.scheme.clone().unwrap_or_default(),
+        status_code: r.status_code.unwrap_or(302),
+    }
+}
+
+fn header_modifier_proto(h: &ugwc_core::ir::RequestHeaderModifierIr) -> RequestHeaderModifier {
+    RequestHeaderModifier {
+        set: h
+            .set
+            .iter()
+            .map(|x| HeaderNameValue {
+                name: x.name.clone(),
+                value: x.value.clone(),
+            })
+            .collect(),
+        add: h
+            .add
+            .iter()
+            .map(|x| HeaderNameValue {
+                name: x.name.clone(),
+                value: x.value.clone(),
+            })
+            .collect(),
+        remove: h.remove.clone(),
+    }
+}
+
+fn route_matches_proto(matches: &[ugwc_core::ir::RouteMatchIr]) -> Vec<RouteMatch> {
+    let src = if matches.is_empty() {
+        vec![ugwc_core::ir::RouteMatchIr {
+            path_prefix: Some("/".into()),
+            path_exact: None,
+            headers_exact: Default::default(),
+        }]
+    } else {
+        matches.to_vec()
+    };
+    src.iter()
+        .map(|m| RouteMatch {
+            path_prefix: m.path_prefix.clone().unwrap_or_default(),
+            path_exact: m.path_exact.clone().unwrap_or_default(),
+            path_regex: String::new(),
+            headers: m.headers_exact.iter().map(|(k, v)| (k.clone(), v.clone())).collect(),
+            methods: vec![],
+        })
+        .collect()
 }
 
 /// Encode IR into one [`Resource`] per listener (routes duplicated per listener for v0).
@@ -71,56 +132,60 @@ pub fn encode_ir(ir: &IrSnapshot) -> Vec<Resource> {
                 continue;
             }
             let route_key = format!("{}/{}/{}", gw_ns, r.name, idx);
-            let mut backends = Vec::new();
-            let key = format!(
-                "{}/{}/{}",
-                r.backend.service_namespace,
-                r.backend.service_name,
-                r.backend.port_number.unwrap_or(80)
-            );
-            let eps = ir.backends.get(&key).cloned().unwrap_or_default();
-            let host = qualify_host(&r.backend.service_namespace, &r.backend.service_name);
-            let port = r.backend.port_number.unwrap_or(80) as u32;
-            if let Some(ep) = eps.first() {
-                backends.push(Backend {
-                    host,
-                    port,
-                    weight: 1,
-                    inference_pool: None,
-                    tls: None,
-                    dial_port: u32::from(ep.port),
-                });
+            let hostnames: Vec<String> = if r.hosts.is_empty() {
+                vec!["*".into()]
             } else {
-                backends.push(Backend {
-                    host,
-                    port,
-                    weight: 1,
-                    inference_pool: None,
-                    tls: None,
-                    dial_port: port,
-                });
+                r.hosts.clone()
+            };
+
+            let matches_pb = route_matches_proto(&r.matches);
+
+            let mut backends_pb = Vec::new();
+            let mut invalid_backend_ref = false;
+            if r.request_redirect.is_none() {
+                for wb in &r.backends {
+                    let key = format!(
+                        "{}/{}/{}",
+                        wb.backend.service_namespace,
+                        wb.backend.service_name,
+                        wb.backend.port_number.unwrap_or(80)
+                    );
+                    let eps = ir.backends.get(&key).cloned().unwrap_or_default();
+                    let host = qualify_host(&wb.backend.service_namespace, &wb.backend.service_name);
+                    let port = wb.backend.port_number.unwrap_or(80) as u32;
+                    let dial_port = eps
+                        .first()
+                        .map(|e| u32::from(e.port))
+                        .unwrap_or(port);
+                    backends_pb.push(Backend {
+                        host,
+                        port,
+                        weight: wb.weight,
+                        inference_pool: None,
+                        tls: None,
+                        dial_port,
+                    });
+                }
+                if backends_pb.is_empty() {
+                    invalid_backend_ref = true;
+                }
             }
-            let hostnames: Vec<String> = r
-                .host
-                .clone()
-                .map(|h| vec![h])
-                .unwrap_or_else(|| vec!["*".into()]);
-            let matches = vec![RouteMatch {
-                path_prefix: r.path_prefix.clone().unwrap_or_else(|| "/".into()),
-                path_exact: String::new(),
-                path_regex: String::new(),
-                headers: Default::default(),
-                methods: vec![],
-            }];
+
+            let request_redirect = r.request_redirect.as_ref().map(redirect_proto);
+            let request_header_modifier = r
+                .request_header_modifier
+                .as_ref()
+                .map(header_modifier_proto);
+
             routes.push(Route {
                 key: route_key,
                 listener_key: listener_key.clone(),
                 hostnames,
-                matches,
-                backends,
-                request_redirect: None,
-                request_header_modifier: None,
-                invalid_backend_ref: false,
+                matches: matches_pb,
+                backends: backends_pb,
+                request_redirect,
+                request_header_modifier,
+                invalid_backend_ref,
             });
         }
 
@@ -159,5 +224,21 @@ mod tests {
         let ir = ugwc_core::http_ir::build_http_ir_from_fixture(&f);
         let r = encode_ir(&ir);
         assert!(!r.is_empty());
+        let rt = &r[0].routes[0];
+        assert_eq!(rt.backends.len(), 1);
+        assert_eq!(rt.backends[0].weight, 1);
+        assert!(rt.matches.iter().any(|m| !m.path_prefix.is_empty()));
+    }
+
+    #[test]
+    fn encode_exact_path_on_match() {
+        let mut f = HttpCompileFixture::minimal_http();
+        f.routes[0].matches[0].path_prefix = None;
+        f.routes[0].matches[0].path_exact = Some("/foo".into());
+        let ir = ugwc_core::http_ir::build_http_ir_from_fixture(&f);
+        let r = encode_ir(&ir);
+        let m = &r[0].routes[0].matches[0];
+        assert_eq!(m.path_exact, "/foo");
+        assert!(m.path_prefix.is_empty());
     }
 }

@@ -35,10 +35,20 @@ pub fn encode_sotw(ir: &IrSnapshot) -> XdsSnapshot {
     let route_name = format!("route-{}-{}", ir.scope.0.replace('/', "-"), ir.ir_version);
     let mut vhosts = vec![];
     for r in &ir.routes {
+        let domain = r.hosts.first().cloned().unwrap_or_else(|| "*".into());
+        let first = r.matches.first();
+        let path_spec = if let Some(ex) = first.and_then(|m| m.path_exact.as_ref()) {
+            PathSpecifier::Path(ex.clone())
+        } else {
+            PathSpecifier::Prefix(
+                first
+                    .and_then(|m| m.path_prefix.as_ref())
+                    .cloned()
+                    .unwrap_or_else(|| "/".into()),
+            )
+        };
         let m = RouteMatch {
-            path_specifier: Some(PathSpecifier::Prefix(
-                r.path_prefix.clone().unwrap_or_else(|| "/".into()),
-            )),
+            path_specifier: Some(path_spec),
             ..Default::default()
         };
         let r_entry = Route {
@@ -46,7 +56,7 @@ pub fn encode_sotw(ir: &IrSnapshot) -> XdsSnapshot {
             ..Default::default()
         };
         vhosts.push(VirtualHost {
-            domains: vec![r.host.clone().unwrap_or_else(|| "*".into())],
+            domains: vec![domain],
             routes: vec![r_entry],
             ..Default::default()
         });

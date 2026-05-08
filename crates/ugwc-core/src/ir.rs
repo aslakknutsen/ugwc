@@ -5,7 +5,7 @@ use std::collections::BTreeMap;
 use uuid::Uuid;
 
 /// Schema version embedded on every snapshot (bump when wire/IR changes).
-pub const IR_VERSION: u32 = 1;
+pub const IR_VERSION: u32 = 2;
 
 /// Per-dataplane scope identity for sharded xDS versions (see module docs).
 #[derive(Clone, Debug, Eq, Hash, PartialEq, Ord, PartialOrd)]
@@ -71,14 +71,77 @@ pub struct ListenerAttachmentIr {
     pub port: u16,
 }
 
-/// Normalized HTTP route match + backend (Phase 4+).
+/// One HTTP match clause (Core: path prefix or exact + header exact matches).
+#[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, serde::Serialize, serde::Deserialize)]
+pub struct RouteMatchIr {
+    #[serde(default)]
+    pub path_prefix: Option<String>,
+    #[serde(default)]
+    pub path_exact: Option<String>,
+    /// Lowercase header name → exact value.
+    #[serde(default)]
+    pub headers_exact: BTreeMap<String, String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct WeightedBackendIr {
+    pub backend: BackendIr,
+    #[serde(default = "default_backend_weight")]
+    pub weight: u32,
+}
+
+#[inline]
+fn default_backend_weight() -> u32 {
+    1
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct RequestRedirectIr {
+    #[serde(default)]
+    pub hostname: Option<String>,
+    #[serde(default)]
+    pub scheme: Option<String>,
+    #[serde(default)]
+    pub port: Option<u16>,
+    #[serde(default)]
+    pub status_code: Option<u32>,
+    #[serde(default)]
+    pub path_replace_full: Option<String>,
+    #[serde(default)]
+    pub path_replace_prefix: Option<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct NamedHeaderIr {
+    pub name: String,
+    pub value: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct RequestHeaderModifierIr {
+    #[serde(default)]
+    pub set: Vec<NamedHeaderIr>,
+    #[serde(default)]
+    pub add: Vec<NamedHeaderIr>,
+    #[serde(default)]
+    pub remove: Vec<String>,
+}
+
+/// Normalized HTTP route rule (Gateway API Core HTTPRoute).
 #[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct RouteRuleIr {
     pub name: String,
-    /// Hostname literal or prefix, `None` means any.
-    pub host: Option<String>,
-    pub path_prefix: Option<String>,
-    pub backend: BackendIr,
+    /// Effective hostnames (`empty` ⇒ any / `*` in encoders).
+    #[serde(default)]
+    pub hosts: Vec<String>,
+    #[serde(default)]
+    pub matches: Vec<RouteMatchIr>,
+    #[serde(default)]
+    pub backends: Vec<WeightedBackendIr>,
+    #[serde(default)]
+    pub request_redirect: Option<RequestRedirectIr>,
+    #[serde(default)]
+    pub request_header_modifier: Option<RequestHeaderModifierIr>,
     #[serde(default)]
     pub listener: Option<ListenerAttachmentIr>,
 }

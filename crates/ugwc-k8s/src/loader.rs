@@ -11,13 +11,18 @@ use thiserror::Error;
 use tracing::warn;
 use ugwc_core::listener_merge::merge_effective_listeners;
 use ugwc_core::snapshot::{
-    AllowedListenersSnap, ClusterSnapshot, EndpointPortSnap, EndpointSliceSnap, EndpointSnap,
-    GatewayClassSnap, GatewayListenerSnap, HttpBackendRefSnap, HttpPathMatchSnap,
-    HttpRequestMatchSnap, HttpRouteRuleSnap, HttpRouteSnap, ListenerNamespacesSnap,
-    ListenerSetSnap, ParentRefSnap, ServicePortSnap, ServiceSnap,
+    AllowedListenersSnap, AllowedRoutesNamespacesSnap, AllowedRoutesSnap, ClusterSnapshot,
+    EndpointPortSnap, EndpointSliceSnap, EndpointSnap, GatewayClassSnap, GatewayListenerSnap,
+    HttpBackendRefSnap, HttpHeaderFilterSnap, HttpHeaderMatchSnap, HttpHeaderNameValueSnap,
+    HttpPathMatchSnap, HttpPathModifierSnap, HttpRequestMatchSnap, HttpRequestRedirectFilterSnap,
+    HttpRouteFilterSnap, HttpRouteRuleSnap, HttpRouteSnap, ListenerNamespacesSnap, ListenerSetSnap,
+    ParentRefSnap, ReferenceGrantFromSnap, ReferenceGrantSnap, ReferenceGrantToSnap,
+    RouteGroupKindSnap, ServicePortSnap, ServiceSnap,
 };
 
-use crate::resources::{Gateway, GatewayClass, HTTPRoute, ListenerSet, ParentReferenceSpec};
+use crate::resources::{
+    Gateway, GatewayClass, HTTPRoute, ListenerSet, ParentReferenceSpec, ReferenceGrant,
+};
 
 #[derive(Debug, Error)]
 pub enum LoaderError {
@@ -25,7 +30,9 @@ pub enum LoaderError {
     Kube(#[from] kube::Error),
 }
 
-fn parent_to_snap(p: &ParentReferenceSpec) -> ParentRefSnap {
+/// Convert spec parentRef to snapshot form (HTTPRoute status merge).
+#[must_use]
+pub fn parent_reference_to_snap(p: &ParentReferenceSpec) -> ParentRefSnap {
     ParentRefSnap {
         group: p.group.clone(),
         kind: p.kind.clone(),
@@ -34,6 +41,10 @@ fn parent_to_snap(p: &ParentReferenceSpec) -> ParentRefSnap {
         section_name: p.section_name.clone(),
         port: p.port,
     }
+}
+
+fn parent_to_snap(p: &ParentReferenceSpec) -> ParentRefSnap {
+    parent_reference_to_snap(p)
 }
 
 /// When `allowedListeners` is unset or defaults to no attachment, ListenerSets are ignored.
@@ -105,6 +116,27 @@ async fn listener_set_namespace_allowed(
     })
 }
 
+fn allowed_routes_snap(ar: &crate::resources::AllowedRoutesSpec) -> AllowedRoutesSnap {
+    AllowedRoutesSnap {
+        namespaces: ar.namespaces.as_ref().map(|n| AllowedRoutesNamespacesSnap {
+            from: n.from.clone(),
+            selector_match_labels: n
+                .selector
+                .as_ref()
+                .map(|s| s.match_labels.clone())
+                .unwrap_or_default(),
+        }),
+        kinds: ar
+            .kinds
+            .iter()
+            .map(|k| RouteGroupKindSnap {
+                group: k.group.clone(),
+                kind: k.kind.clone(),
+            })
+            .collect(),
+    }
+}
+
 fn gateway_listener_to_snap(l: &crate::resources::GatewayListenerSpec) -> GatewayListenerSnap {
     GatewayListenerSnap {
         name: l.name.clone(),
@@ -115,6 +147,77 @@ fn gateway_listener_to_snap(l: &crate::resources::GatewayListenerSpec) -> Gatewa
             l.protocol.clone()
         },
         hostname: l.hostname.clone(),
+        allowed_routes: l.allowed_routes.as_ref().map(allowed_routes_snap),
+    }
+}
+
+fn http_header_filter_snap(h: &crate::resources::HTTPHeaderFilterSpec) -> HttpHeaderFilterSnap {
+    HttpHeaderFilterSnap {
+        set: h
+            .set
+            .iter()
+            .map(|x| HttpHeaderNameValueSnap {
+                name: x.name.clone(),
+                value: x.value.clone(),
+            })
+            .collect(),
+        add: h
+            .add
+            .iter()
+            .map(|x| HttpHeaderNameValueSnap {
+                name: x.name.clone(),
+                value: x.value.clone(),
+            })
+            .collect(),
+        remove: h.remove.clone(),
+    }
+}
+
+fn http_route_filter_snap(f: &crate::resources::HTTPRouteFilterSpec) -> HttpRouteFilterSnap {
+    HttpRouteFilterSnap {
+        filter_type: f.filter_type.clone(),
+        request_redirect: f.request_redirect.as_ref().map(|rr| HttpRequestRedirectFilterSnap {
+            scheme: rr.scheme.clone(),
+            hostname: rr.hostname.clone(),
+            port: rr.port,
+            status_code: rr.status_code,
+            path: rr.path.as_ref().map(|pm| HttpPathModifierSnap {
+                modifier_type: pm.modifier_type.clone(),
+                replace_full_path: pm.replace_full_path.clone(),
+                replace_prefix_match: pm.replace_prefix_match.clone(),
+            }),
+        }),
+        request_header_modifier: f
+            .request_header_modifier
+            .as_ref()
+            .map(http_header_filter_snap),
+    }
+}
+
+fn reference_grant_to_snap(rg: ReferenceGrant) -> ReferenceGrantSnap {
+    ReferenceGrantSnap {
+        namespace: rg.metadata.namespace.unwrap_or_default(),
+        name: rg.metadata.name.unwrap_or_default(),
+        from: rg
+            .spec
+            .from
+            .iter()
+            .map(|f| ReferenceGrantFromSnap {
+                group: f.group.clone(),
+                kind: f.kind.clone(),
+                namespace: f.namespace.clone(),
+            })
+            .collect(),
+        to: rg
+            .spec
+            .to
+            .iter()
+            .map(|t| ReferenceGrantToSnap {
+                group: t.group.clone(),
+                kind: t.kind.clone(),
+                name: t.name.clone(),
+            })
+            .collect(),
     }
 }
 
@@ -191,6 +294,11 @@ fn route_relevant_to_gateway(
 
 fn http_route_to_snap(route: &HTTPRoute) -> HttpRouteSnap {
     let gen = route.metadata.generation.unwrap_or(0);
+    let creation_timestamp_rfc3339 = route
+        .metadata
+        .creation_timestamp
+        .as_ref()
+        .map(|t| t.0.to_rfc3339());
     let rules: Vec<HttpRouteRuleSnap> = route
         .spec
         .rules
@@ -204,9 +312,18 @@ fn http_route_to_snap(route: &HTTPRoute) -> HttpRouteSnap {
                         path_type: p.path_type.clone(),
                         value: p.value.clone(),
                     }),
-                    hostname: None,
+                    headers: m
+                        .headers
+                        .iter()
+                        .map(|h| HttpHeaderMatchSnap {
+                            match_type: h.match_type.clone(),
+                            name: h.name.clone(),
+                            value: h.value.clone(),
+                        })
+                        .collect(),
                 })
                 .collect(),
+            filters: r.filters.iter().map(http_route_filter_snap).collect(),
             backend_refs: r
                 .backend_refs
                 .iter()
@@ -217,6 +334,7 @@ fn http_route_to_snap(route: &HTTPRoute) -> HttpRouteSnap {
                     name: b.name.clone(),
                     port: b.port,
                     port_name: b.port_name.clone(),
+                    weight: b.weight,
                 })
                 .collect(),
         })
@@ -226,6 +344,7 @@ fn http_route_to_snap(route: &HTTPRoute) -> HttpRouteSnap {
         namespace: route.metadata.namespace.clone().unwrap_or_default(),
         name: route.metadata.name.clone().unwrap_or_default(),
         generation: gen,
+        creation_timestamp_rfc3339,
         parent_refs: route.spec.parent_refs.iter().map(parent_to_snap).collect(),
         hostnames: route.spec.hostnames.clone(),
         rules,
@@ -286,11 +405,16 @@ pub async fn load_cluster_snapshot(
     let routes_list = route_api.list(&ListParams::default()).await?;
     let mut http_routes: Vec<HttpRouteSnap> = Vec::new();
     let mut needed_services: Vec<(String, String)> = Vec::new();
+    let mut ns_for_labels: HashSet<String> = HashSet::new();
+    ns_for_labels.insert(gateway_ns.to_string());
 
     for item in routes_list.items {
         if !route_relevant_to_gateway(&item, gateway_ns, gateway_name, &attached_ls_keys) {
             continue;
         }
+        let rns = item.metadata.namespace.clone().unwrap_or_default();
+        ns_for_labels.insert(rns.clone());
+
         let snap = http_route_to_snap(&item);
         for rule in &item.spec.rules {
             for br in &rule.backend_refs {
@@ -302,6 +426,7 @@ pub async fn load_cluster_snapshot(
                     .clone()
                     .or(item.metadata.namespace.clone())
                     .unwrap_or_default();
+                ns_for_labels.insert(sns.clone());
                 needed_services.push((sns, br.name.clone()));
             }
         }
@@ -393,6 +518,27 @@ pub async fn load_cluster_snapshot(
         });
     }
 
+    let mut ns_label_map: BTreeMap<String, BTreeMap<String, String>> = BTreeMap::new();
+    for ns in &ns_for_labels {
+        if let Ok(lbl) = namespace_labels(client, ns).await {
+            ns_label_map.insert(ns.clone(), lbl);
+        }
+    }
+
+    let mut reference_grants: Vec<ReferenceGrantSnap> = Vec::new();
+    let rg_api: Api<ReferenceGrant> = Api::all(client.clone());
+    match rg_api.list(&ListParams::default()).await {
+        Ok(list) => {
+            reference_grants = list.items.into_iter().map(reference_grant_to_snap).collect();
+        }
+        Err(e) => {
+            warn!(
+                error = %e,
+                "ReferenceGrant list failed — clusters without CRD skip cross-namespace grants"
+            );
+        }
+    }
+
     let gateway_class = if gw.spec.gateway_class_name.is_empty() {
         None
     } else {
@@ -420,5 +566,7 @@ pub async fn load_cluster_snapshot(
         services,
         endpoint_slices,
         gateway_class,
+        reference_grants,
+        namespace_labels: ns_label_map,
     })
 }

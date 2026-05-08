@@ -4,8 +4,8 @@ use std::collections::BTreeMap;
 
 use crate::inference::InferenceIr;
 use crate::ir::{
-    BackendEndpointIr, BackendIr, IrRevision, IrScopeId, IrSnapshot, ListenerIr, RouteRuleIr,
-    SnapshotMeta, TlsMode, IR_VERSION,
+    BackendEndpointIr, BackendIr, IrRevision, IrScopeId, IrSnapshot, ListenerIr, RouteMatchIr,
+    RouteRuleIr, SnapshotMeta, TlsMode, WeightedBackendIr, IR_VERSION,
 };
 use crate::policy::PolicyOverlayIr;
 
@@ -36,14 +36,23 @@ impl HttpCompileFixture {
             }],
             routes: vec![RouteRuleIr {
                 name: "hr".into(),
-                host: Some("example.com".into()),
-                path_prefix: Some("/".into()),
-                backend: BackendIr {
-                    service_namespace: "default".into(),
-                    service_name: "svc".into(),
-                    port_name: Some("http".into()),
-                    port_number: Some(80),
-                },
+                hosts: vec!["example.com".into()],
+                matches: vec![RouteMatchIr {
+                    path_prefix: Some("/".into()),
+                    path_exact: None,
+                    headers_exact: BTreeMap::new(),
+                }],
+                backends: vec![WeightedBackendIr {
+                    backend: BackendIr {
+                        service_namespace: "default".into(),
+                        service_name: "svc".into(),
+                        port_name: Some("http".into()),
+                        port_number: Some(80),
+                    },
+                    weight: 1,
+                }],
+                request_redirect: None,
+                request_header_modifier: None,
                 listener: Some(crate::ir::ListenerAttachmentIr {
                     parent_kind: "Gateway".into(),
                     parent_namespace: "default".into(),

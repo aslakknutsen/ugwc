@@ -7,7 +7,9 @@ use std::sync::{Arc, Mutex};
 use kube::api::{Patch, PatchParams};
 use kube::{Api, Client};
 
+use crate::loader::parent_reference_to_snap;
 use crate::resources::{Gateway, GatewayClass, HTTPRoute, ListenerSet};
+use ugwc_core::route_accepted_for_parent_ref;
 
 /// Apply Gateway + listener status after a compile/reconcile pass.
 ///
@@ -32,6 +34,7 @@ pub async fn apply_gateway_reconciled_status(
         e.reason == "BackendNotFound"
             || e.reason == "NoReadyEndpoints"
             || e.reason == "UnsupportedBackendKind"
+            || e.reason == "RefNotPermitted"
     });
     let reason = if programmed_ok {
         "Programmed"
@@ -326,7 +329,32 @@ pub async fn apply_http_route_merged_parent_status(
         ("False", "CompileErrors")
     };
 
+    let route_snap = snapshot
+        .http_routes
+        .iter()
+        .find(|r| r.namespace == route_ns && r.name == route_name);
+
     for p in ours {
+        let pref_snap = parent_reference_to_snap(p);
+        let (acc_status, acc_reason, acc_message) = match route_snap {
+            Some(rs) => {
+                if route_accepted_for_parent_ref(rs, &pref_snap, snapshot, &attached_ls) {
+                    ("True", "Accepted", "ugwc reconciled parent attachment")
+                } else {
+                    (
+                        "False",
+                        "NotAcceptedByListeners",
+                        "route not accepted by listener hostname intersection or allowedRoutes policy",
+                    )
+                }
+            }
+            None => (
+                "False",
+                "Pending",
+                "HTTPRoute not loaded into gateway snapshot",
+            ),
+        };
+
         let pref = parent_ref_json_from_spec(p, route_ns);
         parents.push(serde_json::json!({
             "parentRef": pref,
@@ -334,9 +362,9 @@ pub async fn apply_http_route_merged_parent_status(
             "conditions": [
                 {
                     "type": "Accepted",
-                    "status": "True",
-                    "reason": "Accepted",
-                    "message": "ugwc",
+                    "status": acc_status,
+                    "reason": acc_reason,
+                    "message": acc_message,
                     "lastTransitionTime": now,
                     "observedGeneration": route_generation
                 },

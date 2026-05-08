@@ -14,6 +14,59 @@ pub struct GatewayListenerSnap {
     pub protocol: String,
     #[serde(default)]
     pub hostname: Option<String>,
+    #[serde(rename = "allowedRoutes", default)]
+    pub allowed_routes: Option<AllowedRoutesSnap>,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+pub struct AllowedRoutesSnap {
+    #[serde(default)]
+    pub namespaces: Option<AllowedRoutesNamespacesSnap>,
+    #[serde(default)]
+    pub kinds: Vec<RouteGroupKindSnap>,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+pub struct AllowedRoutesNamespacesSnap {
+    #[serde(default)]
+    pub from: Option<String>,
+    #[serde(default)]
+    pub selector_match_labels: BTreeMap<String, String>,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+pub struct RouteGroupKindSnap {
+    #[serde(default)]
+    pub group: Option<String>,
+    pub kind: String,
+}
+
+/// ReferenceGrant — minimal fields for cross-namespace ref checks.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct ReferenceGrantSnap {
+    pub namespace: String,
+    pub name: String,
+    #[serde(default)]
+    pub from: Vec<ReferenceGrantFromSnap>,
+    #[serde(default)]
+    pub to: Vec<ReferenceGrantToSnap>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct ReferenceGrantFromSnap {
+    #[serde(default)]
+    pub group: Option<String>,
+    pub kind: String,
+    pub namespace: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct ReferenceGrantToSnap {
+    #[serde(default)]
+    pub group: Option<String>,
+    pub kind: String,
+    #[serde(default)]
+    pub name: Option<String>,
 }
 
 /// Parent reference (Gateway API) pointing at a parent resource.
@@ -45,6 +98,8 @@ pub struct HttpBackendRefSnap {
     pub port: Option<u16>,
     #[serde(rename = "portName", default)]
     pub port_name: Option<String>,
+    #[serde(default)]
+    pub weight: Option<u32>,
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
@@ -55,19 +110,79 @@ pub struct HttpPathMatchSnap {
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+pub struct HttpHeaderMatchSnap {
+    #[serde(rename = "type", default)]
+    pub match_type: Option<String>,
+    pub name: String,
+    pub value: String,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
 pub struct HttpRequestMatchSnap {
     #[serde(default)]
     pub path: Option<HttpPathMatchSnap>,
     #[serde(default)]
-    pub hostname: Option<String>,
+    pub headers: Vec<HttpHeaderMatchSnap>,
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
 pub struct HttpRouteRuleSnap {
     #[serde(default)]
     pub matches: Vec<HttpRequestMatchSnap>,
+    #[serde(default)]
+    pub filters: Vec<HttpRouteFilterSnap>,
     #[serde(rename = "backendRefs", default)]
     pub backend_refs: Vec<HttpBackendRefSnap>,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+pub struct HttpRouteFilterSnap {
+    #[serde(rename = "type")]
+    pub filter_type: String,
+    #[serde(rename = "requestRedirect", default)]
+    pub request_redirect: Option<HttpRequestRedirectFilterSnap>,
+    #[serde(rename = "requestHeaderModifier", default)]
+    pub request_header_modifier: Option<HttpHeaderFilterSnap>,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+pub struct HttpRequestRedirectFilterSnap {
+    #[serde(default)]
+    pub scheme: Option<String>,
+    #[serde(default)]
+    pub hostname: Option<String>,
+    #[serde(default)]
+    pub path: Option<HttpPathModifierSnap>,
+    #[serde(default)]
+    pub port: Option<u16>,
+    #[serde(rename = "statusCode", default)]
+    pub status_code: Option<i32>,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+pub struct HttpPathModifierSnap {
+    #[serde(rename = "type")]
+    pub modifier_type: String,
+    #[serde(rename = "replaceFullPath", default)]
+    pub replace_full_path: Option<String>,
+    #[serde(rename = "replacePrefixMatch", default)]
+    pub replace_prefix_match: Option<String>,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+pub struct HttpHeaderFilterSnap {
+    #[serde(default)]
+    pub set: Vec<HttpHeaderNameValueSnap>,
+    #[serde(default)]
+    pub add: Vec<HttpHeaderNameValueSnap>,
+    #[serde(default)]
+    pub remove: Vec<String>,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+pub struct HttpHeaderNameValueSnap {
+    pub name: String,
+    pub value: String,
 }
 
 /// One `HTTPRoute` document relevant to compilation.
@@ -76,6 +191,8 @@ pub struct HttpRouteSnap {
     pub namespace: String,
     pub name: String,
     pub generation: i64,
+    #[serde(rename = "creationTimestamp", default)]
+    pub creation_timestamp_rfc3339: Option<String>,
     #[serde(rename = "parentRefs", default)]
     pub parent_refs: Vec<ParentRefSnap>,
     #[serde(default)]
@@ -182,6 +299,8 @@ pub struct EffectiveListenerSnap {
     pub hostname: Option<String>,
     #[serde(default)]
     pub conflicted: bool,
+    #[serde(rename = "allowedRoutes", default)]
+    pub allowed_routes: Option<AllowedRoutesSnap>,
 }
 
 /// Bounded cluster state for compiling one `Gateway`.
@@ -210,4 +329,9 @@ pub struct ClusterSnapshot {
     pub endpoint_slices: Vec<EndpointSliceSnap>,
     #[serde(rename = "gatewayClass", default)]
     pub gateway_class: Option<GatewayClassSnap>,
+    #[serde(rename = "referenceGrants", default)]
+    pub reference_grants: Vec<ReferenceGrantSnap>,
+    /// Namespace → labels (for `allowedRoutes.namespaces.selector`).
+    #[serde(default)]
+    pub namespace_labels: BTreeMap<String, BTreeMap<String, String>>,
 }

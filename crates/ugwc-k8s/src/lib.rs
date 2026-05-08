@@ -8,7 +8,7 @@ pub mod resources;
 pub mod status;
 
 pub use controller::{run_gateway_controller, ReconcileFn};
-pub use loader::{load_cluster_snapshot, LoaderError};
+pub use loader::{load_cluster_snapshot, parent_reference_to_snap, LoaderError};
 pub use mappers::{mapped_gateway_key, GatewayKey, WatchEventCause};
 pub use provision::{
     collect_effective_listener_ports, reconcile_per_gateway_praxis,

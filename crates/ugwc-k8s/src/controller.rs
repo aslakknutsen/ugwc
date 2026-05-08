@@ -16,7 +16,7 @@ use kube::{Api, Client, ResourceExt};
 use tokio::sync::mpsc;
 use tracing::{info, instrument, warn};
 
-use crate::resources::{Gateway, GatewayClass, HTTPRoute, ListenerSet};
+use crate::resources::{Gateway, GatewayClass, HTTPRoute, ListenerSet, ReferenceGrant};
 
 pub type ReconcileFuture = Pin<Box<dyn Future<Output = Result<(), String>> + Send>>;
 pub type ReconcileFn = Arc<dyn Fn(String, String) -> ReconcileFuture + Send + Sync>;
@@ -33,7 +33,56 @@ fn is_listenerset_parent(p: &crate::resources::ParentReferenceSpec) -> bool {
     g == "gateway.networking.k8s.io" && k == "ListenerSet"
 }
 
-/// Observe `Gateway`, `HTTPRoute`, `ListenerSet`, `EndpointSlice`, and `GatewayClass` (owned classes) cluster-wide until cancelled.
+async fn gateway_targets_for_route(client: &Client, route: &HTTPRoute) -> HashSet<(String, String)> {
+    let mut targets = HashSet::new();
+    for p in &route.spec.parent_refs {
+        if is_gateway_parent(p) {
+            let pns = p
+                .namespace
+                .clone()
+                .or(route.metadata.namespace.clone())
+                .unwrap_or_default();
+            targets.insert((pns, p.name.clone()));
+            continue;
+        }
+        if !is_listenerset_parent(p) {
+            continue;
+        }
+        let ls_ns = p
+            .namespace
+            .clone()
+            .or(route.metadata.namespace.clone())
+            .unwrap_or_default();
+        let ls_api: Api<ListenerSet> = Api::namespaced(client.clone(), &ls_ns);
+        match ls_api.get(&p.name).await {
+            Ok(ls) => {
+                for pr in &ls.spec.parent_refs {
+                    let pg = pr.group.as_deref().unwrap_or("gateway.networking.k8s.io");
+                    let pk = pr.kind.as_deref().unwrap_or("Gateway");
+                    if pg != "gateway.networking.k8s.io" || pk != "Gateway" {
+                        continue;
+                    }
+                    let gwns = pr
+                        .namespace
+                        .clone()
+                        .or(ls.metadata.namespace.clone())
+                        .unwrap_or_default();
+                    targets.insert((gwns, pr.name.clone()));
+                }
+            }
+            Err(e) => {
+                warn!(
+                    error = %e,
+                    route = %route.name_any(),
+                    "httproute listenerset parent resolve"
+                );
+            }
+        }
+    }
+    targets
+}
+
+/// Observe `Gateway`, `HTTPRoute`, `ListenerSet`, `ReferenceGrant`, `EndpointSlice`, and `GatewayClass` (owned classes) cluster-wide until cancelled.
 #[instrument(skip(client, shutdown, reconcile))]
 pub async fn run_gateway_controller(
     client: Client,
@@ -85,55 +134,7 @@ pub async fn run_gateway_controller(
                 ev = stream.next() => {
                     match ev {
                         Some(Ok(route)) => {
-                            let mut targets: HashSet<(String, String)> = HashSet::new();
-                            for p in &route.spec.parent_refs {
-                                if is_gateway_parent(p) {
-                                    let pns = p
-                                        .namespace
-                                        .clone()
-                                        .or(route.metadata.namespace.clone())
-                                        .unwrap_or_default();
-                                    targets.insert((pns, p.name.clone()));
-                                    continue;
-                                }
-                                if !is_listenerset_parent(p) {
-                                    continue;
-                                }
-                                let ls_ns = p
-                                    .namespace
-                                    .clone()
-                                    .or(route.metadata.namespace.clone())
-                                    .unwrap_or_default();
-                                let ls_api: Api<ListenerSet> =
-                                    Api::namespaced(c_hr.clone(), &ls_ns);
-                                match ls_api.get(&p.name).await {
-                                    Ok(ls) => {
-                                        for pr in &ls.spec.parent_refs {
-                                            let pg = pr
-                                                .group
-                                                .as_deref()
-                                                .unwrap_or("gateway.networking.k8s.io");
-                                            let pk = pr.kind.as_deref().unwrap_or("Gateway");
-                                            if pg != "gateway.networking.k8s.io"
-                                                || pk != "Gateway"
-                                            {
-                                                continue;
-                                            }
-                                            let gwns = pr
-                                                .namespace
-                                                .clone()
-                                                .or(ls.metadata.namespace.clone())
-                                                .unwrap_or_default();
-                                            targets.insert((gwns, pr.name.clone()));
-                                        }
-                                    }
-                                    Err(e) => warn!(
-                                        error = %e,
-                                        route = %route.name_any(),
-                                        "httproute listenerset parent resolve"
-                                    ),
-                                }
-                            }
+                            let targets = gateway_targets_for_route(&c_hr, &route).await;
                             for (pns, pname) in targets {
                                 if tx_hr.send((pns, pname)).await.is_err() {
                                     return;
@@ -147,6 +148,43 @@ pub async fn run_gateway_controller(
             }
         }
         info!("httproute watcher shutdown");
+    });
+
+    let sd_rg = shutdown.clone();
+    let c_rg = client.clone();
+    let tx_rg = tx.clone();
+    tokio::spawn(async move {
+        let api: Api<ReferenceGrant> = Api::all(c_rg.clone());
+        let cfg = WatcherConfig::default().any_semantic();
+        let mut stream = Box::pin(watcher(api, cfg).applied_objects());
+        loop {
+            tokio::select! {
+                _ = sd_rg.cancelled() => break,
+                ev = stream.next() => {
+                    match ev {
+                        Some(Ok(_)) => {
+                            let hr_api: Api<HTTPRoute> = Api::all(c_rg.clone());
+                            match hr_api.list(&ListParams::default()).await {
+                                Ok(list) => {
+                                    for route in list.items {
+                                        let targets = gateway_targets_for_route(&c_rg, &route).await;
+                                        for (pns, pname) in targets {
+                                            if tx_rg.send((pns, pname)).await.is_err() {
+                                                return;
+                                            }
+                                        }
+                                    }
+                                }
+                                Err(e) => warn!(error = %e, "list httproute after referencegrant change"),
+                            }
+                        }
+                        Some(Err(e)) => warn!(error = %e, "referencegrant watch stream"),
+                        None => break,
+                    }
+                }
+            }
+        }
+        info!("referencegrant watcher shutdown");
     });
 
     let sd_ls = shutdown.clone();

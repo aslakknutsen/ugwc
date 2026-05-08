@@ -106,6 +106,7 @@ fn httproute_error_reason(reason: &str) -> &'static str {
         "UnsupportedBackendKind" => "UnsupportedBackendKind",
         "BackendNotFound" => "BackendNotFound",
         "NoReadyEndpoints" => "NoReadyEndpoints",
+        "RefNotPermitted" => "RefNotPermitted",
         _ => "InvalidReference",
     }
 }
@@ -261,6 +262,30 @@ mod tests {
         assert_eq!(
             http_route_resolved_refs_row(&report, &route),
             ("False", "BackendNotFound", "backend Service not found")
+        );
+    }
+
+    #[test]
+    fn http_route_resolved_refs_ref_not_permitted() {
+        let route = HttpRouteSnap {
+            namespace: "ns".into(),
+            name: "r".into(),
+            generation: 1,
+            ..Default::default()
+        };
+        let report = CompileReport {
+            errors: vec![ObjectRefErr {
+                group: "gateway.networking.k8s.io".into(),
+                version: "v1".into(),
+                kind: "HTTPRoute".into(),
+                namespace: "ns".into(),
+                name: "r".into(),
+                reason: "RefNotPermitted".into(),
+            }],
+        };
+        assert_eq!(
+            http_route_resolved_refs_row(&report, &route),
+            ("False", "RefNotPermitted", "compile report lists ref issues for this HTTPRoute")
         );
     }
 

@@ -30,6 +30,7 @@ pub fn merge_effective_listeners(
             protocol: normalize_protocol(&l.protocol),
             hostname: l.hostname.clone(),
             conflicted: false,
+            allowed_routes: l.allowed_routes.clone(),
         })
         .collect();
 
@@ -45,6 +46,7 @@ pub fn merge_effective_listeners(
                 protocol: normalize_protocol(&l.protocol),
                 hostname: l.hostname.clone(),
                 conflicted: false,
+                allowed_routes: l.allowed_routes.clone(),
             });
         }
     }
@@ -94,6 +96,7 @@ mod tests {
             port: 80,
             protocol: "HTTP".into(),
             hostname: None,
+            allowed_routes: None,
         }];
         let ls = vec![
             ListenerSetSnap {
@@ -107,6 +110,7 @@ mod tests {
                     port: 81,
                     protocol: "HTTP".into(),
                     hostname: None,
+                    allowed_routes: None,
                 }],
             },
             ListenerSetSnap {
@@ -120,6 +124,7 @@ mod tests {
                     port: 82,
                     protocol: "HTTP".into(),
                     hostname: None,
+                    allowed_routes: None,
                 }],
             },
         ];
@@ -138,12 +143,14 @@ mod tests {
                 port: 80,
                 protocol: "HTTP".into(),
                 hostname: Some("h.example.com".into()),
+                allowed_routes: None,
             },
             GatewayListenerSnap {
                 name: "y".into(),
                 port: 80,
                 protocol: "HTTP".into(),
                 hostname: Some("h.example.com".into()),
+                allowed_routes: None,
             },
         ];
         let m = merge_effective_listeners(&gw, &[]);
