@@ -1,0 +1,10 @@
+# Documentation index
+
+| Document | Contents |
+|----------|----------|
+| [architecture.md](architecture.md) | Workspace layout, runtime components, data flow, crate dependencies, **Mermaid diagrams** (components, watch fan-in, reconcile sequence, startup). |
+| [design.md](design.md) | Design principles, IR and publish model, failure handling, relation to repo `design/` notes. |
+
+**Intro and goals:** [README.md](README.md)
+
+**Deeper design drafts** (working notes in-repo): [`../design/`](../design/) — e.g. implementation plan, output distribution, controller architecture.
