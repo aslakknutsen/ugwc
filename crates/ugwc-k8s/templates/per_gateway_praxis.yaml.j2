@@ -84,7 +84,7 @@ spec:
             runAsUser: 10101
             runAsGroup: 10101
           env:
-            - name: UGWC_CONTROL_PLANE_XDS_BOOTSTRAP_ADDR
+            - name: ISTIOD_ADDR
               value: {{ xds_bootstrap_addr_json }}
             - name: UGWC_XDS_NODE_ID
               value: {{ gateway_scope_json }}
