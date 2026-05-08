@@ -1,0 +1,15 @@
+[package]
+name = "ugwc-gwxds"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Encode ugwc IR to istio.gwxds protobuf for Praxis"
+build = "build.rs"
+
+[dependencies]
+ugwc-core = { path = "../ugwc-core" }
+prost.workspace = true
+
+[build-dependencies]
+prost-build.workspace = true

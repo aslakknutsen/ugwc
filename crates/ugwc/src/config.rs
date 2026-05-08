@@ -15,11 +15,14 @@ fn default_xds() -> String {
 fn default_controllers() -> String {
     "example.com/gateway-controller".into()
 }
-fn default_ns() -> String {
-    "default".into()
-}
 fn default_profile() -> String {
     "dev".into()
+}
+fn default_endpoint_debounce_ms() -> u64 {
+    200
+}
+fn default_xds_wire() -> String {
+    "gwxds".into()
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -39,14 +42,18 @@ pub struct Config {
     pub log_json: bool,
     #[serde(default)]
     pub kube_enable: bool,
-    #[serde(default = "default_ns")]
-    pub kube_namespace: String,
     #[serde(default)]
     pub xds_delta: bool,
     #[serde(default = "default_profile")]
     pub run_profile: String,
     #[serde(default)]
     pub leader_election: bool,
+    /// Coalesce `EndpointSlice` churn before reconciling all Gateways cluster-wide.
+    #[serde(default = "default_endpoint_debounce_ms")]
+    pub endpoint_debounce_ms: u64,
+    /// xDS wire profile for ADS responses: `gwxds` (Praxis) or `envoy` (RDS-only slice).
+    #[serde(default = "default_xds_wire")]
+    pub xds_wire: String,
 }
 
 #[derive(Debug, Error)]
@@ -87,6 +94,13 @@ impl Config {
         if profile == "prod" && self.xds_insecure {
             return Err(ConfigError::InsecureProd);
         }
+        let wire = self.xds_wire.to_ascii_lowercase();
+        if wire != "gwxds" && wire != "envoy" {
+            return Err(ConfigError::Addr(
+                "UGWC_XDS_WIRE".into(),
+                "must be `gwxds` or `envoy`".into(),
+            ));
+        }
         let has_cert = self.xds_tls_cert_path.is_some();
         let has_key = self.xds_tls_key_path.is_some();
         if has_cert != has_key {
@@ -109,15 +123,16 @@ impl Config {
     #[must_use]
     pub fn log_summary(&self) -> String {
         format!(
-            "admin={} xds={} kube={} ns={} insecure={} delta={} profile={} leader={} controllers={:?}",
+            "admin={} xds={} kube={} kube_watch=cluster insecure={} delta={} profile={} leader={} debounce_ms={} xds_wire={} controllers={:?}",
             self.admin_listen_addr,
             self.xds_listen_addr,
             self.kube_enable,
-            self.kube_namespace,
             self.xds_insecure,
             self.xds_delta,
             self.run_profile,
             self.leader_election,
+            self.endpoint_debounce_ms,
+            self.xds_wire,
             self.controller_name_list(),
         )
     }
@@ -152,10 +167,11 @@ mod tests {
             xds_tls_ca_path: None,
             log_json: false,
             kube_enable: false,
-            kube_namespace: default_ns(),
             xds_delta: false,
             run_profile: default_profile(),
             leader_election: false,
+            endpoint_debounce_ms: default_endpoint_debounce_ms(),
+            xds_wire: default_xds_wire(),
         }
     }
 }

@@ -5,6 +5,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 
 use futures::Stream;
+use prost::Message;
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::transport::Server;
@@ -19,6 +20,7 @@ use xds_api::pb::envoy::service::discovery::v3::aggregated_discovery_service_ser
 use xds_api::pb::envoy::service::discovery::v3::{
     DeltaDiscoveryRequest, DeltaDiscoveryResponse, DiscoveryRequest, DiscoveryResponse,
 };
+use xds_api::pb::google::protobuf::Any;
 
 /// Control-plane behaviour for plaintext vs TLS + explicit insecure prototype flag.
 #[derive(Clone, Debug)]
@@ -35,11 +37,14 @@ pub struct XdsServerConfig {
     pub security: XdsSecurityConfig,
     /// When false, DeltaAggregatedResources is rejected (plan §7 — SotW before Delta).
     pub allow_delta: bool,
+    /// `gwxds` (Praxis `istio.gwxds.Resource`) or `envoy` (RDS-only slice).
+    pub xds_wire: String,
 }
 
 struct AdsService<C: SnapshotCache + 'static> {
     cache: Arc<C>,
     allow_delta: bool,
+    xds_wire: String,
 }
 
 #[tonic::async_trait]
@@ -60,14 +65,15 @@ impl<C: SnapshotCache + 'static> AggregatedDiscoveryService for AdsService<C> {
         );
 
         let cache = self.cache.clone();
+        let wire = self.xds_wire.clone();
         let (tx, rx) = mpsc::channel(8);
 
         tokio::spawn(async move {
             loop {
                 match inbound.message().await {
-                    Ok(Some(_req)) => {
+                    Ok(Some(req)) => {
                         let snap = cache.current();
-                        let resp = discovery_response_for_snapshot(&snap);
+                        let resp = discovery_response(&snap, &wire, req.type_url.as_str());
                         if tx.send(Ok(resp)).await.is_err() {
                             break;
                         }
@@ -109,7 +115,25 @@ impl<C: SnapshotCache + 'static> AggregatedDiscoveryService for AdsService<C> {
     }
 }
 
-fn discovery_response_for_snapshot(ir: &IrSnapshot) -> DiscoveryResponse {
+fn discovery_response(ir: &IrSnapshot, xds_wire: &str, req_type_url: &str) -> DiscoveryResponse {
+    let use_gwxds =
+        xds_wire.eq_ignore_ascii_case("gwxds") || req_type_url.contains("istio.gwxds.Resource");
+    if use_gwxds {
+        let resources: Vec<Any> = ugwc_gwxds::encode_ir(ir)
+            .into_iter()
+            .map(|r| Any {
+                type_url: ugwc_gwxds::GW_TYPE_URL.to_string(),
+                value: r.encode_to_vec(),
+            })
+            .collect();
+        return DiscoveryResponse {
+            version_info: ir.revision_token(),
+            resources,
+            type_url: ugwc_gwxds::GW_TYPE_URL.to_string(),
+            ..Default::default()
+        };
+    }
+
     let wire = crate::encode::encode_sotw(ir);
     DiscoveryResponse {
         version_info: wire.version.clone(),
@@ -155,6 +179,7 @@ pub async fn serve<C: SnapshotCache + 'static>(
     let svc = AdsService {
         cache,
         allow_delta: cfg.allow_delta,
+        xds_wire: cfg.xds_wire.clone(),
     };
 
     let ads = AggregatedDiscoveryServiceServer::new(svc);

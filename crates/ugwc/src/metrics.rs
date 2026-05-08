@@ -37,3 +37,7 @@ pub fn set_leader_active(active: bool) {
 pub fn observe_compile_seconds(seconds: f64) {
     histogram!("ugwc_compile_duration_seconds").record(seconds);
 }
+
+pub fn observe_snapshot_load_seconds(seconds: f64) {
+    histogram!("ugwc_snapshot_load_duration_seconds").record(seconds);
+}

@@ -4,10 +4,12 @@ use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 use crate::failure_policy::FailurePolicy;
+use crate::from_cluster::ir_from_cluster;
 use crate::http_ir::{build_http_ir_from_fixture, HttpCompileFixture};
 use crate::inference::InferenceIr;
 use crate::ir::{IrRevision, IrSnapshot, SnapshotMeta, IR_VERSION};
 use crate::policy::PolicyOverlayIr;
+use crate::snapshot::{ClusterSnapshot, HttpRouteSnap};
 
 /// Stable cross-layer reference to a Kubernetes object when something goes wrong.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -39,10 +41,81 @@ impl CompileReport {
     }
 }
 
+fn http_route_service_backends(route: &HttpRouteSnap) -> Vec<(String, String)> {
+    let mut v = Vec::new();
+    for rule in &route.rules {
+        for br in &rule.backend_refs {
+            if br.kind.as_deref().unwrap_or("Service") != "Service" {
+                continue;
+            }
+            let ns = br
+                .namespace
+                .as_deref()
+                .unwrap_or(route.namespace.as_str())
+                .to_string();
+            v.push((ns, br.name.clone()));
+        }
+    }
+    v.sort();
+    v.dedup();
+    v
+}
+
+/// `ResolvedRefs` condition fields for one `HTTPRoute` vs [`CompileReport`] errors.
+#[must_use]
+pub fn http_route_resolved_refs_row(
+    report: &CompileReport,
+    route: &HttpRouteSnap,
+) -> (&'static str, &'static str, &'static str) {
+    let backends = http_route_service_backends(route);
+    for e in &report.errors {
+        if e.kind == "HTTPRoute" && e.namespace == route.namespace && e.name == route.name {
+            let reason = httproute_error_reason(&e.reason);
+            return (
+                "False",
+                reason,
+                "compile report lists ref issues for this HTTPRoute",
+            );
+        }
+        if e.kind == "Service"
+            && e.reason == "BackendNotFound"
+            && backends
+                .iter()
+                .any(|(ns, n)| ns == &e.namespace && n == &e.name)
+        {
+            return ("False", "BackendNotFound", "backend Service not found");
+        }
+        if e.kind == "Endpoints"
+            && e.reason == "NoReadyEndpoints"
+            && backends
+                .iter()
+                .any(|(ns, n)| ns == &e.namespace && n == &e.name)
+        {
+            return (
+                "False",
+                "NoReadyEndpoints",
+                "no ready endpoints for backend Service",
+            );
+        }
+    }
+    ("True", "ResolvedRefs", "refs resolved for v0 slice")
+}
+
+fn httproute_error_reason(reason: &str) -> &'static str {
+    match reason {
+        "UnsupportedBackendKind" => "UnsupportedBackendKind",
+        "BackendNotFound" => "BackendNotFound",
+        "NoReadyEndpoints" => "NoReadyEndpoints",
+        _ => "InvalidReference",
+    }
+}
+
 /// Fixture-driven compile input — grows with phases (HTTPRoute, policies, …).
 #[derive(Clone, Debug, Default)]
 pub struct CompileInput {
     pub fixture: Option<HttpCompileFixture>,
+    /// Cluster-derived snapshot (from `ugwc-k8s` loaders). Ignored when `fixture` is set.
+    pub cluster: Option<ClusterSnapshot>,
     /// Synthetic invalid ref for exercising FailurePolicy paths in tests.
     pub invalid_refs: Vec<ObjectRefErr>,
     /// When reconciling from Kubernetes, pin IR scope to the parent Gateway identity.
@@ -68,12 +141,17 @@ pub fn compile(policy: &FailurePolicy, input: &CompileInput) -> Result<CompileOu
         crate::ir::IrScopeId::new("default", "compile-stub")
     };
 
-    let report = CompileReport {
+    let mut report = CompileReport {
         errors: input.invalid_refs.clone(),
     };
 
     let mut snapshot = if let Some(fix) = &input.fixture {
         build_http_ir_from_fixture(fix)
+    } else if let Some(cluster) = &input.cluster {
+        let (mut snap, cluster_report) = ir_from_cluster(cluster);
+        snap.scope = scope.clone();
+        report.errors.extend(cluster_report.errors);
+        snap
     } else {
         IrSnapshot {
             ir_version: IR_VERSION,
@@ -90,6 +168,9 @@ pub fn compile(policy: &FailurePolicy, input: &CompileInput) -> Result<CompileOu
             inference: InferenceIr::default(),
         }
     };
+
+    snapshot.meta.correlation_id = correlation_id;
+    snapshot.meta.has_errors = report.has_errors();
 
     if report.has_errors() {
         if matches!(
@@ -135,6 +216,53 @@ mod tests {
     use super::*;
     use crate::failure_policy::{FailurePolicy, OnPartialCompile};
     use crate::http_ir::HttpCompileFixture;
+    use crate::snapshot::{HttpBackendRefSnap, HttpRouteRuleSnap, HttpRouteSnap};
+
+    #[test]
+    fn http_route_resolved_refs_true_when_clean() {
+        let route = HttpRouteSnap {
+            namespace: "ns".into(),
+            name: "r".into(),
+            generation: 1,
+            ..Default::default()
+        };
+        let report = CompileReport::default();
+        assert_eq!(
+            http_route_resolved_refs_row(&report, &route),
+            ("True", "ResolvedRefs", "refs resolved for v0 slice")
+        );
+    }
+
+    #[test]
+    fn http_route_resolved_refs_false_on_service_missing() {
+        let route = HttpRouteSnap {
+            namespace: "ns".into(),
+            name: "r".into(),
+            generation: 1,
+            rules: vec![HttpRouteRuleSnap {
+                backend_refs: vec![HttpBackendRefSnap {
+                    name: "svc".into(),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let report = CompileReport {
+            errors: vec![ObjectRefErr {
+                group: "".into(),
+                version: "v1".into(),
+                kind: "Service".into(),
+                namespace: "ns".into(),
+                name: "svc".into(),
+                reason: "BackendNotFound".into(),
+            }],
+        };
+        assert_eq!(
+            http_route_resolved_refs_row(&report, &route),
+            ("False", "BackendNotFound", "backend Service not found")
+        );
+    }
 
     #[test]
     fn empty_input_empty_ir() {

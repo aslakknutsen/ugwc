@@ -5,10 +5,12 @@
 # Istio fork constants (pkg/config/constants/constants.go) when testing together with istiod gwxds.
 #
 # ugwc: GatewayClass.spec.controllerName must appear in UGWC_CONTROLLER_NAMES (comma-separated).
+# Kubernetes watches are cluster-wide (Gateway, HTTPRoute, EndpointSlice, GatewayClass): grant
+# the ugwc identity a ClusterRole with list/watch (and status patch) on those resources across
+# all namespaces, not only a namespaced Role.
 # With this file unchanged, run ugwc with e.g.:
 #
 #   UGWC_KUBE_ENABLE=1 \
-#   UGWC_KUBE_NAMESPACE=<same as GATEWAY_NAMESPACE> \
 #   UGWC_CONTROLLER_NAMES=istio.io/gwxds-controller \
 #   ugwc
 #

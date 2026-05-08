@@ -3,6 +3,7 @@ resolver = "2"
 members = [
     "crates/ugwc",
     "crates/ugwc-core",
+    "crates/ugwc-gwxds",
     "crates/ugwc-k8s",
     "crates/ugwc-xds",
 ]
@@ -46,6 +47,7 @@ http-body-util = "0.1"
 tonic = { version = "0.12", features = ["transport"] }
 prost = "0.13"
 prost-types = "0.13"
+prost-build = "0.13"
 xds-api = "0.2"
 kube = { version = "0.93", features = ["runtime", "derive"] }
 kube-runtime = "0.93"
@@ -56,7 +58,6 @@ tokio-stream = { version = "0.1", features = ["sync"] }
 tokio-util = "0.7"
 strum = { version = "0.26", features = ["derive"] }
 metrics = "0.24"
-metrics-exporter-prometheus = "0.16"
-rustls = "0.23"
-rustls-pemfile = "2"
-tokio-rustls = "0.26"
+metrics-exporter-prometheus = { version = "0.16", default-features = false, features = [
+    "http-listener",
+] }

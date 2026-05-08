@@ -1442,4 +1442,6 @@ Update this file when:
 
 When code exists, link concrete packages in [`control-plane-design-index.md`](control-plane-design-index.md) under “Related code”.
 
+**Praxis / gwxds:** Configure the Praxis data-plane xDS client to use ugwc's ADS listen address (the same operational slot as Istio's `ISTIOD_ADDR`). Praxis subscribes for `type.googleapis.com/istio.gwxds.Resource`; run ugwc with `UGWC_XDS_WIRE=gwxds` (the default) so ADS returns prost-encoded `istio.gwxds.Resource` batches rather than the optional Envoy RDS wire.
+
 **Implementation snapshot (workspace):** Cargo workspace + CI (`Makefile`, `.github/workflows`) are live; crate graph `ugwc` / `ugwc-core` / `ugwc-k8s` / `ugwc-xds`. Full multi-worktree lane simulation was **not** used for this drop — changes landed sequentially on one branch while respecting the documented serial gates (Phase 0→1 before 2A/2B/2C, Merge A before Phase 3+, **SotW before Delta**, threat-model text before prod TLS defaults).
