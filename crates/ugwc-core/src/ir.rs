@@ -199,15 +199,32 @@ pub struct BackendTlsIr {
     pub invalid: bool,
 }
 
+/// Resolved InferencePool backend: EPP service DNS + failure mode (datapath picks pod endpoints).
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct InferencePoolBackendIr {
+    pub pool_namespace: String,
+    pub pool_name: String,
+    pub picker_host: String,
+    pub picker_port: u16,
+    #[serde(default)]
+    pub failure_mode_fail_open: bool,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct BackendIr {
+    #[serde(default)]
     pub service_namespace: String,
+    #[serde(default)]
     pub service_name: String,
+    #[serde(default)]
     pub port_name: Option<String>,
+    #[serde(default)]
     pub port_number: Option<u16>,
     /// Populated when a winning [`BackendTLSPolicy`] applies to this backend port.
     #[serde(default)]
     pub backend_tls: Option<BackendTlsIr>,
+    #[serde(default)]
+    pub inference: Option<InferencePoolBackendIr>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize, Ord, PartialOrd)]

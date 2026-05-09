@@ -146,6 +146,17 @@ pub struct HttpBackendRefSnap {
     pub weight: Option<u32>,
 }
 
+impl HttpBackendRefSnap {
+    #[must_use]
+    pub fn is_inference_pool(&self) -> bool {
+        if self.kind.as_deref() != Some("InferencePool") {
+            return false;
+        }
+        let g = self.group.as_deref().unwrap_or("");
+        g.is_empty() || g == "inference.networking.k8s.io"
+    }
+}
+
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
 pub struct HttpPathMatchSnap {
     #[serde(rename = "type", default)]
@@ -463,6 +474,46 @@ pub struct EffectiveListenerSnap {
     pub tls_resolve_error: Option<String>,
 }
 
+/// [`InferencePool`](https://gateway-api-inference-extension.sigs.k8s.io/reference/spec/) snapshot (inference.networking.k8s.io/v1).
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct InferencePoolSnap {
+    pub namespace: String,
+    pub name: String,
+    #[serde(default)]
+    pub selector: InferencePoolSelectorSnap,
+    #[serde(rename = "targetPorts", default)]
+    pub target_ports: Vec<InferencePoolPortSnap>,
+    /// `http` or `kubernetes.io/h2c`.
+    #[serde(rename = "appProtocol", default)]
+    pub app_protocol: Option<String>,
+    #[serde(rename = "endpointPickerRef", default)]
+    pub endpoint_picker_ref: EndpointPickerRefSnap,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+pub struct InferencePoolSelectorSnap {
+    #[serde(rename = "matchLabels", default)]
+    pub match_labels: BTreeMap<String, String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct InferencePoolPortSnap {
+    pub number: u16,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+pub struct EndpointPickerRefSnap {
+    #[serde(default)]
+    pub group: Option<String>,
+    #[serde(default)]
+    pub kind: Option<String>,
+    pub name: String,
+    #[serde(default)]
+    pub port: Option<InferencePoolPortSnap>,
+    #[serde(rename = "failureMode", default)]
+    pub failure_mode: Option<String>,
+}
+
 /// Bounded cluster state for compiling one `Gateway`.
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
 pub struct ClusterSnapshot {
@@ -510,4 +561,59 @@ pub struct ClusterSnapshot {
     /// Namespace → labels (for `allowedRoutes.namespaces.selector`).
     #[serde(default)]
     pub namespace_labels: BTreeMap<String, BTreeMap<String, String>>,
+    #[serde(rename = "inferencePools", default)]
+    pub inference_pools: Vec<InferencePoolSnap>,
+}
+
+impl ClusterSnapshot {
+    /// Distinct `(namespace, name)` pairs for `InferencePool` backends on routes in this snapshot.
+    #[must_use]
+    pub fn referenced_inference_pools(&self) -> Vec<(String, String)> {
+        let mut out: Vec<(String, String)> = Vec::new();
+        for r in &self.http_routes {
+            for rule in &r.rules {
+                for br in &rule.backend_refs {
+                    if br.is_inference_pool() {
+                        let pns = br
+                            .namespace
+                            .as_deref()
+                            .unwrap_or(r.namespace.as_str())
+                            .to_string();
+                        out.push((pns, br.name.clone()));
+                    }
+                }
+            }
+        }
+        for r in &self.grpc_routes {
+            for rule in &r.rules {
+                for br in &rule.backend_refs {
+                    if br.is_inference_pool() {
+                        let pns = br
+                            .namespace
+                            .as_deref()
+                            .unwrap_or(r.namespace.as_str())
+                            .to_string();
+                        out.push((pns, br.name.clone()));
+                    }
+                }
+            }
+        }
+        for r in &self.tls_routes {
+            for rule in &r.rules {
+                for br in &rule.backend_refs {
+                    if br.is_inference_pool() {
+                        let pns = br
+                            .namespace
+                            .as_deref()
+                            .unwrap_or(r.namespace.as_str())
+                            .to_string();
+                        out.push((pns, br.name.clone()));
+                    }
+                }
+            }
+        }
+        out.sort();
+        out.dedup();
+        out
+    }
 }

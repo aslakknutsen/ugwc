@@ -6,7 +6,7 @@ use k8s_openapi::api::core::v1::{ConfigMap, Namespace, Secret, Service};
 use k8s_openapi::api::discovery::v1::EndpointSlice;
 use k8s_openapi::apimachinery::pkg::util::intstr::IntOrString;
 use kube::api::ListParams;
-use kube::{Api, Client};
+use kube::{Api, Client, ResourceExt};
 use thiserror::Error;
 use tracing::warn;
 use ugwc_core::http_route_attachment::reference_grant_permits_gateway_secret_ref;
@@ -21,14 +21,15 @@ use ugwc_core::snapshot::{
     GrpcRouteRuleSnap, GrpcRouteSnap, TlsRouteRuleSnap, TlsRouteSnap,
     HttpBackendRefSnap, HttpHeaderFilterSnap, HttpHeaderMatchSnap, HttpHeaderNameValueSnap,
     HttpPathMatchSnap, HttpPathModifierSnap, HttpRequestMatchSnap, HttpRequestRedirectFilterSnap,
-    HttpRouteFilterSnap, HttpRouteRuleSnap, HttpRouteSnap, ListenerNamespacesSnap, ListenerSetSnap,
-    ParentRefSnap, ReferenceGrantFromSnap, ReferenceGrantSnap, ReferenceGrantToSnap,
+    EndpointPickerRefSnap, HttpRouteFilterSnap, HttpRouteRuleSnap, HttpRouteSnap,
+    InferencePoolPortSnap, InferencePoolSelectorSnap, InferencePoolSnap, ListenerNamespacesSnap,
+    ListenerSetSnap, ParentRefSnap, ReferenceGrantFromSnap, ReferenceGrantSnap, ReferenceGrantToSnap,
     RouteGroupKindSnap, SecretObjectReferenceSnap, ServicePortSnap, ServiceSnap,
 };
 
 use crate::resources::{
-    BackendTLSPolicy, Gateway, GatewayClass, GRPCRoute, HTTPRoute, ListenerSet, ParentReferenceSpec,
-    ReferenceGrant, TLSRoute,
+    BackendTLSPolicy, Gateway, GatewayClass, GRPCRoute, HTTPRoute, InferencePool, ListenerSet,
+    HTTPBackendRefSpec, ParentReferenceSpec, ReferenceGrant, TLSRoute,
 };
 
 #[derive(Debug, Error)]
@@ -52,6 +53,67 @@ pub fn parent_reference_to_snap(p: &ParentReferenceSpec) -> ParentRefSnap {
 
 fn parent_to_snap(p: &ParentReferenceSpec) -> ParentRefSnap {
     parent_reference_to_snap(p)
+}
+
+fn collect_inference_pool_backend_ref(
+    br: &HTTPBackendRefSpec,
+    route_ns: &str,
+    needed_pools: &mut Vec<(String, String)>,
+    ns_for_labels: &mut HashSet<String>,
+) {
+    if !crate::resources::is_inference_pool_backend_ref(br) {
+        return;
+    }
+    let pns = br
+        .namespace
+        .clone()
+        .unwrap_or_else(|| route_ns.to_string());
+    ns_for_labels.insert(pns.clone());
+    needed_pools.push((pns, br.name.clone()));
+}
+
+fn inference_pool_to_snap(ip: InferencePool) -> InferencePoolSnap {
+    let namespace = ip.namespace().unwrap_or_default();
+    let name = ip.name_any();
+    let spec = ip.spec;
+    InferencePoolSnap {
+        namespace,
+        name,
+        selector: InferencePoolSelectorSnap {
+            match_labels: spec.selector.match_labels,
+        },
+        target_ports: spec
+            .target_ports
+            .into_iter()
+            .filter_map(|p| {
+                let n = p.number;
+                if (1..=65535).contains(&n) {
+                    Some(InferencePoolPortSnap {
+                        number: n as u16,
+                    })
+                } else {
+                    None
+                }
+            })
+            .collect(),
+        app_protocol: spec.app_protocol,
+        endpoint_picker_ref: EndpointPickerRefSnap {
+            group: spec.endpoint_picker_ref.group,
+            kind: spec.endpoint_picker_ref.kind,
+            name: spec.endpoint_picker_ref.name,
+            port: spec.endpoint_picker_ref.port.and_then(|x| {
+                let n = x.number;
+                if (1..=65535).contains(&n) {
+                    Some(InferencePoolPortSnap {
+                        number: n as u16,
+                    })
+                } else {
+                    None
+                }
+            }),
+            failure_mode: spec.endpoint_picker_ref.failure_mode,
+        },
+    }
 }
 
 /// When `allowedListeners` is unset or defaults to no attachment, ListenerSets are ignored.
@@ -978,6 +1040,7 @@ pub async fn load_cluster_snapshot(
     let mut grpc_routes: Vec<GrpcRouteSnap> = Vec::new();
     let mut tls_routes: Vec<TlsRouteSnap> = Vec::new();
     let mut needed_services: Vec<(String, String)> = Vec::new();
+    let mut needed_pools: Vec<(String, String)> = Vec::new();
     let mut ns_for_labels: HashSet<String> = HashSet::new();
     ns_for_labels.insert(gateway_ns.to_string());
 
@@ -991,6 +1054,10 @@ pub async fn load_cluster_snapshot(
         let snap = http_route_to_snap(&item);
         for rule in &item.spec.rules {
             for br in &rule.backend_refs {
+                if crate::resources::is_inference_pool_backend_ref(br) {
+                    collect_inference_pool_backend_ref(br, &rns, &mut needed_pools, &mut ns_for_labels);
+                    continue;
+                }
                 if br.kind.as_deref().unwrap_or("Service") != "Service" {
                     continue;
                 }
@@ -1020,6 +1087,15 @@ pub async fn load_cluster_snapshot(
                 let snap = grpc_route_to_snap(&item);
                 for rule in &item.spec.rules {
                     for br in &rule.backend_refs {
+                        if crate::resources::is_inference_pool_backend_ref(br) {
+                            collect_inference_pool_backend_ref(
+                                br,
+                                &rns,
+                                &mut needed_pools,
+                                &mut ns_for_labels,
+                            );
+                            continue;
+                        }
                         if br.kind.as_deref().unwrap_or("Service") != "Service" {
                             continue;
                         }
@@ -1057,6 +1133,15 @@ pub async fn load_cluster_snapshot(
                 let snap = tls_route_to_snap(&item);
                 for rule in &item.spec.rules {
                     for br in &rule.backend_refs {
+                        if crate::resources::is_inference_pool_backend_ref(br) {
+                            collect_inference_pool_backend_ref(
+                                br,
+                                &rns,
+                                &mut needed_pools,
+                                &mut ns_for_labels,
+                            );
+                            continue;
+                        }
                         if br.kind.as_deref().unwrap_or("Service") != "Service" {
                             continue;
                         }
@@ -1077,6 +1162,33 @@ pub async fn load_cluster_snapshot(
                 error = %e,
                 "TLSRoute list failed — clusters without TLSRoute CRD skip TLS routes"
             );
+        }
+    }
+
+    needed_pools.sort();
+    needed_pools.dedup();
+
+    let mut inference_pools: Vec<InferencePoolSnap> = Vec::new();
+    for (pns, pname) in &needed_pools {
+        let api = Api::<InferencePool>::namespaced(client.clone(), pns);
+        match api.get(pname).await {
+            Ok(ip) => {
+                let picker = &ip.spec.endpoint_picker_ref;
+                let pk = picker.kind.as_deref().unwrap_or("Service");
+                if pk == "Service" && !picker.name.is_empty() {
+                    needed_services.push((pns.clone(), picker.name.clone()));
+                    ns_for_labels.insert(pns.clone());
+                }
+                inference_pools.push(inference_pool_to_snap(ip));
+            }
+            Err(e) => {
+                warn!(
+                    error = %e,
+                    pool_ns = %pns,
+                    pool_name = %pname,
+                    "InferencePool get failed — missing pool or CRD not installed"
+                );
+            }
         }
     }
 
@@ -1243,6 +1355,7 @@ pub async fn load_cluster_snapshot(
         backend_tls_effective,
         backend_tls_policy_outcomes,
         namespace_labels: ns_label_map,
+        inference_pools,
     })
 }
 

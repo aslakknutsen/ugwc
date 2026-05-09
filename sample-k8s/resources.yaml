@@ -12,6 +12,8 @@
 # Kubernetes watches are cluster-wide (Gateway, HTTPRoute, EndpointSlice, GatewayClass): grant
 # the ugwc identity a ClusterRole with list/watch (and status patch) on those resources across
 # all namespaces, not only a namespaced Role.
+# For InferencePool backends (`inference.networking.k8s.io`), also grant get/list/watch on
+# `inferencepools` and patch/update on `inferencepools/status` (see Gateway API Inference Extension RBAC).
 # With this file unchanged, run ugwc with e.g.:
 #
 #   UGWC_KUBE_ENABLE=1 \

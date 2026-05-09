@@ -100,6 +100,55 @@ pub fn reference_grant_permits_service_ref(
     false
 }
 
+/// Cross-namespace `InferencePool` backend ref requires a [`ReferenceGrant`] in the pool namespace.
+#[must_use]
+pub fn reference_grant_permits_inference_pool_ref(
+    grants: &[ReferenceGrantSnap],
+    route_namespace: &str,
+    pool_namespace: &str,
+    pool_name: &str,
+    route_kind: &str,
+) -> bool {
+    if route_namespace == pool_namespace {
+        return true;
+    }
+    const G_FROM: &str = "gateway.networking.k8s.io";
+    const G_POOL: &str = "inference.networking.k8s.io";
+
+    for g in grants {
+        if g.namespace != pool_namespace {
+            continue;
+        }
+        let mut from_ok = false;
+        for fr in &g.from {
+            let fg = fr.group.as_deref().unwrap_or(G_FROM);
+            if fg == G_FROM && fr.kind == route_kind && fr.namespace == route_namespace {
+                from_ok = true;
+                break;
+            }
+        }
+        if !from_ok {
+            continue;
+        }
+        for to in &g.to {
+            if to.kind != "InferencePool" {
+                continue;
+            }
+            let tg = to.group.as_deref().unwrap_or("");
+            if !(tg.is_empty() || tg == G_POOL) {
+                continue;
+            }
+            match &to.name {
+                None => return true,
+                Some(n) if n.is_empty() => return true,
+                Some(n) if n == pool_name => return true,
+                _ => {}
+            }
+        }
+    }
+    false
+}
+
 /// Cross-namespace `Secret` certificate ref from a `Gateway` requires a [`ReferenceGrant`] in the Secret namespace.
 #[must_use]
 pub fn reference_grant_permits_gateway_secret_ref(
@@ -612,6 +661,50 @@ mod tests {
             "ns-a",
             "ns-b",
             "other"
+        ));
+    }
+
+    #[test]
+    fn inference_pool_grant_same_namespace_implicit() {
+        let grants: Vec<ReferenceGrantSnap> = vec![];
+        assert!(reference_grant_permits_inference_pool_ref(
+            &grants,
+            "ns-a",
+            "ns-a",
+            "pool-a",
+            "HTTPRoute",
+        ));
+    }
+
+    #[test]
+    fn inference_pool_grant_cross_namespace_in_pool_ns() {
+        let grants = vec![ReferenceGrantSnap {
+            namespace: "pool-ns".into(),
+            name: "g".into(),
+            from: vec![crate::snapshot::ReferenceGrantFromSnap {
+                group: Some("gateway.networking.k8s.io".into()),
+                kind: "HTTPRoute".into(),
+                namespace: "route-ns".into(),
+            }],
+            to: vec![crate::snapshot::ReferenceGrantToSnap {
+                group: Some("inference.networking.k8s.io".into()),
+                kind: "InferencePool".into(),
+                name: Some("my-pool".into()),
+            }],
+        }];
+        assert!(reference_grant_permits_inference_pool_ref(
+            &grants,
+            "route-ns",
+            "pool-ns",
+            "my-pool",
+            "HTTPRoute",
+        ));
+        assert!(!reference_grant_permits_inference_pool_ref(
+            &grants,
+            "route-ns",
+            "pool-ns",
+            "other-pool",
+            "HTTPRoute",
         ));
     }
 }

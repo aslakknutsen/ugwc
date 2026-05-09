@@ -1,5 +1,6 @@
 //! Multi-watch controller graph: `Gateway`, `HTTPRoute`, `GRPCRoute`, `TLSRoute`, `ListenerSet`,
-//! `ReferenceGrant`, `BackendTLSPolicy`, `ConfigMap` (BackendTLS CA), `EndpointSlice`, `Secret`, `GatewayClass`.
+//! `ReferenceGrant`, `BackendTLSPolicy`, `ConfigMap` (BackendTLS CA), `EndpointSlice`, `Secret`,
+//! `GatewayClass`, `InferencePool` (fan-out via routes that reference a pool).
 
 use std::future::Future;
 use std::pin::Pin;
@@ -21,7 +22,8 @@ use tracing::{info, instrument, warn};
 use crate::resources::{
     backend_tls_policy_spec_references_configmap, backend_tls_policy_targets_service,
     gateway_spec_references_secret, listenerset_spec_references_secret, BackendTLSPolicy, Gateway,
-    GatewayClass, GRPCRoute, HTTPRoute, ListenerSet, ParentReferenceSpec, ReferenceGrant, TLSRoute,
+    GatewayClass, GRPCRoute, HTTPRoute, InferencePool, ListenerSet, ParentReferenceSpec,
+    ReferenceGrant, TLSRoute,
 };
 
 pub type ReconcileFuture = Pin<Box<dyn Future<Output = Result<(), String>> + Send>>;
@@ -129,6 +131,123 @@ async fn gateway_targets_for_tls_route(
     .await
 }
 
+fn http_route_references_inference_pool(
+    route: &HTTPRoute,
+    pool_ns: &str,
+    pool_name: &str,
+) -> bool {
+    let rns = route.metadata.namespace.as_deref().unwrap_or("");
+    for rule in &route.spec.rules {
+        for br in &rule.backend_refs {
+            if !crate::resources::is_inference_pool_backend_ref(br) {
+                continue;
+            }
+            let pns = br.namespace.as_deref().unwrap_or(rns);
+            if pns == pool_ns && br.name == pool_name {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+fn grpc_route_references_inference_pool(
+    route: &GRPCRoute,
+    pool_ns: &str,
+    pool_name: &str,
+) -> bool {
+    let rns = route.metadata.namespace.as_deref().unwrap_or("");
+    for rule in &route.spec.rules {
+        for br in &rule.backend_refs {
+            if !crate::resources::is_inference_pool_backend_ref(br) {
+                continue;
+            }
+            let pns = br.namespace.as_deref().unwrap_or(rns);
+            if pns == pool_ns && br.name == pool_name {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+fn tls_route_references_inference_pool(
+    route: &TLSRoute,
+    pool_ns: &str,
+    pool_name: &str,
+) -> bool {
+    let rns = route.metadata.namespace.as_deref().unwrap_or("");
+    for rule in &route.spec.rules {
+        for br in &rule.backend_refs {
+            if !crate::resources::is_inference_pool_backend_ref(br) {
+                continue;
+            }
+            let pns = br.namespace.as_deref().unwrap_or(rns);
+            if pns == pool_ns && br.name == pool_name {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+async fn gateway_targets_for_inference_pool(
+    client: &Client,
+    pool_ns: &str,
+    pool_name: &str,
+) -> HashSet<(String, String)> {
+    let mut out = HashSet::new();
+    let hr_api: Api<HTTPRoute> = Api::all(client.clone());
+    match hr_api.list(&ListParams::default()).await {
+        Ok(list) => {
+            for route in list.items {
+                if http_route_references_inference_pool(&route, pool_ns, pool_name) {
+                    out.extend(gateway_targets_for_route(client, &route).await);
+                }
+            }
+        }
+        Err(e) => warn!(
+            error = %e,
+            pool_ns = %pool_ns,
+            pool_name = %pool_name,
+            "list httproute after inferencepool change"
+        ),
+    }
+    let gr_api: Api<GRPCRoute> = Api::all(client.clone());
+    match gr_api.list(&ListParams::default()).await {
+        Ok(list) => {
+            for route in list.items {
+                if grpc_route_references_inference_pool(&route, pool_ns, pool_name) {
+                    out.extend(gateway_targets_for_grpc_route(client, &route).await);
+                }
+            }
+        }
+        Err(e) => warn!(
+            error = %e,
+            pool_ns = %pool_ns,
+            pool_name = %pool_name,
+            "list grpcroute after inferencepool change"
+        ),
+    }
+    let tr_api: Api<TLSRoute> = Api::all(client.clone());
+    match tr_api.list(&ListParams::default()).await {
+        Ok(list) => {
+            for route in list.items {
+                if tls_route_references_inference_pool(&route, pool_ns, pool_name) {
+                    out.extend(gateway_targets_for_tls_route(client, &route).await);
+                }
+            }
+        }
+        Err(e) => warn!(
+            error = %e,
+            pool_ns = %pool_ns,
+            pool_name = %pool_name,
+            "list tlsroute after inferencepool change"
+        ),
+    }
+    out
+}
+
 fn http_route_references_backend_tls_policy_target(pol: &BackendTLSPolicy, route: &HTTPRoute) -> bool {
     let pol_ns = pol.metadata.namespace.as_deref().unwrap_or("");
     for rule in &route.spec.rules {
@@ -221,7 +340,8 @@ async fn gateway_targets_for_backend_tls_policy(
     out
 }
 
-/// Observe gateways, routes, grants, backend TLS policies, CA ConfigMaps, endpoints, secrets, and classes.
+/// Observe gateways, routes, grants, backend TLS policies, CA ConfigMaps, endpoints, secrets,
+/// classes, and inference pools (mapped via routes → gateways).
 #[instrument(skip(client, shutdown, reconcile))]
 pub async fn run_gateway_controller(
     client: Client,
@@ -345,6 +465,38 @@ pub async fn run_gateway_controller(
             }
         }
         info!("tlsroute watcher shutdown");
+    });
+
+    let sd_ipool = shutdown.clone();
+    let c_ipool = client.clone();
+    let tx_ipool = tx.clone();
+    tokio::spawn(async move {
+        let api: Api<InferencePool> = Api::all(c_ipool.clone());
+        let cfg = WatcherConfig::default().any_semantic();
+        let mut stream = Box::pin(watcher(api, cfg).applied_objects());
+        loop {
+            tokio::select! {
+                _ = sd_ipool.cancelled() => break,
+                ev = stream.next() => {
+                    match ev {
+                        Some(Ok(pool)) => {
+                            let pns = pool.namespace().unwrap_or_default();
+                            let pname = pool.name_any();
+                            let targets =
+                                gateway_targets_for_inference_pool(&c_ipool, &pns, &pname).await;
+                            for (gwns, gwname) in targets {
+                                if tx_ipool.send((gwns, gwname)).await.is_err() {
+                                    return;
+                                }
+                            }
+                        }
+                        Some(Err(e)) => warn!(error = %e, "inferencepool watch stream"),
+                        None => break,
+                    }
+                }
+            }
+        }
+        info!("inferencepool watcher shutdown");
     });
 
     let sd_rg = shutdown.clone();

@@ -8,20 +8,21 @@ use uuid::Uuid;
 use crate::compile::{CompileReport, HttpGrpcConflictLoser, ObjectRefErr};
 use crate::http_route_attachment::{
     find_effective_for_key, grpc_route_attachment_keys, grpc_route_listener_hostname_ok,
-    intersect_route_listener_hosts, reference_grant_permits_service_ref, route_attachment_keys,
-    route_listener_hostname_ok, tls_route_attachment_keys, tls_route_listener_hostname_ok,
+    intersect_route_listener_hosts, reference_grant_permits_inference_pool_ref,
+    reference_grant_permits_service_ref, route_attachment_keys, route_listener_hostname_ok,
+    tls_route_attachment_keys, tls_route_listener_hostname_ok,
 };
 use crate::inference::InferenceIr;
 use crate::ir::{
-    BackendEndpointIr, BackendIr, IrSnapshot, ListenerIr, NamedHeaderIr, RouteFamily,
-    RequestHeaderModifierIr, RequestRedirectIr, RouteMatchIr, RouteRuleIr, SnapshotMeta, TlsMode,
-    WeightedBackendIr, IR_VERSION,
+    BackendEndpointIr, BackendIr, InferencePoolBackendIr, IrSnapshot, ListenerIr, NamedHeaderIr,
+    RequestHeaderModifierIr, RequestRedirectIr, RouteFamily, RouteMatchIr, RouteRuleIr,
+    SnapshotMeta, TlsMode, WeightedBackendIr, IR_VERSION,
 };
 use crate::policy::PolicyOverlayIr;
 use crate::snapshot::{
     ClusterSnapshot, EffectiveListenerSnap, GrpcRouteMatchSnap, GrpcRouteRuleSnap, GrpcRouteSnap,
-    HttpBackendRefSnap, HttpRequestMatchSnap, HttpRouteRuleSnap, HttpRouteSnap, ListenerParentSnap,
-    ServiceSnap, TlsRouteRuleSnap, TlsRouteSnap,
+    HttpBackendRefSnap, HttpRequestMatchSnap, HttpRouteRuleSnap, HttpRouteSnap, InferencePoolSnap,
+    ListenerParentSnap, ServiceSnap, TlsRouteRuleSnap, TlsRouteSnap,
 };
 
 #[derive(Clone, Eq, PartialEq)]
@@ -93,6 +94,115 @@ fn tlsroute_obj_err(route: &TlsRouteSnap, reason: impl Into<String>) -> ObjectRe
         name: route.name.clone(),
         reason: reason.into(),
     }
+}
+
+fn find_inference_pool<'a>(
+    snapshot: &'a ClusterSnapshot,
+    ns: &str,
+    name: &str,
+) -> Option<&'a InferencePoolSnap> {
+    snapshot
+        .inference_pools
+        .iter()
+        .find(|p| p.namespace == ns && p.name == name)
+}
+
+fn inference_epp_dns_host(svc_name: &str, svc_namespace: &str) -> String {
+    format!("{svc_name}.{svc_namespace}.svc.cluster.local")
+}
+
+fn resolve_inference_pool_backend(
+    route_namespace: &str,
+    route_kind: &str,
+    br: &HttpBackendRefSnap,
+    snapshot: &ClusterSnapshot,
+    report: &mut CompileReport,
+    err: impl Fn(String) -> ObjectRefErr,
+) -> Option<WeightedBackendIr> {
+    let pool_ns = br.namespace.as_deref().unwrap_or(route_namespace);
+    let pool_name = br.name.as_str();
+    if !reference_grant_permits_inference_pool_ref(
+        &snapshot.reference_grants,
+        route_namespace,
+        pool_ns,
+        pool_name,
+        route_kind,
+    ) {
+        report.errors.push(err("RefNotPermitted".into()));
+        return None;
+    }
+    let Some(pool) = find_inference_pool(snapshot, pool_ns, pool_name) else {
+        report.errors.push(ObjectRefErr {
+            group: "inference.networking.k8s.io".into(),
+            version: "v1".into(),
+            kind: "InferencePool".into(),
+            namespace: pool_ns.to_string(),
+            name: pool_name.to_string(),
+            reason: "BackendNotFound".into(),
+        });
+        return None;
+    };
+    let ep = &pool.endpoint_picker_ref;
+    let pk = ep.kind.as_deref().unwrap_or("Service");
+    if pk != "Service" {
+        report.errors.push(err(format!(
+            "InvalidExtensionRef: EndpointPickerRef kind {pk} not supported"
+        )));
+        return None;
+    }
+    let Some(port_snap) = ep.port.as_ref() else {
+        report.errors.push(err(
+            "InvalidExtensionRef: EndpointPickerRef.port required for Service".into(),
+        ));
+        return None;
+    };
+    let picker_port = port_snap.number;
+    let svc_name = ep.name.as_str();
+    if svc_name.is_empty() {
+        report.errors.push(err(
+            "InvalidExtensionRef: EndpointPickerRef.name required".into(),
+        ));
+        return None;
+    }
+    let Some(svc) = find_service(snapshot, pool_ns, svc_name) else {
+        report.errors.push(ObjectRefErr {
+            group: "".into(),
+            version: "v1".into(),
+            kind: "Service".into(),
+            namespace: pool_ns.to_string(),
+            name: svc_name.to_string(),
+            reason: "BackendNotFound".into(),
+        });
+        return None;
+    };
+    if !svc.ports.iter().any(|p| p.port == picker_port) {
+        report.errors.push(err(format!(
+            "InvalidExtensionRef: Service {svc_name} has no port number {picker_port}"
+        )));
+        return None;
+    }
+    let fail_open = ep
+        .failure_mode
+        .as_deref()
+        .is_some_and(|m| m.eq_ignore_ascii_case("FailOpen"));
+    let picker_host = inference_epp_dns_host(svc_name, pool_ns);
+    Some(WeightedBackendIr {
+        backend: BackendIr {
+            service_namespace: String::new(),
+            service_name: String::new(),
+            port_name: None,
+            port_number: None,
+            backend_tls: None,
+            inference: Some(InferencePoolBackendIr {
+                pool_namespace: pool_ns.to_string(),
+                pool_name: pool_name.to_string(),
+                picker_host,
+                picker_port,
+                failure_mode_fail_open: fail_open,
+            }),
+        },
+        weight: br.weight.unwrap_or(1),
+    })
 }
 
 fn gateway_obj_err(snapshot: &ClusterSnapshot, reason: impl Into<String>) -> ObjectRefErr {
@@ -610,6 +720,19 @@ fn resolve_http_route_backends(
 ) -> Vec<WeightedBackendIr> {
     let mut backends = Vec::new();
     for br in &rule.backend_refs {
+        if br.is_inference_pool() {
+            if let Some(wb) = resolve_inference_pool_backend(
+                &route.namespace,
+                "HTTPRoute",
+                br,
+                snapshot,
+                report,
+                |msg| httproute_obj_err(route, msg),
+            ) {
+                backends.push(wb);
+            }
+            continue;
+        }
         if br.kind.as_deref().unwrap_or("Service") != "Service" {
             report.errors.push(ObjectRefErr {
                 group: "gateway.networking.k8s.io".into(),
@@ -679,6 +802,7 @@ fn resolve_http_route_backends(
                 port_name: br.port_name.clone(),
                 port_number: Some(port),
                 backend_tls,
+                inference: None,
             },
             weight: br.weight.unwrap_or(1),
         });
@@ -694,6 +818,19 @@ fn resolve_grpc_route_backends(
 ) -> Vec<WeightedBackendIr> {
     let mut backends = Vec::new();
     for br in &rule.backend_refs {
+        if br.is_inference_pool() {
+            if let Some(wb) = resolve_inference_pool_backend(
+                &route.namespace,
+                "GRPCRoute",
+                br,
+                snapshot,
+                report,
+                |msg| grpcroute_obj_err(route, msg),
+            ) {
+                backends.push(wb);
+            }
+            continue;
+        }
         if br.kind.as_deref().unwrap_or("Service") != "Service" {
             report.errors.push(ObjectRefErr {
                 group: "gateway.networking.k8s.io".into(),
@@ -763,6 +900,7 @@ fn resolve_grpc_route_backends(
                 port_name: br.port_name.clone(),
                 port_number: Some(port),
                 backend_tls,
+                inference: None,
             },
             weight: br.weight.unwrap_or(1),
         });
@@ -778,6 +916,19 @@ fn resolve_tls_route_backends(
 ) -> Vec<WeightedBackendIr> {
     let mut backends = Vec::new();
     for br in &rule.backend_refs {
+        if br.is_inference_pool() {
+            if let Some(wb) = resolve_inference_pool_backend(
+                &route.namespace,
+                "TLSRoute",
+                br,
+                snapshot,
+                report,
+                |msg| tlsroute_obj_err(route, msg),
+            ) {
+                backends.push(wb);
+            }
+            continue;
+        }
         if br.kind.as_deref().unwrap_or("Service") != "Service" {
             report.errors.push(ObjectRefErr {
                 group: "gateway.networking.k8s.io".into(),
@@ -847,6 +998,7 @@ fn resolve_tls_route_backends(
                 port_name: br.port_name.clone(),
                 port_number: Some(port),
                 backend_tls,
+                inference: None,
             },
             weight: br.weight.unwrap_or(1),
         });
@@ -1476,6 +1628,9 @@ pub fn ir_from_cluster(snapshot: &ClusterSnapshot) -> (IrSnapshot, CompileReport
     let mut backends: BTreeMap<String, Vec<BackendEndpointIr>> = BTreeMap::new();
     for r in &routes {
         for wb in &r.backends {
+            if wb.backend.inference.is_some() {
+                continue;
+            }
             let key = backend_key(
                 &wb.backend.service_namespace,
                 &wb.backend.service_name,
@@ -1634,6 +1789,7 @@ mod tests {
             backend_tls_effective: BTreeMap::new(),
             backend_tls_policy_outcomes: vec![],
             namespace_labels: BTreeMap::new(),
+            inference_pools: vec![],
         }
     }
 
@@ -1879,6 +2035,7 @@ mod tests {
             backend_tls_effective: BTreeMap::new(),
             backend_tls_policy_outcomes: vec![],
             namespace_labels: BTreeMap::new(),
+            inference_pools: vec![],
         };
         let (ir, rep) = ir_from_cluster(&snap);
         assert!(!rep.has_errors(), "{:?}", rep.errors);
@@ -2201,6 +2358,7 @@ mod tests {
             backend_tls_effective: BTreeMap::new(),
             backend_tls_policy_outcomes: vec![],
             namespace_labels: BTreeMap::new(),
+            inference_pools: vec![],
         }
     }
 

@@ -9,8 +9,9 @@ pub mod istio {
 }
 
 use istio::gwxds::{
-    Backend, BackendTls, HeaderNameValue, Listener, Protocol, RequestHeaderModifier, RequestRedirect,
-    Resource, Route, RouteMatch, TlsConfig,
+    Backend, BackendRef, BackendTls, FailureMode, HeaderNameValue, InferencePool as InferencePoolPb,
+    Listener, Protocol, RequestHeaderModifier, RequestRedirect, Resource, Route, RouteMatch,
+    TlsConfig,
 };
 use ugwc_core::ir::{RouteFamily, TlsMode};
 use ugwc_core::IrSnapshot;
@@ -209,6 +210,29 @@ pub fn encode_ir(ir: &IrSnapshot) -> Vec<Resource> {
             let mut invalid_backend_ref = false;
             if r.request_redirect.is_none() {
                 for wb in &r.backends {
+                    if let Some(ref inf) = wb.backend.inference {
+                        let picker_host = inf.picker_host.clone();
+                        let picker_port = u32::from(inf.picker_port);
+                        backends_pb.push(Backend {
+                            host: picker_host.clone(),
+                            port: picker_port,
+                            weight: wb.weight,
+                            inference_pool: Some(InferencePoolPb {
+                                endpoint_picker: Some(BackendRef {
+                                    host: picker_host,
+                                    port: picker_port,
+                                }),
+                                failure_mode: if inf.failure_mode_fail_open {
+                                    FailureMode::FailOpen as i32
+                                } else {
+                                    FailureMode::FailClosed as i32
+                                },
+                            }),
+                            tls: None,
+                            dial_port: picker_port,
+                        });
+                        continue;
+                    }
                     let key = format!(
                         "{}/{}/{}",
                         wb.backend.service_namespace,
@@ -385,6 +409,7 @@ mod tests {
                         port_name: None,
                         port_number: Some(443),
                         backend_tls: None,
+                        inference: None,
                     },
                     weight: 1,
                 }],
@@ -465,6 +490,7 @@ mod tests {
                         port_name: None,
                         port_number: Some(443),
                         backend_tls: None,
+                        inference: None,
                     },
                     weight: 1,
                 }],
@@ -559,6 +585,7 @@ mod tests {
                             trust_system_ca: false,
                             invalid: false,
                         }),
+                        inference: None,
                     },
                     weight: 1,
                 }],
@@ -582,6 +609,111 @@ mod tests {
         assert_eq!(tls.ca_cert, b"BEGIN CA".as_slice());
         assert_eq!(tls.sans, vec!["alt.internal".to_string()]);
         assert!(!tls.invalid);
+    }
+
+    #[test]
+    fn encode_inference_pool_sets_endpoint_picker_and_failure_mode() {
+        use std::collections::BTreeMap;
+
+        use ugwc_core::ir::{
+            BackendIr, InferencePoolBackendIr, IrRevision, IrScopeId, ListenerAttachmentIr,
+            ListenerIr, RouteFamily, RouteMatchIr, RouteRuleIr, SnapshotMeta, TlsMode,
+            WeightedBackendIr, IR_VERSION,
+        };
+        use ugwc_core::IrSnapshot;
+
+        let scope = IrScopeId::new("default", "gw");
+        let listener = ListenerIr {
+            section_name: "http".into(),
+            bind_port: 80,
+            tls: TlsMode::Plaintext,
+            parent_kind: "Gateway".into(),
+            parent_namespace: "default".into(),
+            parent_name: "gw".into(),
+            conflicted: false,
+            hostname: None,
+            tls_cert_pem: vec![],
+            tls_key_pem: vec![],
+            allowed_route_group_kinds: vec![],
+        };
+        let attach = ListenerAttachmentIr {
+            parent_kind: "Gateway".into(),
+            parent_namespace: "default".into(),
+            parent_name: "gw".into(),
+            section_name: "http".into(),
+            port: 80,
+        };
+        let picker_host = "epp.ns.svc.cluster.local".to_string();
+        let ir = IrSnapshot {
+            ir_version: IR_VERSION,
+            revision: IrRevision::Sequence(0),
+            scope,
+            listeners: vec![listener],
+            routes: vec![RouteRuleIr {
+                name: "hr/pool".into(),
+                route_family: RouteFamily::Http,
+                hosts: vec![],
+                matches: vec![RouteMatchIr {
+                    path_prefix: Some("/".into()),
+                    path_exact: None,
+                    headers_exact: BTreeMap::new(),
+                    grpc_service: None,
+                    grpc_method: None,
+                }],
+                backends: vec![WeightedBackendIr {
+                    backend: BackendIr {
+                        service_namespace: String::new(),
+                        service_name: String::new(),
+                        port_name: None,
+                        port_number: None,
+                        backend_tls: None,
+                        inference: Some(InferencePoolBackendIr {
+                            pool_namespace: "inf".into(),
+                            pool_name: "p1".into(),
+                            picker_host: picker_host.clone(),
+                            picker_port: 9000,
+                            failure_mode_fail_open: false,
+                        }),
+                    },
+                    weight: 1,
+                }],
+                request_redirect: None,
+                request_header_modifier: None,
+                response_header_modifier: None,
+                listener: Some(attach),
+            }],
+            backends: BTreeMap::new(),
+            meta: SnapshotMeta {
+                correlation_id: uuid::Uuid::nil(),
+                has_errors: false,
+            },
+            policy: Default::default(),
+            inference: Default::default(),
+        };
+        let enc = encode_ir(&ir);
+        let b = &enc[0].routes[0].backends[0];
+        assert_eq!(b.host, picker_host);
+        assert_eq!(b.port, 9000);
+        assert_eq!(b.dial_port, 9000);
+        let ip = b.inference_pool.as_ref().expect("inference_pool");
+        let ep = ip.endpoint_picker.as_ref().expect("endpoint_picker");
+        assert_eq!(ep.host, picker_host);
+        assert_eq!(ep.port, 9000);
+        assert_eq!(ip.failure_mode, FailureMode::FailClosed as i32);
+
+        let mut ir_open = ir.clone();
+        ir_open.routes[0].backends[0]
+            .backend
+            .inference
+            .as_mut()
+            .expect("inference")
+            .failure_mode_fail_open = true;
+        let enc_open = encode_ir(&ir_open);
+        let ip_open = enc_open[0].routes[0].backends[0]
+            .inference_pool
+            .as_ref()
+            .expect("inference_pool");
+        assert_eq!(ip_open.failure_mode, FailureMode::FailOpen as i32);
     }
 
     #[test]

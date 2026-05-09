@@ -56,6 +56,7 @@ impl HttpCompileFixture {
                         port_name: Some("http".into()),
                         port_number: Some(80),
                         backend_tls: None,
+                        inference: None,
                     },
                     weight: 1,
                 }],

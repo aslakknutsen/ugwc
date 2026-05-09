@@ -288,6 +288,21 @@ pub async fn run(cfg: Config) -> Result<(), Box<dyn std::error::Error + Send + S
                         {
                             warn!(error = %e, "backend TLS policy status patch");
                         }
+
+                        if let Err(e) = ugwc_k8s::apply_inference_pools_for_gateway(
+                            &client_inner,
+                            &ns,
+                            &name,
+                            &primary_controller,
+                            snap,
+                            programmed_ok,
+                            &co.report,
+                            Some(status_cache.clone()),
+                        )
+                        .await
+                        {
+                            warn!(error = %e, "inferencepool status patch");
+                        }
                     }
 
                     match plan.action {

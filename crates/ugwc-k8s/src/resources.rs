@@ -389,6 +389,16 @@ pub struct HTTPBackendRefSpec {
     pub weight: Option<u32>,
 }
 
+/// True when `backendRef` targets an `InferencePool` (`inference.networking.k8s.io/v1`).
+#[must_use]
+pub fn is_inference_pool_backend_ref(br: &HTTPBackendRefSpec) -> bool {
+    if br.kind.as_deref() != Some("InferencePool") {
+        return false;
+    }
+    let g = br.group.as_deref().unwrap_or("");
+    g.is_empty() || g == "inference.networking.k8s.io"
+}
+
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 pub struct HTTPRouteStatus {
     /// Populated by the apiserver; preserved across ugwc status merges.
@@ -494,6 +504,56 @@ pub struct TLSRouteRuleSpec {
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 pub struct TLSRouteStatus {
+    #[serde(default)]
+    pub parents: Vec<serde_json::Value>,
+}
+
+/// [`InferencePool`](https://gateway-api-inference-extension.sigs.k8s.io/reference/spec/) — inference.networking.k8s.io/v1.
+#[derive(CustomResource, Clone, Debug, Deserialize, Serialize)]
+#[kube(
+    group = "inference.networking.k8s.io",
+    version = "v1",
+    kind = "InferencePool",
+    namespaced,
+    status = "InferencePoolStatus",
+    schema = "disabled"
+)]
+pub struct InferencePoolSpec {
+    pub selector: InferencePoolSelectorSpec,
+    #[serde(rename = "targetPorts")]
+    pub target_ports: Vec<InferencePoolPortSpec>,
+    #[serde(rename = "appProtocol", default)]
+    pub app_protocol: Option<String>,
+    #[serde(rename = "endpointPickerRef")]
+    pub endpoint_picker_ref: EndpointPickerRefSpec,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+pub struct InferencePoolSelectorSpec {
+    #[serde(rename = "matchLabels", default)]
+    pub match_labels: BTreeMap<String, String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct InferencePoolPortSpec {
+    pub number: i32,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct EndpointPickerRefSpec {
+    #[serde(default)]
+    pub group: Option<String>,
+    #[serde(default)]
+    pub kind: Option<String>,
+    pub name: String,
+    #[serde(default)]
+    pub port: Option<InferencePoolPortSpec>,
+    #[serde(rename = "failureMode", default)]
+    pub failure_mode: Option<String>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+pub struct InferencePoolStatus {
     #[serde(default)]
     pub parents: Vec<serde_json::Value>,
 }
