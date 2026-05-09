@@ -472,6 +472,7 @@ fn route_ref_error_reason(reason: &str) -> &'static str {
         "BackendNotFound" => "BackendNotFound",
         "NoReadyEndpoints" => "NoReadyEndpoints",
         "RefNotPermitted" => "RefNotPermitted",
+        "InvalidCACertificateRef" => "InvalidCACertificateRef",
         _ => "InvalidReference",
     }
 }

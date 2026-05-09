@@ -9,8 +9,8 @@ pub mod istio {
 }
 
 use istio::gwxds::{
-    Backend, HeaderNameValue, Listener, Protocol, RequestHeaderModifier, RequestRedirect, Resource,
-    Route, RouteMatch, TlsConfig,
+    Backend, BackendTls, HeaderNameValue, Listener, Protocol, RequestHeaderModifier, RequestRedirect,
+    Resource, Route, RouteMatch, TlsConfig,
 };
 use ugwc_core::ir::{RouteFamily, TlsMode};
 use ugwc_core::IrSnapshot;
@@ -68,6 +68,17 @@ fn header_modifier_proto(h: &ugwc_core::ir::RequestHeaderModifierIr) -> RequestH
             })
             .collect(),
         remove: h.remove.clone(),
+    }
+}
+
+fn backend_tls_proto(t: &ugwc_core::ir::BackendTlsIr) -> BackendTls {
+    BackendTls {
+        ca_cert: t.ca_cert_pem.clone(),
+        hostname: t.hostname.clone(),
+        sans: t.sans.clone(),
+        client_cert: vec![],
+        client_key: vec![],
+        invalid: t.invalid,
     }
 }
 
@@ -211,12 +222,13 @@ pub fn encode_ir(ir: &IrSnapshot) -> Vec<Resource> {
                         .first()
                         .map(|e| u32::from(e.port))
                         .unwrap_or(port);
+                    let tls = wb.backend.backend_tls.as_ref().map(backend_tls_proto);
                     backends_pb.push(Backend {
                         host,
                         port,
                         weight: wb.weight,
                         inference_pool: None,
-                        tls: None,
+                        tls,
                         dial_port,
                     });
                 }
@@ -372,6 +384,7 @@ mod tests {
                         service_name: "svc".into(),
                         port_name: None,
                         port_number: Some(443),
+                        backend_tls: None,
                     },
                     weight: 1,
                 }],
@@ -451,6 +464,7 @@ mod tests {
                         service_name: "svc".into(),
                         port_name: None,
                         port_number: Some(443),
+                        backend_tls: None,
                     },
                     weight: 1,
                 }],
@@ -475,6 +489,99 @@ mod tests {
         let rt = &enc[0].routes[0];
         assert!(rt.tls_route);
         assert!(!rt.grpc_route);
+    }
+
+    #[test]
+    fn encode_backend_tls_populates_backend_message() {
+        use std::collections::BTreeMap;
+
+        use ugwc_core::ir::{
+            BackendEndpointIr, BackendIr, BackendTlsIr, IrRevision, IrScopeId, ListenerAttachmentIr,
+            ListenerIr, RouteFamily, RouteMatchIr, RouteRuleIr, SnapshotMeta, TlsMode,
+            WeightedBackendIr, IR_VERSION,
+        };
+        use ugwc_core::IrSnapshot;
+
+        let scope = IrScopeId::new("default", "gw");
+        let listener = ListenerIr {
+            section_name: "http".into(),
+            bind_port: 80,
+            tls: TlsMode::Plaintext,
+            parent_kind: "Gateway".into(),
+            parent_namespace: "default".into(),
+            parent_name: "gw".into(),
+            conflicted: false,
+            hostname: None,
+            tls_cert_pem: vec![],
+            tls_key_pem: vec![],
+            allowed_route_group_kinds: vec![],
+        };
+        let attach = ListenerAttachmentIr {
+            parent_kind: "Gateway".into(),
+            parent_namespace: "default".into(),
+            parent_name: "gw".into(),
+            section_name: "http".into(),
+            port: 80,
+        };
+        let backends_map = BTreeMap::from([(
+            "default/svc:80".into(),
+            vec![BackendEndpointIr {
+                address: "10.1.2.3".into(),
+                port: 8080,
+            }],
+        )]);
+        let ir = IrSnapshot {
+            ir_version: IR_VERSION,
+            revision: IrRevision::Sequence(0),
+            scope,
+            listeners: vec![listener],
+            routes: vec![RouteRuleIr {
+                name: "hr/x".into(),
+                route_family: RouteFamily::Http,
+                hosts: vec![],
+                matches: vec![RouteMatchIr {
+                    path_prefix: Some("/".into()),
+                    path_exact: None,
+                    headers_exact: BTreeMap::new(),
+                    grpc_service: None,
+                    grpc_method: None,
+                }],
+                backends: vec![WeightedBackendIr {
+                    backend: BackendIr {
+                        service_namespace: "default".into(),
+                        service_name: "svc".into(),
+                        port_name: Some("http".into()),
+                        port_number: Some(80),
+                        backend_tls: Some(BackendTlsIr {
+                            ca_cert_pem: b"BEGIN CA".to_vec(),
+                            hostname: "svc.internal".into(),
+                            sans: vec!["alt.internal".into()],
+                            trust_system_ca: false,
+                            invalid: false,
+                        }),
+                    },
+                    weight: 1,
+                }],
+                request_redirect: None,
+                request_header_modifier: None,
+                response_header_modifier: None,
+                listener: Some(attach),
+            }],
+            backends: backends_map,
+            meta: SnapshotMeta {
+                correlation_id: uuid::Uuid::nil(),
+                has_errors: false,
+            },
+            policy: Default::default(),
+            inference: Default::default(),
+        };
+        let enc = encode_ir(&ir);
+        let b = &enc[0].routes[0].backends[0];
+        let tls = b.tls.as_ref().expect("backend tls");
+        assert_eq!(tls.hostname, "svc.internal");
+        assert_eq!(tls.ca_cert, b"BEGIN CA".as_slice());
+        assert_eq!(tls.sans, vec!["alt.internal".to_string()]);
+        assert!(!tls.invalid);
     }
 
     #[test]

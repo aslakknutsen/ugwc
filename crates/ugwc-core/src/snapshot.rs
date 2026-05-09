@@ -5,6 +5,8 @@
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
+use crate::ir::BackendTlsIr;
+
 /// TLS stanza on a Gateway API listener (`ListenerTLSConfig` subset).
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
 pub struct GatewayListenerTlsSnap {
@@ -414,6 +416,28 @@ pub enum ListenerParentSnap {
     ListenerSet { namespace: String, name: String },
 }
 
+/// Winning BackendTLS validation for one backend key `namespace/name:port` (loader).
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct BackendTlsEffectiveSnap {
+    pub tls: BackendTlsIr,
+}
+
+/// Status-related outcome for one `BackendTLSPolicy` during a gateway-scoped load.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct BackendTlsPolicyOutcomeSnap {
+    pub namespace: String,
+    pub name: String,
+    /// Lost precedence for every overlapping target with another policy.
+    #[serde(default)]
+    pub conflicted: bool,
+    #[serde(default)]
+    pub resolved_refs_ok: bool,
+    #[serde(default)]
+    pub accepted: bool,
+    #[serde(default)]
+    pub message: Option<String>,
+}
+
 /// One listener row after merge — [`crate::listener_merge::merge_effective_listeners`].
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct EffectiveListenerSnap {
@@ -477,6 +501,12 @@ pub struct ClusterSnapshot {
     pub gateway_class: Option<GatewayClassSnap>,
     #[serde(rename = "referenceGrants", default)]
     pub reference_grants: Vec<ReferenceGrantSnap>,
+    /// Winning TLS policy per backend key `svc_ns/svc_name:port_number`.
+    #[serde(rename = "backendTlsEffective", default)]
+    pub backend_tls_effective: BTreeMap<String, BackendTlsEffectiveSnap>,
+    /// Per-policy rollup for `BackendTLSPolicy` status patches.
+    #[serde(rename = "backendTlsPolicyOutcomes", default)]
+    pub backend_tls_policy_outcomes: Vec<BackendTlsPolicyOutcomeSnap>,
     /// Namespace → labels (for `allowedRoutes.namespaces.selector`).
     #[serde(default)]
     pub namespace_labels: BTreeMap<String, BTreeMap<String, String>>,

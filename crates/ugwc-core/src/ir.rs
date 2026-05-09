@@ -5,7 +5,7 @@ use std::collections::BTreeMap;
 use uuid::Uuid;
 
 /// Schema version embedded on every snapshot (bump when wire/IR changes).
-pub const IR_VERSION: u32 = 5;
+pub const IR_VERSION: u32 = 6;
 
 /// Per-dataplane scope identity for sharded xDS versions (see module docs).
 #[derive(Clone, Debug, Eq, Hash, PartialEq, Ord, PartialOrd)]
@@ -180,12 +180,34 @@ pub struct RouteRuleIr {
     pub listener: Option<ListenerAttachmentIr>,
 }
 
+/// Upstream TLS settings for a Service backend ([`BackendTLSPolicy`] validation), mirrored for xDS.
+#[derive(Clone, Debug, Eq, PartialEq, Default, serde::Serialize, serde::Deserialize)]
+pub struct BackendTlsIr {
+    /// PEM CA bundle; empty when [`Self::trust_system_ca`] is true.
+    #[serde(default)]
+    pub ca_cert_pem: Vec<u8>,
+    /// SNI / verify hostname for the backend TLS handshake.
+    pub hostname: String,
+    /// Subject Alternative Names (DNS hostnames or URI strings per Gateway API).
+    #[serde(default)]
+    pub sans: Vec<String>,
+    /// Set when `spec.validation.wellKnownCACertificates` was `System`.
+    #[serde(default)]
+    pub trust_system_ca: bool,
+    /// CA resolution or validation config failed; dataplane must fail closed.
+    #[serde(default)]
+    pub invalid: bool,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct BackendIr {
     pub service_namespace: String,
     pub service_name: String,
     pub port_name: Option<String>,
     pub port_number: Option<u16>,
+    /// Populated when a winning [`BackendTLSPolicy`] applies to this backend port.
+    #[serde(default)]
+    pub backend_tls: Option<BackendTlsIr>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize, Ord, PartialOrd)]

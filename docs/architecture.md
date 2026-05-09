@@ -14,7 +14,9 @@ Rust workspace (`Cargo.toml` `[workspace]`) with these members:
 
 ## Gateway API compatibility
 
-Target **Gateway API** bundle: **v1.5.x standard channel** (see [Gateway API releases](https://github.com/kubernetes-sigs/gateway-api/releases)). Install e.g. `standard-install.yaml` for the pinned minor. ugwc focuses on `Gateway` / `HTTPRoute` / `GRPCRoute` / `ListenerSet` / `ReferenceGrant`, with HTTPS listeners terminating TLS using `listener.tls.certificateRefs` → `Secret` (`tls.crt` / `tls.key`), optional `Gateway.spec.addresses` validation, and `Gateway.spec.infrastructure.labels` merged into per-gateway Praxis workload labels.
+Target **Gateway API** bundle: **v1.5.x standard channel** (see [Gateway API releases](https://github.com/kubernetes-sigs/gateway-api/releases)). Install e.g. `standard-install.yaml` for the pinned minor; extended-channel installs must also include **`BackendTLSPolicy` `gateway.networking.k8s.io/v1`** if you use upstream TLS to Services. ugwc focuses on `Gateway` / `HTTPRoute` / `GRPCRoute` / `ListenerSet` / `ReferenceGrant`, with HTTPS listeners terminating TLS using `listener.tls.certificateRefs` → `Secret` (`tls.crt` / `tls.key`), optional `Gateway.spec.addresses` validation, and `Gateway.spec.infrastructure.labels` merged into per-gateway Praxis workload labels.
+
+**Backend TLS:** `BackendTLSPolicy` objects (same namespace as target `Service`) are listed for namespaces of backend Services needed by attached routes. Validation material (`ca.crt` on referenced `ConfigMap`s, or `wellKnownCACertificates: System`) is resolved at snapshot load time and attached per backend (`namespace/name:port`) on the compiled IR; `ugwc-gwxds` maps this to `Backend.tls`. Conflicting policies or bad CA refs surface on policy **ancestor** status toward each reconciled `Gateway` and as **`ResolvedRefs`** errors on affected routes when compilation fails closed.
 
 ## Diagrams
 
@@ -45,7 +47,7 @@ flowchart TB
     end
 
     subgraph k8s_crate["ugwc-k8s"]
-        Watch["Watchers:\nGateway, HTTPRoute, GRPCRoute,\nListenerSet, ReferenceGrant,\nEndpointSlice, GatewayClass"]
+        Watch["Watchers:\nGateway, HTTPRoute, GRPCRoute,\nListenerSet, ReferenceGrant,\nBackendTLSPolicy, ConfigMap (CA),\nEndpointSlice, GatewayClass"]
         Load["load_cluster_snapshot"]
         Status["apply_*_status"]
     end
@@ -124,7 +126,7 @@ flowchart LR
     subgraph watchers["Parallel watcher tasks"]
         W1["Gateway watcher\n→ (ns, name)"]
         W2["HTTPRoute / GRPCRoute\n→ parent Gateway keys"]
-        W3["ListenerSet / ReferenceGrant\n→ affected gateways"]
+        W3["ListenerSet / ReferenceGrant /\nBackendTLSPolicy / ConfigMap\n→ affected gateways"]
         W4["EndpointSlice watcher\n→ debounce → list all Gateways\n→ enqueue each"]
         W5["GatewayClass watcher\n→ owned class → list Gateways\nof that class → enqueue"]
     end
@@ -169,6 +171,7 @@ sequenceDiagram
         Plan-->>Loop: PublishPlan (action)
         Loop->>St: apply_gateway_reconciled_status
         Loop->>St: apply_http_route_parent_status (per route)
+        Loop->>St: apply_backend_tls_policies_for_gateway
         St->>API: PATCH status subresources
         alt PublishAction::FullReplace
             Loop->>Cache: store_scoped(new IrSnapshot)

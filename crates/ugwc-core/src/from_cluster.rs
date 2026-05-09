@@ -658,12 +658,27 @@ fn resolve_http_route_backends(
                 continue;
             }
         };
+        let backend_tls = snapshot
+            .backend_tls_effective
+            .get(&backend_key(svc_ns, svc_name, port))
+            .map(|e| e.tls.clone());
+        if backend_tls.as_ref().is_some_and(|t| t.invalid) {
+            report.errors.push(ObjectRefErr {
+                group: "gateway.networking.k8s.io".into(),
+                version: "v1".into(),
+                kind: "HTTPRoute".into(),
+                namespace: route.namespace.clone(),
+                name: route.name.clone(),
+                reason: "InvalidCACertificateRef".into(),
+            });
+        }
         backends.push(WeightedBackendIr {
             backend: BackendIr {
                 service_namespace: svc_ns.to_string(),
                 service_name: svc_name.clone(),
                 port_name: br.port_name.clone(),
                 port_number: Some(port),
+                backend_tls,
             },
             weight: br.weight.unwrap_or(1),
         });
@@ -727,12 +742,27 @@ fn resolve_grpc_route_backends(
                 continue;
             }
         };
+        let backend_tls = snapshot
+            .backend_tls_effective
+            .get(&backend_key(svc_ns, svc_name, port))
+            .map(|e| e.tls.clone());
+        if backend_tls.as_ref().is_some_and(|t| t.invalid) {
+            report.errors.push(ObjectRefErr {
+                group: "gateway.networking.k8s.io".into(),
+                version: "v1".into(),
+                kind: "GRPCRoute".into(),
+                namespace: route.namespace.clone(),
+                name: route.name.clone(),
+                reason: "InvalidCACertificateRef".into(),
+            });
+        }
         backends.push(WeightedBackendIr {
             backend: BackendIr {
                 service_namespace: svc_ns.to_string(),
                 service_name: svc_name.clone(),
                 port_name: br.port_name.clone(),
                 port_number: Some(port),
+                backend_tls,
             },
             weight: br.weight.unwrap_or(1),
         });
@@ -796,12 +826,27 @@ fn resolve_tls_route_backends(
                 continue;
             }
         };
+        let backend_tls = snapshot
+            .backend_tls_effective
+            .get(&backend_key(svc_ns, svc_name, port))
+            .map(|e| e.tls.clone());
+        if backend_tls.as_ref().is_some_and(|t| t.invalid) {
+            report.errors.push(ObjectRefErr {
+                group: "gateway.networking.k8s.io".into(),
+                version: "v1".into(),
+                kind: "TLSRoute".into(),
+                namespace: route.namespace.clone(),
+                name: route.name.clone(),
+                reason: "InvalidCACertificateRef".into(),
+            });
+        }
         backends.push(WeightedBackendIr {
             backend: BackendIr {
                 service_namespace: svc_ns.to_string(),
                 service_name: svc_name.clone(),
                 port_name: br.port_name.clone(),
                 port_number: Some(port),
+                backend_tls,
             },
             weight: br.weight.unwrap_or(1),
         });
@@ -1498,12 +1543,12 @@ pub fn ir_from_cluster(snapshot: &ClusterSnapshot) -> (IrSnapshot, CompileReport
 mod tests {
     use super::*;
     use crate::listener_merge::merge_effective_listeners;
-    use crate::ir::RouteFamily;
+    use crate::ir::{BackendTlsIr, RouteFamily};
     use crate::snapshot::{
-        EndpointPortSnap, EndpointSliceSnap, EndpointSnap, GatewayListenerSnap,
-        GatewayListenerTlsSnap, GrpcRouteRuleSnap, GrpcRouteSnap, HttpBackendRefSnap,
-        HttpPathMatchSnap, HttpRouteRuleSnap, ListenerSetSnap, ParentRefSnap, ServicePortSnap,
-        ServiceSnap, TlsRouteRuleSnap, TlsRouteSnap,
+        BackendTlsEffectiveSnap, EndpointPortSnap, EndpointSliceSnap, EndpointSnap,
+        GatewayListenerSnap, GatewayListenerTlsSnap, GrpcRouteRuleSnap, GrpcRouteSnap,
+        HttpBackendRefSnap, HttpPathMatchSnap, HttpRouteRuleSnap, ListenerSetSnap, ParentRefSnap,
+        ServicePortSnap, ServiceSnap, TlsRouteRuleSnap, TlsRouteSnap,
     };
 
     fn minimal_cluster() -> ClusterSnapshot {
@@ -1586,8 +1631,153 @@ mod tests {
             }],
             gateway_class: None,
             reference_grants: vec![],
+            backend_tls_effective: BTreeMap::new(),
+            backend_tls_policy_outcomes: vec![],
             namespace_labels: BTreeMap::new(),
         }
+    }
+
+    #[test]
+    fn http_backend_attaches_backend_tls_from_snapshot() {
+        let mut snap = minimal_cluster();
+        snap.backend_tls_effective.insert(
+            "default/svc:80".into(),
+            BackendTlsEffectiveSnap {
+                tls: BackendTlsIr {
+                    ca_cert_pem: b"-----BEGIN CERTIFICATE-----\nMIIB\n-----END CERTIFICATE-----"
+                        .to_vec(),
+                    hostname: "svc.example.com".into(),
+                    sans: vec!["alt.example.com".into()],
+                    trust_system_ca: false,
+                    invalid: false,
+                },
+            },
+        );
+        let (ir, rep) = ir_from_cluster(&snap);
+        assert!(!rep.has_errors(), "{:?}", rep.errors);
+        let rule = ir
+            .routes
+            .iter()
+            .find(|r| r.route_family == RouteFamily::Http)
+            .expect("http route");
+        let tls = rule.backends[0]
+            .backend
+            .backend_tls
+            .as_ref()
+            .expect("backend TLS");
+        assert_eq!(tls.hostname, "svc.example.com");
+        assert_eq!(tls.sans, vec!["alt.example.com".to_string()]);
+        assert!(!tls.trust_system_ca);
+        assert!(!tls.invalid);
+        assert!(!tls.ca_cert_pem.is_empty());
+    }
+
+    #[test]
+    fn http_backend_tls_system_trust_sets_flag_and_empty_ca() {
+        let mut snap = minimal_cluster();
+        snap.backend_tls_effective.insert(
+            "default/svc:80".into(),
+            BackendTlsEffectiveSnap {
+                tls: BackendTlsIr {
+                    ca_cert_pem: vec![],
+                    hostname: "svc.example.com".into(),
+                    sans: vec![],
+                    trust_system_ca: true,
+                    invalid: false,
+                },
+            },
+        );
+        let (ir, rep) = ir_from_cluster(&snap);
+        assert!(!rep.has_errors(), "{:?}", rep.errors);
+        let tls = ir.routes[0].backends[0]
+            .backend
+            .backend_tls
+            .as_ref()
+            .unwrap();
+        assert!(tls.trust_system_ca);
+        assert!(tls.ca_cert_pem.is_empty());
+    }
+
+    #[test]
+    fn http_backend_tls_invalid_records_invalid_ca_ref_error() {
+        let mut snap = minimal_cluster();
+        snap.backend_tls_effective.insert(
+            "default/svc:80".into(),
+            BackendTlsEffectiveSnap {
+                tls: BackendTlsIr {
+                    ca_cert_pem: vec![],
+                    hostname: "svc.example.com".into(),
+                    sans: vec![],
+                    trust_system_ca: false,
+                    invalid: true,
+                },
+            },
+        );
+        let (_ir, rep) = ir_from_cluster(&snap);
+        assert!(rep.has_errors());
+        assert!(rep.errors.iter().any(|e| e.reason == "InvalidCACertificateRef"));
+    }
+
+    #[test]
+    fn backend_tls_effective_key_is_per_service_port_not_whole_service() {
+        let mut snap = minimal_cluster();
+        snap.services[0].ports.push(ServicePortSnap {
+            name: "https".into(),
+            port: 443,
+            target_port: Some(8443),
+        });
+        snap.endpoint_slices[0].endpoints[0]
+            .ports
+            .push(EndpointPortSnap {
+                name: Some("https".into()),
+                port: 8443,
+            });
+        snap.backend_tls_effective.insert(
+            "default/svc:443".into(),
+            BackendTlsEffectiveSnap {
+                tls: BackendTlsIr {
+                    ca_cert_pem: vec![b'x'],
+                    hostname: "secure.backend".into(),
+                    sans: vec![],
+                    trust_system_ca: false,
+                    invalid: false,
+                },
+            },
+        );
+        snap.http_routes[0].rules = vec![HttpRouteRuleSnap {
+            matches: snap.http_routes[0].rules[0].matches.clone(),
+            filters: vec![],
+            backend_refs: vec![
+                HttpBackendRefSnap {
+                    group: None,
+                    kind: Some("Service".into()),
+                    namespace: None,
+                    name: "svc".into(),
+                    port: Some(80),
+                    port_name: None,
+                    weight: Some(1),
+                },
+                HttpBackendRefSnap {
+                    group: None,
+                    kind: Some("Service".into()),
+                    namespace: None,
+                    name: "svc".into(),
+                    port: Some(443),
+                    port_name: None,
+                    weight: Some(1),
+                },
+            ],
+        }];
+        let (ir, rep) = ir_from_cluster(&snap);
+        assert!(!rep.has_errors(), "{:?}", rep.errors);
+        let backends = &ir.routes[0].backends;
+        assert_eq!(backends.len(), 2);
+        assert!(
+            backends[0].backend.backend_tls.is_none(),
+            "port 80 must stay plaintext when only :443 has a policy row"
+        );
+        let t = backends[1].backend.backend_tls.as_ref().unwrap();
+        assert_eq!(t.hostname, "secure.backend");
     }
 
     #[test]
@@ -1686,6 +1876,8 @@ mod tests {
             }],
             gateway_class: None,
             reference_grants: vec![],
+            backend_tls_effective: BTreeMap::new(),
+            backend_tls_policy_outcomes: vec![],
             namespace_labels: BTreeMap::new(),
         };
         let (ir, rep) = ir_from_cluster(&snap);
@@ -2006,6 +2198,8 @@ mod tests {
             }],
             gateway_class: None,
             reference_grants: vec![],
+            backend_tls_effective: BTreeMap::new(),
+            backend_tls_policy_outcomes: vec![],
             namespace_labels: BTreeMap::new(),
         }
     }

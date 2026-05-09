@@ -28,7 +28,8 @@ pub use http_route_attachment::{
 };
 pub use http_ir::{build_http_ir_from_fixture, HttpCompileFixture};
 pub use ir::{
-    BackendEndpointIr, BackendIr, IrRevision, IrScopeId, IrSnapshot, ListenerAttachmentIr,
+    BackendEndpointIr, BackendIr, BackendTlsIr, IrRevision, IrScopeId, IrSnapshot,
+    ListenerAttachmentIr,
     ListenerIr, NamedHeaderIr, RequestHeaderModifierIr, RequestRedirectIr, RouteMatchIr,
     RouteRuleIr, SnapshotMeta, TlsMode, WeightedBackendIr, IR_VERSION,
 };

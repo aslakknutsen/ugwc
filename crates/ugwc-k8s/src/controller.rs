@@ -1,4 +1,5 @@
-//! Multi-watch controller graph: `Gateway`, `HTTPRoute`, `GRPCRoute`, `TLSRoute`, `EndpointSlice` → reconcile key.
+//! Multi-watch controller graph: `Gateway`, `HTTPRoute`, `GRPCRoute`, `TLSRoute`, `ListenerSet`,
+//! `ReferenceGrant`, `BackendTLSPolicy`, `ConfigMap` (BackendTLS CA), `EndpointSlice`, `Secret`, `GatewayClass`.
 
 use std::future::Future;
 use std::pin::Pin;
@@ -9,7 +10,7 @@ use std::collections::HashSet;
 
 use futures::StreamExt;
 use k8s_openapi::api::discovery::v1::EndpointSlice;
-use k8s_openapi::api::core::v1::Secret;
+use k8s_openapi::api::core::v1::{ConfigMap, Secret};
 use kube::api::ListParams;
 use kube::runtime::watcher::{watcher, Config as WatcherConfig};
 use kube::runtime::WatchStreamExt;
@@ -18,8 +19,9 @@ use tokio::sync::mpsc;
 use tracing::{info, instrument, warn};
 
 use crate::resources::{
-    gateway_spec_references_secret, listenerset_spec_references_secret, Gateway, GatewayClass,
-    GRPCRoute, HTTPRoute, ListenerSet, ParentReferenceSpec, ReferenceGrant, TLSRoute,
+    backend_tls_policy_spec_references_configmap, backend_tls_policy_targets_service,
+    gateway_spec_references_secret, listenerset_spec_references_secret, BackendTLSPolicy, Gateway,
+    GatewayClass, GRPCRoute, HTTPRoute, ListenerSet, ParentReferenceSpec, ReferenceGrant, TLSRoute,
 };
 
 pub type ReconcileFuture = Pin<Box<dyn Future<Output = Result<(), String>> + Send>>;
@@ -127,7 +129,99 @@ async fn gateway_targets_for_tls_route(
     .await
 }
 
-/// Observe `Gateway`, `HTTPRoute`, `GRPCRoute`, `TLSRoute`, `ListenerSet`, `ReferenceGrant`, `EndpointSlice`, and `GatewayClass` (owned classes) cluster-wide until cancelled.
+fn http_route_references_backend_tls_policy_target(pol: &BackendTLSPolicy, route: &HTTPRoute) -> bool {
+    let pol_ns = pol.metadata.namespace.as_deref().unwrap_or("");
+    for rule in &route.spec.rules {
+        for br in &rule.backend_refs {
+            if br.kind.as_deref().unwrap_or("Service") != "Service" {
+                continue;
+            }
+            let sns = br
+                .namespace
+                .as_deref()
+                .or(route.metadata.namespace.as_deref())
+                .unwrap_or("");
+            if backend_tls_policy_targets_service(&pol.spec, pol_ns, sns, &br.name) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+fn grpc_route_references_backend_tls_policy_target(pol: &BackendTLSPolicy, route: &GRPCRoute) -> bool {
+    let pol_ns = pol.metadata.namespace.as_deref().unwrap_or("");
+    for rule in &route.spec.rules {
+        for br in &rule.backend_refs {
+            if br.kind.as_deref().unwrap_or("Service") != "Service" {
+                continue;
+            }
+            let sns = br
+                .namespace
+                .as_deref()
+                .or(route.metadata.namespace.as_deref())
+                .unwrap_or("");
+            if backend_tls_policy_targets_service(&pol.spec, pol_ns, sns, &br.name) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+fn tls_route_references_backend_tls_policy_target(pol: &BackendTLSPolicy, route: &TLSRoute) -> bool {
+    let pol_ns = pol.metadata.namespace.as_deref().unwrap_or("");
+    for rule in &route.spec.rules {
+        for br in &rule.backend_refs {
+            if br.kind.as_deref().unwrap_or("Service") != "Service" {
+                continue;
+            }
+            let sns = br
+                .namespace
+                .as_deref()
+                .or(route.metadata.namespace.as_deref())
+                .unwrap_or("");
+            if backend_tls_policy_targets_service(&pol.spec, pol_ns, sns, &br.name) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+async fn gateway_targets_for_backend_tls_policy(
+    client: &Client,
+    pol: &BackendTLSPolicy,
+) -> HashSet<(String, String)> {
+    let mut out = HashSet::new();
+    let hr_api: Api<HTTPRoute> = Api::all(client.clone());
+    if let Ok(list) = hr_api.list(&ListParams::default()).await {
+        for route in list.items {
+            if http_route_references_backend_tls_policy_target(pol, &route) {
+                out.extend(gateway_targets_for_route(client, &route).await);
+            }
+        }
+    }
+    let gr_api: Api<GRPCRoute> = Api::all(client.clone());
+    if let Ok(list) = gr_api.list(&ListParams::default()).await {
+        for route in list.items {
+            if grpc_route_references_backend_tls_policy_target(pol, &route) {
+                out.extend(gateway_targets_for_grpc_route(client, &route).await);
+            }
+        }
+    }
+    let tr_api: Api<TLSRoute> = Api::all(client.clone());
+    if let Ok(list) = tr_api.list(&ListParams::default()).await {
+        for route in list.items {
+            if tls_route_references_backend_tls_policy_target(pol, &route) {
+                out.extend(gateway_targets_for_tls_route(client, &route).await);
+            }
+        }
+    }
+    out
+}
+
+/// Observe gateways, routes, grants, backend TLS policies, CA ConfigMaps, endpoints, secrets, and classes.
 #[instrument(skip(client, shutdown, reconcile))]
 pub async fn run_gateway_controller(
     client: Client,
@@ -512,6 +606,85 @@ pub async fn run_gateway_controller(
             }
         }
         info!("secret watcher shutdown");
+    });
+
+    let sd_btp = shutdown.clone();
+    let c_btp = client.clone();
+    let tx_btp = tx.clone();
+    tokio::spawn(async move {
+        let api: Api<BackendTLSPolicy> = Api::all(c_btp.clone());
+        let cfg = WatcherConfig::default().any_semantic();
+        let mut stream = Box::pin(watcher(api, cfg).applied_objects());
+        loop {
+            tokio::select! {
+                _ = sd_btp.cancelled() => break,
+                ev = stream.next() => {
+                    match ev {
+                        Some(Ok(pol)) => {
+                            let targets = gateway_targets_for_backend_tls_policy(&c_btp, &pol).await;
+                            for (pns, pname) in targets {
+                                if tx_btp.send((pns, pname)).await.is_err() {
+                                    return;
+                                }
+                            }
+                        }
+                        Some(Err(e)) => warn!(error = %e, "backendtlspolicy watch stream"),
+                        None => break,
+                    }
+                }
+            }
+        }
+        info!("backendtlspolicy watcher shutdown");
+    });
+
+    let sd_cm = shutdown.clone();
+    let c_cm = client.clone();
+    let tx_cm = tx.clone();
+    tokio::spawn(async move {
+        let api: Api<ConfigMap> = Api::all(c_cm.clone());
+        let cfg = WatcherConfig::default().any_semantic();
+        let mut stream = Box::pin(watcher(api, cfg).applied_objects());
+        loop {
+            tokio::select! {
+                _ = sd_cm.cancelled() => break,
+                ev = stream.next() => {
+                    match ev {
+                        Some(Ok(cm)) => {
+                            let cm_ns = cm.namespace().unwrap_or_default();
+                            let cm_name = cm.name_any();
+                            let pol_api: Api<BackendTLSPolicy> = Api::namespaced(c_cm.clone(), &cm_ns);
+                            let policies = match pol_api.list(&ListParams::default()).await {
+                                Ok(l) => l.items,
+                                Err(e) => {
+                                    warn!(error = %e, namespace = %cm_ns, "list BackendTLSPolicy after ConfigMap change");
+                                    continue;
+                                }
+                            };
+                            let mut gateways = HashSet::new();
+                            for pol in policies {
+                                if !backend_tls_policy_spec_references_configmap(
+                                    &pol.spec,
+                                    &cm_ns,
+                                    &cm_ns,
+                                    &cm_name,
+                                ) {
+                                    continue;
+                                }
+                                gateways.extend(gateway_targets_for_backend_tls_policy(&c_cm, &pol).await);
+                            }
+                            for (pns, pname) in gateways {
+                                if tx_cm.send((pns, pname)).await.is_err() {
+                                    return;
+                                }
+                            }
+                        }
+                        Some(Err(e)) => warn!(error = %e, "configmap watch stream"),
+                        None => break,
+                    }
+                }
+            }
+        }
+        info!("configmap watcher shutdown");
     });
 
     loop {

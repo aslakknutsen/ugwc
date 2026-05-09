@@ -55,6 +55,7 @@ impl HttpCompileFixture {
                         service_name: "svc".into(),
                         port_name: Some("http".into()),
                         port_number: Some(80),
+                        backend_tls: None,
                     },
                     weight: 1,
                 }],

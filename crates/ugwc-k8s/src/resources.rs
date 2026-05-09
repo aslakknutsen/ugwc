@@ -497,3 +497,110 @@ pub struct TLSRouteStatus {
     #[serde(default)]
     pub parents: Vec<serde_json::Value>,
 }
+
+/// [`BackendTLSPolicy`](https://gateway-api.sigs.k8s.io/reference/spec/#gateway.networking.k8s.io/v1.BackendTLSPolicy) — upstream TLS to Service backends.
+#[derive(CustomResource, Clone, Debug, Deserialize, Serialize)]
+#[kube(
+    group = "gateway.networking.k8s.io",
+    version = "v1",
+    kind = "BackendTLSPolicy",
+    namespaced,
+    status = "BackendTLSPolicyStatus",
+    schema = "disabled"
+)]
+pub struct BackendTLSPolicySpec {
+    #[serde(rename = "targetRefs", default)]
+    pub target_refs: Vec<LocalPolicyTargetReferenceWithSectionNameSpec>,
+    pub validation: BackendTLSPolicyValidationSpec,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+pub struct LocalPolicyTargetReferenceWithSectionNameSpec {
+    #[serde(default)]
+    pub group: Option<String>,
+    #[serde(default)]
+    pub kind: Option<String>,
+    pub name: String,
+    #[serde(rename = "sectionName", default)]
+    pub section_name: Option<String>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+pub struct LocalObjectReferenceSpec {
+    #[serde(default)]
+    pub group: Option<String>,
+    #[serde(default)]
+    pub kind: Option<String>,
+    pub name: String,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+pub struct BackendTLSPolicyValidationSpec {
+    #[serde(rename = "caCertificateRefs", default)]
+    pub ca_certificate_refs: Vec<LocalObjectReferenceSpec>,
+    #[serde(rename = "wellKnownCACertificates", default)]
+    pub well_known_ca_certificates: Option<String>,
+    pub hostname: String,
+    #[serde(rename = "subjectAltNames", default)]
+    pub subject_alt_names: Vec<SubjectAltNameSpec>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+pub struct SubjectAltNameSpec {
+    #[serde(rename = "type")]
+    pub type_: String,
+    #[serde(default)]
+    pub hostname: Option<String>,
+    #[serde(default)]
+    pub uri: Option<String>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+pub struct BackendTLSPolicyStatus {
+    #[serde(default)]
+    pub ancestors: Vec<serde_json::Value>,
+}
+
+/// True if `BackendTLSPolicy` validation references this ConfigMap (same namespace as policy).
+#[must_use]
+pub fn backend_tls_policy_spec_references_configmap(
+    spec: &BackendTLSPolicySpec,
+    policy_namespace: &str,
+    cm_namespace: &str,
+    cm_name: &str,
+) -> bool {
+    if policy_namespace != cm_namespace {
+        return false;
+    }
+    for ca in &spec.validation.ca_certificate_refs {
+        let k = ca.kind.as_deref().unwrap_or("");
+        let g = ca.group.as_deref().unwrap_or("");
+        let is_cm = k.eq_ignore_ascii_case("ConfigMap") && (g.is_empty() || g == "");
+        if is_cm && ca.name == cm_name {
+            return true;
+        }
+    }
+    false
+}
+
+/// True if any target ref selects `Service` `svc_name` in `svc_namespace`.
+#[must_use]
+pub fn backend_tls_policy_targets_service(
+    spec: &BackendTLSPolicySpec,
+    policy_namespace: &str,
+    svc_namespace: &str,
+    svc_name: &str,
+) -> bool {
+    if policy_namespace != svc_namespace {
+        return false;
+    }
+    for t in &spec.target_refs {
+        let k = t.kind.as_deref().unwrap_or("Service");
+        let g = t.group.as_deref().unwrap_or("");
+        let is_svc = k.eq_ignore_ascii_case("Service") && (g.is_empty() || g == "");
+        if is_svc && t.name == svc_name {
+            return true;
+        }
+    }
+    false
+}

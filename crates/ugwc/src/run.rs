@@ -275,6 +275,19 @@ pub async fn run(cfg: Config) -> Result<(), Box<dyn std::error::Error + Send + S
                                 ),
                             }
                         }
+
+                        if let Err(e) = ugwc_k8s::apply_backend_tls_policies_for_gateway(
+                            &client_inner,
+                            &ns,
+                            &name,
+                            &primary_controller,
+                            snap,
+                            Some(status_cache.clone()),
+                        )
+                        .await
+                        {
+                            warn!(error = %e, "backend TLS policy status patch");
+                        }
                     }
 
                     match plan.action {

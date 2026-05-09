@@ -2,7 +2,7 @@
 
 use std::collections::{BTreeMap, HashSet};
 
-use k8s_openapi::api::core::v1::{Namespace, Secret, Service};
+use k8s_openapi::api::core::v1::{ConfigMap, Namespace, Secret, Service};
 use k8s_openapi::api::discovery::v1::EndpointSlice;
 use k8s_openapi::apimachinery::pkg::util::intstr::IntOrString;
 use kube::api::ListParams;
@@ -10,9 +10,11 @@ use kube::{Api, Client};
 use thiserror::Error;
 use tracing::warn;
 use ugwc_core::http_route_attachment::reference_grant_permits_gateway_secret_ref;
+use ugwc_core::ir::BackendTlsIr;
 use ugwc_core::listener_merge::merge_effective_listeners;
 use ugwc_core::snapshot::{
-    AllowedListenersSnap, AllowedRoutesNamespacesSnap, AllowedRoutesSnap, ClusterSnapshot,
+    AllowedListenersSnap, AllowedRoutesNamespacesSnap, AllowedRoutesSnap, BackendTlsEffectiveSnap,
+    BackendTlsPolicyOutcomeSnap, ClusterSnapshot,
     EffectiveListenerSnap, EndpointPortSnap, EndpointSliceSnap, EndpointSnap, GatewayAddressSnap,
     GatewayClassSnap, GatewayInfrastructureSnap, GatewayListenerSnap, GatewayListenerTlsSnap,
     GrpcHeaderMatchSnap, GrpcMethodMatchSnap, GrpcRouteFilterSnap, GrpcRouteMatchSnap,
@@ -25,8 +27,8 @@ use ugwc_core::snapshot::{
 };
 
 use crate::resources::{
-    Gateway, GatewayClass, GRPCRoute, HTTPRoute, ListenerSet, ParentReferenceSpec, ReferenceGrant,
-    TLSRoute,
+    BackendTLSPolicy, Gateway, GatewayClass, GRPCRoute, HTTPRoute, ListenerSet, ParentReferenceSpec,
+    ReferenceGrant, TLSRoute,
 };
 
 #[derive(Debug, Error)]
@@ -612,6 +614,314 @@ fn tls_route_to_snap(route: &TLSRoute) -> TlsRouteSnap {
     }
 }
 
+fn backend_tls_target_is_service(group: Option<&str>, kind: Option<&str>) -> bool {
+    let k = kind.unwrap_or("Service");
+    let g = group.unwrap_or("");
+    k.eq_ignore_ascii_case("Service") && (g.is_empty() || g.eq_ignore_ascii_case(""))
+}
+
+struct LoadedBackendTlsPolicy {
+    policy_ns: String,
+    policy_name: String,
+    created_rfc3339: String,
+    tls_ir: BackendTlsIr,
+    targets: Vec<(String, Option<String>)>,
+}
+
+fn backend_tls_section_applies(section: Option<&str>, service_port_name: &str) -> bool {
+    section.map_or(true, |sn| sn == service_port_name)
+}
+
+async fn backend_tls_ir_from_validation(
+    client: &Client,
+    policy_ns: &str,
+    v: &crate::resources::BackendTLSPolicyValidationSpec,
+) -> BackendTlsIr {
+    let hostname = v.hostname.clone();
+    let mut sans = Vec::new();
+    for san in &v.subject_alt_names {
+        match san.type_.as_str() {
+            "Hostname" => {
+                if let Some(ref h) = san.hostname {
+                    sans.push(h.clone());
+                }
+            }
+            "URI" => {
+                if let Some(ref u) = san.uri {
+                    sans.push(u.clone());
+                }
+            }
+            _ => {}
+        }
+    }
+
+    let has_ca = !v.ca_certificate_refs.is_empty();
+    let well = v
+        .well_known_ca_certificates
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+
+    if has_ca && well.is_some() {
+        return BackendTlsIr {
+            ca_cert_pem: vec![],
+            hostname,
+            sans,
+            trust_system_ca: false,
+            invalid: true,
+        };
+    }
+
+    if let Some(w) = well {
+        if w == "System" {
+            return BackendTlsIr {
+                ca_cert_pem: vec![],
+                hostname,
+                sans,
+                trust_system_ca: true,
+                invalid: false,
+            };
+        }
+        return BackendTlsIr {
+            ca_cert_pem: vec![],
+            hostname,
+            sans,
+            trust_system_ca: false,
+            invalid: true,
+        };
+    }
+
+    if !has_ca {
+        return BackendTlsIr {
+            ca_cert_pem: vec![],
+            hostname,
+            sans,
+            trust_system_ca: false,
+            invalid: true,
+        };
+    }
+
+    let cm_api: Api<ConfigMap> = Api::namespaced(client.clone(), policy_ns);
+    let mut bundle = Vec::new();
+    for ca in &v.ca_certificate_refs {
+        let kind = ca.kind.as_deref().unwrap_or("ConfigMap");
+        let group = ca.group.as_deref().unwrap_or("");
+        if !kind.eq_ignore_ascii_case("ConfigMap")
+            || !(group.is_empty() || group.eq_ignore_ascii_case(""))
+        {
+            return BackendTlsIr {
+                ca_cert_pem: vec![],
+                hostname,
+                sans,
+                trust_system_ca: false,
+                invalid: true,
+            };
+        }
+        let Ok(cm) = cm_api.get(&ca.name).await else {
+            return BackendTlsIr {
+                ca_cert_pem: vec![],
+                hostname,
+                sans,
+                trust_system_ca: false,
+                invalid: true,
+            };
+        };
+        let Some(data) = cm.data.as_ref() else {
+            return BackendTlsIr {
+                ca_cert_pem: vec![],
+                hostname,
+                sans,
+                trust_system_ca: false,
+                invalid: true,
+            };
+        };
+        let Some(pem) = data.get("ca.crt") else {
+            return BackendTlsIr {
+                ca_cert_pem: vec![],
+                hostname,
+                sans,
+                trust_system_ca: false,
+                invalid: true,
+            };
+        };
+        if !bundle.is_empty() {
+            bundle.push(b'\n');
+        }
+        bundle.extend_from_slice(pem.as_bytes());
+    }
+
+    BackendTlsIr {
+        ca_cert_pem: bundle,
+        hostname,
+        sans,
+        trust_system_ca: false,
+        invalid: false,
+    }
+}
+
+async fn load_backend_tls_for_gateway(
+    client: &Client,
+    needed_services: &[(String, String)],
+    services: &[ServiceSnap],
+) -> Result<(BTreeMap<String, BackendTlsEffectiveSnap>, Vec<BackendTlsPolicyOutcomeSnap>), LoaderError> {
+    let mut effective: BTreeMap<String, BackendTlsEffectiveSnap> = BTreeMap::new();
+
+    let needed_set: HashSet<(String, String)> = needed_services.iter().cloned().collect();
+    let mut namespaces: Vec<String> = needed_services.iter().map(|(ns, _)| ns.clone()).collect();
+    namespaces.sort();
+    namespaces.dedup();
+
+    let mut loaded: Vec<LoadedBackendTlsPolicy> = Vec::new();
+
+    for ns in &namespaces {
+        let api: Api<BackendTLSPolicy> = Api::namespaced(client.clone(), ns);
+        let list = match api.list(&ListParams::default()).await {
+            Ok(l) => l.items,
+            Err(e) => {
+                warn!(
+                    error = %e,
+                    namespace = %ns,
+                    "BackendTLSPolicy list failed — clusters without CRD skip backend TLS policies"
+                );
+                continue;
+            }
+        };
+
+        for pol in list {
+            let policy_ns = pol.metadata.namespace.clone().unwrap_or_default();
+            let policy_name = pol.metadata.name.clone().unwrap_or_default();
+            let created_rfc3339 = pol
+                .metadata
+                .creation_timestamp
+                .as_ref()
+                .map(|t| t.0.to_rfc3339())
+                .unwrap_or_default();
+
+            let mut targets: Vec<(String, Option<String>)> = Vec::new();
+            for t in &pol.spec.target_refs {
+                if !backend_tls_target_is_service(t.group.as_deref(), t.kind.as_deref()) {
+                    continue;
+                }
+                if !needed_set.contains(&(policy_ns.clone(), t.name.clone())) {
+                    continue;
+                }
+                let section = t.section_name.clone().filter(|s| !s.trim().is_empty());
+                targets.push((t.name.clone(), section));
+            }
+
+            if targets.is_empty() {
+                continue;
+            }
+
+            let tls_ir =
+                backend_tls_ir_from_validation(client, &policy_ns, &pol.spec.validation).await;
+
+            loaded.push(LoadedBackendTlsPolicy {
+                policy_ns,
+                policy_name,
+                created_rfc3339,
+                tls_ir,
+                targets,
+            });
+        }
+    }
+
+    #[derive(Clone)]
+    struct Candidate {
+        created_rfc3339: String,
+        policy_ns: String,
+        policy_name: String,
+        tls_ir: BackendTlsIr,
+    }
+
+    let mut conflicted: HashSet<(String, String)> = HashSet::new();
+
+    for svc in services {
+        for sp in &svc.ports {
+            let backend_k = format!("{}/{}:{}", svc.namespace, svc.name, sp.port);
+
+            let mut candidates: Vec<Candidate> = Vec::new();
+
+            for lp in &loaded {
+                for (svc_name, section) in &lp.targets {
+                    if svc_name != &svc.name || lp.policy_ns != svc.namespace {
+                        continue;
+                    }
+                    let applies =
+                        backend_tls_section_applies(section.as_deref(), sp.name.as_str());
+                    if applies {
+                        candidates.push(Candidate {
+                            created_rfc3339: lp.created_rfc3339.clone(),
+                            policy_ns: lp.policy_ns.clone(),
+                            policy_name: lp.policy_name.clone(),
+                            tls_ir: lp.tls_ir.clone(),
+                        });
+                    }
+                }
+            }
+
+            let mut seen_pol = HashSet::<(String, String)>::new();
+            let mut uniq: Vec<Candidate> = Vec::new();
+            for c in candidates {
+                let pk = (c.policy_ns.clone(), c.policy_name.clone());
+                if seen_pol.insert(pk) {
+                    uniq.push(c);
+                }
+            }
+            let mut candidates = uniq;
+
+            candidates.sort_by(|a, b| {
+                a.created_rfc3339
+                    .cmp(&b.created_rfc3339)
+                    .then_with(|| (&a.policy_ns, &a.policy_name).cmp(&(&b.policy_ns, &b.policy_name)))
+            });
+
+            if candidates.is_empty() {
+                continue;
+            }
+
+            let winner = candidates[0].clone();
+            if candidates.len() > 1 {
+                for c in candidates.iter().skip(1) {
+                    conflicted.insert((c.policy_ns.clone(), c.policy_name.clone()));
+                }
+            }
+
+            effective.insert(
+                backend_k,
+                BackendTlsEffectiveSnap {
+                    tls: winner.tls_ir,
+                },
+            );
+        }
+    }
+
+    let mut outcomes: Vec<BackendTlsPolicyOutcomeSnap> = Vec::new();
+    for lp in loaded {
+        let k = (lp.policy_ns.clone(), lp.policy_name.clone());
+        let is_conflicted = conflicted.contains(&k);
+        let resolved_ok = !lp.tls_ir.invalid;
+        outcomes.push(BackendTlsPolicyOutcomeSnap {
+            namespace: lp.policy_ns,
+            name: lp.policy_name,
+            conflicted: is_conflicted,
+            resolved_refs_ok: resolved_ok,
+            accepted: resolved_ok && !is_conflicted,
+            message: if is_conflicted {
+                Some("Conflicted".into())
+            } else if !resolved_ok {
+                Some("InvalidCACertificateRef".into())
+            } else {
+                None
+            },
+        });
+    }
+
+    outcomes.sort_by(|a, b| (&a.namespace, &a.name).cmp(&(&b.namespace, &b.name)));
+
+    Ok((effective, outcomes))
+}
+
 /// Build a [`ClusterSnapshot`] for `gateway_ns`/`gateway_name`.
 pub async fn load_cluster_snapshot(
     client: &Client,
@@ -898,6 +1208,9 @@ pub async fn load_cluster_snapshot(
             })
     };
 
+    let (backend_tls_effective, backend_tls_policy_outcomes) =
+        load_backend_tls_for_gateway(client, &needed_services, &services).await?;
+
     Ok(ClusterSnapshot {
         gateway_namespace: gateway_ns.to_string(),
         gateway_name: gateway_name.to_string(),
@@ -927,6 +1240,45 @@ pub async fn load_cluster_snapshot(
         endpoint_slices,
         gateway_class,
         reference_grants,
+        backend_tls_effective,
+        backend_tls_policy_outcomes,
         namespace_labels: ns_label_map,
     })
+}
+
+#[cfg(test)]
+mod backend_tls_loader_tests {
+    use super::backend_tls_section_applies;
+
+    #[test]
+    fn section_none_applies_to_all_named_service_ports() {
+        assert!(backend_tls_section_applies(None, "http"));
+        assert!(backend_tls_section_applies(None, "https"));
+    }
+
+    #[test]
+    fn section_name_matches_only_that_service_port_name() {
+        assert!(backend_tls_section_applies(Some("https"), "https"));
+        assert!(!backend_tls_section_applies(Some("https"), "http"));
+    }
+
+    #[test]
+    fn backend_tls_winner_sort_prefers_older_creation_timestamp() {
+        let mut candidates = vec![
+            ("2024-06-02T10:00:00Z", "newer"),
+            ("2024-06-01T10:00:00Z", "older"),
+        ];
+        candidates.sort_by(|a, b| a.0.cmp(b.0));
+        assert_eq!(candidates[0].1, "older");
+    }
+
+    #[test]
+    fn backend_tls_winner_sort_tie_breaker_lexicographic_policy_identity() {
+        let mut candidates = vec![
+            ("2024-06-01T10:00:00Z", "ns-a", "policy-z"),
+            ("2024-06-01T10:00:00Z", "ns-a", "policy-a"),
+        ];
+        candidates.sort_by(|a, b| a.0.cmp(b.0).then_with(|| (a.1, a.2).cmp(&(b.1, b.2))));
+        assert_eq!(candidates[0].2, "policy-a");
+    }
 }
