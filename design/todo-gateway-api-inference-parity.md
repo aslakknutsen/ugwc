@@ -1,110 +1,123 @@
-# TODO: Gateway API (extended) + Inference Extension parity
+# Gateway API + Inference Extension parity tracker
 
-**Goal:** Track latest **Gateway API** (standard + extended channel semantics where relevant) and **Gateway API Inference Extension** so the controller observes, loads into `ClusterSnapshot`, compiles, publishes IR/xDS, and writes status for all resource kinds required for parity—not only `HTTPRoute` + `Service`.
+**Goal:** Stay aligned with **Gateway API** (standard + selected experimental CRDs) and **Gateway API Inference Extension** end-to-end: watch → `ClusterSnapshot` → compile → IR/xDS → status.
 
-**Baseline (current code):** Watches `Gateway`, `HTTPRoute`, `GRPCRoute`, `TLSRoute`, `ListenerSet`, `ReferenceGrant`, `BackendTLSPolicy`, `ConfigMap` (when referenced as BackendTLS CA bundles), `EndpointSlice` (debounced full-gateway fan-out), `GatewayClass` (owned classes), `InferencePool` (routes → gateways). Snapshot loads merged listeners (`Gateway` + attached `ListenerSet` when `allowedListeners` permits), HTTP / GRPC / TLS routes attached to either parent kind (with **ReferenceGrant** required for cross-namespace route→Gateway / route→ListenerSet parents), `Service` + `InferencePool` backends (pool spec + EPP `Service`), resolved upstream TLS rows from `BackendTLSPolicy`, `EndpointSlice`s, cluster-wide `ReferenceGrant`s, `GatewayClass`. `InferenceObjective` and broader policy APIs remain tracked below but are not implemented.
-
----
-
-## 1. Watch graph and reconcile keys
-
-For each new resource type, define:
-
-- [ ] **Watch** (cluster-wide vs namespaced) and **mapper → `(gateway_ns, gateway_name)`** (or shard key if multi-gateway scopes are introduced).
-- [ ] **Ordering:** grant/route/policy changes must enqueue the same gateways as listener/GW changes.
-- [ ] **Debouncing:** extend or replace EndpointSlice-only debounce where global churn is unacceptable.
-
-Concrete additions:
-
-- [x] **`ReferenceGrant`** (`gateway.networking.k8s.io`) — cluster-wide watch; enqueue gateways in the grant namespace plus targets from routes in each `spec.from[].namespace` (full route list fallback when `from` is empty).
-- [x] **`GRPCRoute`** — parent refs to `Gateway`; same attachment rules as `HTTPRoute`; reconcile key from parent Gateway.
-- [ ] **`TLSRoute`** / **`TCPRoute`** / **`UDPRoute`** (as applicable to supported protocols) — watch + map + snapshot fields.
-- [x] **`BackendTLSPolicy`** (`gateway.networking.k8s.io/v1`) — cluster-wide watch + namespaced `ConfigMap` watch when policies reference CA `ConfigMap`s; fan-out to gateways whose attached routes use a targeted `Service` backend. **Scope:** `Service` targets only (extended core); not arbitrary backend kinds.
-- [x] **`ListenerSet`** — watch + merge into listener resolution (**Gateway API standard channel v1.5.x**; `Gateway.spec.allowedListeners` required for attachment).
-- [x] **`InferencePool`** (`inference.networking.k8s.io/v1`) — watch; map to Gateway via routes referencing the pool in `backendRefs`.
-- [ ] **`InferenceObjective`** (if shipped as a CRD in the target version) — watch + tie to routes/pools per spec.
+**How to use:** Each `- [ ]` under **Remaining work** is sized for a **single** follow-up issue or PR. Check it off here when that issue closes. Broader themes are grouped; avoid folding unrelated work into one checkbox.
 
 ---
 
-## 2. Cluster snapshot (`ClusterSnapshot` / loader)
+## Baseline — what the code does today
 
-Extend types and `load_cluster_snapshot` (or successor) to include:
+Primary crates: `crates/ugwc-k8s` (watches, loader, status), `crates/ugwc-core` (snapshot, compile, IR), `crates/ugwc-gwxds` (proto / encode).
 
-- [x] **ListenerSet merge + effective listeners** on `ClusterSnapshot` (`listener_sets`, `effective_listeners`, `allowedListeners` snapshot fields).
-- [x] **Routes:** `GRPCRoute` (and TLS/TCP/UDP as scoped).
-- [x] **Grants:** cluster-wide `ReferenceGrant` list in `ClusterSnapshot`; enforced for cross-namespace route→Gateway / route→ListenerSet parents, Service / InferencePool backends, listener TLS Secrets; `to.group` must match core/Gateway API groups for `Service` targets.
-- [x] **TLS:** resolved `BackendTLSPolicy` → `ClusterSnapshot.backend_tls_effective` (`ns/name:port` → `BackendTlsIr`) plus `backend_tls_policy_outcomes` for status.
-- [x] **Inference:** `InferencePool` specs (selector, `targetPorts`, `appProtocol`, `endpointPickerRef`, failure modes) for pools referenced by routes; optional **InferenceObjective** if part of routing (still open).
+| Layer | Implemented |
+| ----- | ----------- |
+| **Watches** | `Gateway`, `HTTPRoute`, `GRPCRoute`, `TLSRoute`, `ListenerSet`, `ReferenceGrant`, `BackendTLSPolicy`, `ConfigMap` (BackendTLS CA refs), `EndpointSlice`, `Secret`, `GatewayClass`, `InferencePool` |
+| **Snapshot** | Merged listeners (`Gateway` + `ListenerSet` when `spec.allowedListeners` permits); HTTP / GRPC / TLS routes; `Service` + `InferencePool` backends; `EndpointSlice` for Services; cluster `ReferenceGrant` list; `BackendTLSPolicy` → `backend_tls_effective` (+ outcomes for status) |
+| **Compile / IR** | HTTP + GRPC + TLS routes into IR; ReferenceGrant enforcement on cross-namespace parents/backends/secrets; Backend TLS on **Service** backends; InferencePool → IR |
+| **Status** | Gateway/listeners; HTTPRoute / GRPCRoute / TLSRoute parents; ListenerSet; BackendTLSPolicy ancestors; InferencePool parents |
+| **xDS** | `gwxds.proto`: GRPC routes, TLS route bit, listener `allowed_routes`, `Backend.tls` / `Backend.inference_pool`, EPP Service host/port |
 
-Ensure:
+**Explicitly not implemented:** `TCPRoute`, `UDPRoute`, `InferenceObjective` (and related `inference.networking.x-k8s.io` CRDs), BackendTLS targets beyond **Service**, arbitrary HTTP/GRPC extended filters (many surfaces still return `UnsupportedValue` / reject).
 
-- [x] **Backend refs:** **`InferencePool`** in addition to `Service` (HTTPRoute / GRPCRoute / TLSRoute).
-- [x] **Endpoint topology:** `Service` backends use `EndpointSlice`; `InferencePool` backends omit slice-derived endpoints here (EPP selects endpoints per inference extension).
-
----
-
-## 3. Core compile / IR
-
-- [x] **Normalize** GRPC (and other L4/L7) routes into IR alongside HTTP (core filters / exact matches; extended filters tracked separately).
-- [x] **Enforce ReferenceGrant** semantics in compile reports and route parent status (`RefNotPermitted` when cross-namespace attachment lacks a grant; `Accepted` uses explicit reason).
-- [x] **Backend TLS:** map winning policy per backend → `BackendIr.backend_tls`; invalid CA → compile error / route `ResolvedRefs` (`InvalidCACertificateRef`).
-- [x] **Inference:** map `InferencePool` → IR + `gwxds` `Backend.inference_pool` (`endpointPickerRef`, failure modes); ReferenceGrant for cross-namespace pool refs.
-- [ ] **InferenceObjective:** if request-scoped objectives affect routing or filters, thread through IR and the data plane contract.
+ListenerSet + GRPCRoute + TLSRoute assume Gateway API CRDs consistent with **standard channel v1.5.x** where noted in upstream (e.g. ListenerSet on standard).
 
 ---
 
-## 4. Status writers
+## Implemented (parity doc only — no new issues needed)
 
-- [x] Extend Gateway / route / parent status patches for **GRPCRoute** and other route kinds per Gateway API status patterns (GRPCRoute parent merge + supported kinds; other kinds still open).
-- [x] **InferencePool** `status.parents` / conditions (`Accepted`, `ResolvedRefs`) per reconciled Gateway + controller identity.
-- [x] **BackendTLSPolicy** — `status.ancestors` per reconciled Gateway + controller identity (`Accepted`, `ResolvedRefs`, `Conflicted` when duplicate coverage loses precedence).
+Use this as the “done” ledger; keep **Remaining work** for gaps only.
 
----
+### Watch graph
 
-## 5. xDS / gwxds output
+- [x] **`ReferenceGrant`** — cluster-wide watch; enqueue affected gateways (grant namespace + route namespaces from `spec.from`; fallback when `from` empty).
+- [x] **`GRPCRoute`** — watch; map to parent `Gateway` / attached `ListenerSet`; reconcile key from parent.
+- [x] **`TLSRoute`** — watch; map + snapshot + compile + status (passthrough / SNI routing per implementation).
+- [x] **`BackendTLSPolicy`** — cluster-wide watch; `ConfigMap` watch for CA bundles; fan-out to gateways using targeted **Service** backends only.
+- [x] **`ListenerSet`** — watch; merge when `Gateway.spec.allowedListeners` permits (**standard v1.5.x** shape).
+- [x] **`InferencePool`** (`inference.networking.k8s.io/v1`) — watch; fan-out via routes with pool `backendRefs`.
 
-- [x] Ensure published IR matches proto expectations in `gwxds.proto` (`Route.grpc_route`, `RouteMatch.grpc_*`, listener `allowed_routes`; `Backend.tls` / `BackendTLS` from `BackendIr.backend_tls`; `Backend.inference_pool` when IR carries inference backends).
-- [x] Verify Envoy/Praxis dataplane contract for **ext_proc / EPP** when InferencePool is active — top-level `Backend.host`/`port`/`dial_port` mirror resolved EPP Service DNS + port (`encode_ir`).
+### Snapshot & topology
 
----
+- [x] ListenerSet merge fields (`listener_sets`, `effective_listeners`, allowedListeners snapshot).
+- [x] GRPC + TLS routes in snapshot alongside HTTP.
+- [x] ReferenceGrant list + enforcement surfaces (parents, Service/InferencePool backends, listener TLS secrets; narrowed `to.group` rules as coded).
+- [x] `backend_tls_effective` + policy outcomes for status writers.
+- [x] InferencePool spec snapshot for referenced pools.
+- [x] Service backends → EndpointSlice; InferencePool backends → no slice-derived endpoints (EPP).
 
-## 6. Versioning and CRD matrix
+### Compile / IR / publish
 
-- [ ] Pin supported **Gateway API** bundle version(s) (e.g. v1.3.x) and document **standard vs extended** channel assumptions.
-- [ ] Pin **Inference Extension** API version (`inference.networking.k8s.io/v1`) and CRD install bundle.
-  - Install the upstream Inference Extension CRDs before using `InferencePool` objects and HTTPRoute `backendRefs` to them; see [Inference Extension guides](https://gateway-api-inference-extension.sigs.k8s.io/guides/).
-- [ ] Add a compatibility table: ugwc version ↔ Gateway API version ↔ Inference Extension version.
+- [x] GRPC + TLS + HTTP normalization into IR (core match/filter paths; extended behavior varies).
+- [x] ReferenceGrant → compile report + route parent conditions (`RefNotPermitted`, etc.).
+- [x] Backend TLS → `BackendIr.backend_tls` / invalid CA handling.
+- [x] InferencePool → IR + `Backend.inference_pool` + cross-namespace grant checks.
 
----
+### Status & xDS
 
-## 7. Testing and conformance
-
-- [ ] Fixture tests for new snapshot + compile inputs (pure `ugwc-core`). **Partial:** BackendTLS via `backend_tls_effective` → `BackendIr` / compile errors (`from_cluster`); loader section/precedence helpers (`ugwc-k8s`).
-- [ ] Integration tests with envtest/kind: ReferenceGrant cross-namespace, GRPCRoute attach, BackendTLSPolicy, InferencePool backend ref. **Partial:** `crates/ugwc-k8s/tests/reference_grant_kube.rs` ignored test stub + `ugwc-core` fixture coverage for route parent grants.
-- [ ] Optional: upstream **Gateway API conformance** and **inference extension** conformance subsets when implementations exist.
-
----
-
-## 8. Documentation
-
-- [ ] Update `docs/architecture.md` watcher diagram and `design/` controller docs to list the full resource set. **Partial:** `docs/architecture.md` documents BackendTLSPolicy / CA `ConfigMap` watches and data path.
-- [ ] Operator-facing doc: required CRDs, install order, and flags.
-
----
-
-## Dependencies / ordering (suggested)
-
-1. ~~**ReferenceGrant**~~ — route parent attachment, backend refs, listener Secrets; narrowed controller fan-out (optional envtest/kind later).
-2. **GRPCRoute** + snapshot + compile (large surface; can parallelize with grants).
-3. ~~**BackendTLSPolicy**~~ — implemented (`Service` targets, snapshot + IR + gwxds + status + watches); envtest/kind still optional (§7).
-4. ~~**InferencePool**~~ — watch + loader + compile + xDS + pool status (depends on non-Service `backendRefs`).
-5. **InferenceObjective** (if applicable) after pools are end-to-end.
-6. ~~**ListenerSet**~~ — implemented against Gateway API **standard v1.5.x** (`allowedListeners`, merge order, status).
+- [x] GRPCRoute / TLSRoute parent status merge patterns (with Gateway + ListenerSet parents).
+- [x] InferencePool `status.parents` (`Accepted`, `ResolvedRefs`, …).
+- [x] BackendTLSPolicy `status.ancestors` (`Accepted`, `ResolvedRefs`, `Conflicted`).
+- [x] gwxds encode for GRPC/TLS/listener allowed routes/backend TLS/inference backends.
 
 ---
 
-## Open questions (resolve before calling parity “complete”)
+## Remaining work (one checkbox ≈ one issue)
 
-1. Exact **Gateway API release** to standardize on (CRD set differs by minor version). **Partial:** `ListenerSet` support assumes **standard channel v1.5.x** CRDs.
-2. Whether **InferenceObjective** is a CRD in that release or documented-only.
-3. **Shard model:** single reconciler listing all gateways vs namespace/class sharding for watch fan-out at scale.
+### L4 routes (Gateway API experimental)
+
+- [ ] **`TCPRoute`** — cluster-wide (or scoped) watch + mapper → `(gateway_ns, gateway_name)` + snapshot types + compile/IR + status + gwxds (if in scope for pinned bundle).
+- [ ] **`UDPRoute`** — same decomposition as TCPRoute.
+
+### Inference extension (beyond InferencePool)
+
+- [ ] **`InferenceObjective`** — watch (`inference.networking.x-k8s.io` / version pinned with matrix) + snapshot if needed + IR or header contract documentation for dataplane (`x-gateway-inference-objective`).
+- [ ] **InferencePool `Exported` / multi-cluster** — decide in/out; if in, reconcile status + any IR fields.
+
+### Backend TLS expansion
+
+- [ ] **`BackendTLSPolicy` non-Service targets** — e.g. other backend kinds Gateway API allows; snapshot resolution + compile + status fan-out rules.
+
+### HTTP / GRPC API completeness
+
+- [ ] **Audit `UnsupportedValue` / unsupported filter paths** — produce a matrix doc (Gateway API field → ugwc support level) or shrink gap intentionally.
+- [ ] **TLS listener modes** — close gaps called out in compile path (e.g. TLS terminate + TLSRoute interactions if still partial).
+
+### Controller hygiene (verify or improve)
+
+- [ ] **Document or enforce reconcile ordering** — grant/route/policy events enqueue the same gateway keys as Gateway/ListenerSet changes (audit `controller.rs` + document).
+- [ ] **EndpointSlice debouncing** — confirm sufficiency under slice churn; optional smarter debounce / sharding (`design/TODO-channel-experimental-handling.md`).
+
+### Versioning & operator docs
+
+- [ ] **Pin Gateway API bundle version(s)** in repo docs (standard vs experimental CRDs explicitly listed).
+- [ ] **Pin Inference Extension release** (`manifests.yaml` URL or version) for `InferencePool` v1.
+- [ ] **Compatibility table** — ugwc release ↔ Gateway API bundle ↔ Inference Extension ↔ optional Envoy/Praxis version.
+
+### Testing
+
+- [ ] **`ugwc-core` fixtures** — snapshot + compile cases for GRPCRoute, TLSRoute, ListenerSet merge, InferencePool backend, BackendTLS precedence (extend beyond partial BackendTLS coverage).
+- [ ] **Integration: envtest/kind** — ReferenceGrant cross-namespace parent; GRPCRoute attach; BackendTLSPolicy; InferencePool backendRef (unignore or replace `reference_grant_kube.rs` stub).
+- [ ] **Optional:** run or document subset of upstream Gateway API / inference conformance when a suitable dataplane is pinned.
+
+### Documentation
+
+- [ ] **`docs/architecture.md`** — watcher diagram + full resource list matching `controller.rs` module comment.
+- [ ] **Operator guide** — CRD install order, required feature gates (if any), flags, minimal GatewayClass + Inference CRD prerequisites.
+
+---
+
+## Open questions
+
+1. **Gateway API minor pin** — Single supported bundle vs “best effort” on older CRDs; ListenerSet already implies **≥ v1.5 standard** for that feature.
+2. **InferenceObjective** — Product requirement vs optional; API lives under **`inference.networking.x-k8s.io`** (alpha) separate from `InferencePool` v1.
+3. **Shard model** — Single reconciler listing all gateways vs namespace/class sharding for watch fan-out at scale.
+
+---
+
+## Suggested sequencing (remaining only)
+
+1. Version pin + compatibility table (unblocks support expectations).
+2. TCPRoute / UDPRoute only if experimental bundle is officially in scope.
+3. InferenceObjective after pools are validated in integration tests.
+4. BackendTLS non-Service targets if customer backends require it.
