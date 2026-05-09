@@ -19,6 +19,8 @@ cargo run -p ugwc -- --help
 
 Configuration is environment-driven; use `cargo run -p ugwc -- --dump-config` after setting variables to inspect effective config.
 
+Clusters must install the **experimental** Gateway API CRD bundle if you use route kinds such as **TCPRoute** or **UDPRoute** (`gateway.networking.k8s.io/v1alpha2`). If a CRD is missing, ugwc lists fail softly (logged) for that resource type.
+
 ## License
 
 Apache-2.0 — see [Cargo.toml](Cargo.toml).

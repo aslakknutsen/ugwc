@@ -31,6 +31,7 @@ enum Protocol {
   HTTPS   = 2;
   TLS     = 3;
   TCP     = 4;
+  UDP     = 5;
 }
 
 // FailureMode controls proxy behaviour when an InferencePool endpoint picker
@@ -187,6 +188,8 @@ message Route {
   bool tls_route = 11;
   // True when this rule came from a TCPRoute (L4 routing on TCP listeners).
   bool tcp_route = 12;
+  // True when this rule came from a UDPRoute (L4 routing on UDP listeners).
+  bool udp_route = 13;
 }
 
 // Resource is the top-level xDS resource served to a gwxds-capable proxy.

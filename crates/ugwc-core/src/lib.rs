@@ -18,7 +18,8 @@ pub use compile::{
     compile, grpc_route_accepted_condition_for_parent, grpc_route_resolved_refs_row,
     http_route_accepted_condition_for_parent, http_route_resolved_refs_row,
     tcp_route_accepted_condition_for_parent, tcp_route_resolved_refs_row,
-    tls_route_accepted_condition_for_parent, tls_route_resolved_refs_row, CompileInput,
+    tls_route_accepted_condition_for_parent, tls_route_resolved_refs_row,
+    udp_route_accepted_condition_for_parent, udp_route_resolved_refs_row, CompileInput,
     CompileOutcome, CompileReport, CoreError, ObjectRefErr,
 };
 pub use failure_policy::FailurePolicy;

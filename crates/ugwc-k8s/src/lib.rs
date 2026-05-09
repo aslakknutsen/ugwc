@@ -20,9 +20,10 @@ pub use status::{
     apply_gateway_reconciled_status, apply_grpc_route_merged_parent_status,
     apply_http_route_merged_parent_status, apply_inference_pools_for_gateway,
     apply_listenerset_reconciled_status, apply_tcp_route_merged_parent_status,
-    apply_tls_route_merged_parent_status, patch_gateway_programmed_false,
-    GrpcRouteMergedParentStatusArgs, HttpRouteMergedParentStatusArgs,
-    TcpRouteMergedParentStatusArgs, TlsRouteMergedParentStatusArgs,
+    apply_tls_route_merged_parent_status, apply_udp_route_merged_parent_status,
+    patch_gateway_programmed_false, GrpcRouteMergedParentStatusArgs,
+    HttpRouteMergedParentStatusArgs, TcpRouteMergedParentStatusArgs,
+    TlsRouteMergedParentStatusArgs, UdpRouteMergedParentStatusArgs,
 };
 
 /// Stub symbol retained for crate-graph smoke tests.

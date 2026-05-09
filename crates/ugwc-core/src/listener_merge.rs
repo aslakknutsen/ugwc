@@ -61,6 +61,8 @@ pub fn merge_effective_listeners(
 
     mark_distinctness_conflicts(&mut out);
     mark_tcp_layer7_port_conflicts(&mut out);
+    // Gateway API: treat UDP listeners sharing a port with HTTP/HTTPS/TLS like TCP+L7 (indistinct).
+    mark_udp_layer7_port_conflicts(&mut out);
     out
 }
 
@@ -118,6 +120,36 @@ fn mark_tcp_layer7_port_conflicts(effective: &mut [EffectiveListenerSnap]) {
         }
         let l7 = matches!(e.protocol.as_str(), "HTTP" | "HTTPS" | "TLS");
         if e.protocol == "TCP" || l7 {
+            e.conflicted = true;
+        }
+    }
+}
+
+/// Gateway API: UDP listeners sharing a port with HTTP/HTTPS/TLS listeners are indistinct (mirror TCP+L7).
+fn mark_udp_layer7_port_conflicts(effective: &mut [EffectiveListenerSnap]) {
+    let mut udp_ports: HashSet<u16> = HashSet::new();
+    let mut l7_ports: HashSet<u16> = HashSet::new();
+    for e in effective.iter() {
+        match e.protocol.as_str() {
+            "UDP" => {
+                udp_ports.insert(e.port);
+            }
+            "HTTP" | "HTTPS" | "TLS" => {
+                l7_ports.insert(e.port);
+            }
+            _ => {}
+        }
+    }
+    let conflict_ports: HashSet<u16> = udp_ports.intersection(&l7_ports).copied().collect();
+    if conflict_ports.is_empty() {
+        return;
+    }
+    for e in effective.iter_mut() {
+        if !conflict_ports.contains(&e.port) {
+            continue;
+        }
+        let l7 = matches!(e.protocol.as_str(), "HTTP" | "HTTPS" | "TLS");
+        if e.protocol == "UDP" || l7 {
             e.conflicted = true;
         }
     }
@@ -209,6 +241,30 @@ mod tests {
                 name: "tcp".into(),
                 port: 443,
                 protocol: "TCP".into(),
+                hostname: None,
+                allowed_routes: None,
+                tls: None,
+            },
+            GatewayListenerSnap {
+                name: "https".into(),
+                port: 443,
+                protocol: "HTTPS".into(),
+                hostname: None,
+                allowed_routes: None,
+                tls: None,
+            },
+        ];
+        let m = merge_effective_listeners(&gw, &[]);
+        assert!(m.iter().all(|e| e.conflicted), "{m:?}");
+    }
+
+    #[test]
+    fn udp_and_https_same_port_conflict() {
+        let gw = vec![
+            GatewayListenerSnap {
+                name: "udp".into(),
+                port: 443,
+                protocol: "UDP".into(),
                 hostname: None,
                 allowed_routes: None,
                 tls: None,

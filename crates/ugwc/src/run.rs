@@ -9,7 +9,8 @@ use tracing::{info, warn};
 use ugwc_core::publish::plan_publish;
 use ugwc_core::{
     grpc_route_resolved_refs_row, http_route_resolved_refs_row, tcp_route_resolved_refs_row,
-    tls_route_resolved_refs_row, CompileInput, FailurePolicy, PublishAction,
+    tls_route_resolved_refs_row, udp_route_resolved_refs_row, CompileInput, FailurePolicy,
+    PublishAction,
 };
 use ugwc_k8s::resources::{Gateway, ListenerSet};
 use ugwc_xds::{
@@ -269,6 +270,32 @@ pub async fn run(cfg: Config) -> Result<(), Box<dyn std::error::Error + Send + S
                             .await
                             {
                                 warn!(error = %e, route = %r.name, "tcproute status patch");
+                            }
+                        }
+
+                        for r in &snap.udp_routes {
+                            let (rs, rr, rm) = udp_route_resolved_refs_row(&co.report, r);
+                            if let Err(e) = ugwc_k8s::apply_udp_route_merged_parent_status(
+                                ugwc_k8s::UdpRouteMergedParentStatusArgs {
+                                    client: &client_inner,
+                                    route_ns: &r.namespace,
+                                    route_name: &r.name,
+                                    controller_name: &primary_controller,
+                                    route_generation: r.generation,
+                                    programmed_ok,
+                                    resolved_refs_status: rs,
+                                    resolved_refs_reason: rr,
+                                    resolved_refs_message: rm,
+                                    reconciled_gateway_ns: &ns,
+                                    reconciled_gateway_name: &name,
+                                    snapshot: snap,
+                                    compile_report: &co.report,
+                                    status_cache: Some(status_cache.clone()),
+                                },
+                            )
+                            .await
+                            {
+                                warn!(error = %e, route = %r.name, "udproute status patch");
                             }
                         }
 

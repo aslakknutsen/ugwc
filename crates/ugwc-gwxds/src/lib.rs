@@ -117,6 +117,13 @@ fn route_matches_proto(
                 grpc_service: None,
                 grpc_method: None,
             }],
+            RouteFamily::Udp => vec![ugwc_core::ir::RouteMatchIr {
+                path_prefix: None,
+                path_exact: None,
+                headers_exact: Default::default(),
+                grpc_service: None,
+                grpc_method: None,
+            }],
         }
     } else {
         matches.to_vec()
@@ -155,7 +162,7 @@ pub fn encode_ir(ir: &IrSnapshot) -> Vec<Resource> {
         let protocol = if gp_norm == "TCP" {
             Protocol::Tcp as i32
         } else if gp_norm == "UDP" {
-            Protocol::Unknown as i32
+            Protocol::Udp as i32
         } else {
             match ln.tls {
                 TlsMode::Passthrough => Protocol::Tls as i32,
@@ -184,6 +191,8 @@ pub fn encode_ir(ir: &IrSnapshot) -> Vec<Resource> {
         let allowed_routes = if ln.allowed_route_group_kinds.is_empty() {
             if gp_norm == "TCP" {
                 vec!["gateway.networking.k8s.io/TCPRoute".into()]
+            } else if gp_norm == "UDP" {
+                vec!["gateway.networking.k8s.io/UDPRoute".into()]
             } else if matches!(ln.tls, TlsMode::Passthrough) {
                 vec!["gateway.networking.k8s.io/TLSRoute".into()]
             } else {
@@ -290,6 +299,7 @@ pub fn encode_ir(ir: &IrSnapshot) -> Vec<Resource> {
             let grpc_route = matches!(r.route_family, RouteFamily::Grpc);
             let tls_route = matches!(r.route_family, RouteFamily::Tls);
             let tcp_route = matches!(r.route_family, RouteFamily::Tcp);
+            let udp_route = matches!(r.route_family, RouteFamily::Udp);
 
             routes.push(Route {
                 key: route_key,
@@ -304,6 +314,7 @@ pub fn encode_ir(ir: &IrSnapshot) -> Vec<Resource> {
                 grpc_route,
                 tls_route,
                 tcp_route,
+                udp_route,
             });
         }
 
@@ -454,6 +465,7 @@ mod tests {
         assert_eq!(m.grpc_method, "SayHello");
         assert!(!rt.tls_route);
         assert!(!rt.tcp_route);
+        assert!(!rt.udp_route);
     }
 
     #[test]
@@ -538,6 +550,7 @@ mod tests {
         assert!(rt.tls_route);
         assert!(!rt.grpc_route);
         assert!(!rt.tcp_route);
+        assert!(!rt.udp_route);
     }
 
     #[test]
@@ -619,6 +632,91 @@ mod tests {
         assert!(ln.allowed_routes.iter().any(|x| x.contains("TCPRoute")));
         let rt = &enc[0].routes[0];
         assert!(rt.tcp_route);
+        assert!(!rt.tls_route);
+        assert!(!rt.grpc_route);
+        assert!(!rt.udp_route);
+    }
+
+    #[test]
+    fn encode_udp_listener_protocol_and_udp_route_flag() {
+        use std::collections::BTreeMap;
+
+        use ugwc_core::ir::{
+            BackendEndpointIr, BackendIr, IrRevision, IrScopeId, ListenerAttachmentIr, ListenerIr,
+            RouteFamily, RouteRuleIr, SnapshotMeta, TlsMode, WeightedBackendIr, IR_VERSION,
+        };
+        use ugwc_core::IrSnapshot;
+
+        let scope = IrScopeId::new("default", "gw");
+        let listener = ListenerIr {
+            section_name: "udp".into(),
+            bind_port: 9500,
+            tls: TlsMode::Plaintext,
+            gateway_protocol: "UDP".into(),
+            parent_kind: "Gateway".into(),
+            parent_namespace: "default".into(),
+            parent_name: "gw".into(),
+            conflicted: false,
+            hostname: None,
+            tls_cert_pem: vec![],
+            tls_key_pem: vec![],
+            allowed_route_group_kinds: vec![],
+        };
+        let attach = ListenerAttachmentIr {
+            parent_kind: "Gateway".into(),
+            parent_namespace: "default".into(),
+            parent_name: "gw".into(),
+            section_name: "udp".into(),
+            port: 9500,
+        };
+        let backends_map = BTreeMap::from([(
+            "default/svc:9500".into(),
+            vec![BackendEndpointIr {
+                address: "10.1.2.3".into(),
+                port: 19500,
+            }],
+        )]);
+        let ir = IrSnapshot {
+            ir_version: IR_VERSION,
+            revision: IrRevision::Sequence(0),
+            scope,
+            listeners: vec![listener],
+            routes: vec![RouteRuleIr {
+                name: "udp/x".into(),
+                route_family: RouteFamily::Udp,
+                hosts: vec![],
+                matches: vec![],
+                backends: vec![WeightedBackendIr {
+                    backend: BackendIr {
+                        service_namespace: "default".into(),
+                        service_name: "svc".into(),
+                        port_name: None,
+                        port_number: Some(9500),
+                        backend_tls: None,
+                        inference: None,
+                    },
+                    weight: 1,
+                }],
+                request_redirect: None,
+                request_header_modifier: None,
+                response_header_modifier: None,
+                listener: Some(attach),
+            }],
+            backends: backends_map,
+            meta: SnapshotMeta {
+                correlation_id: uuid::Uuid::nil(),
+                has_errors: false,
+            },
+            policy: Default::default(),
+            inference: Default::default(),
+        };
+        let enc = encode_ir(&ir);
+        let ln = enc[0].listener.as_ref().expect("listener");
+        assert_eq!(ln.protocol, Protocol::Udp as i32);
+        assert!(ln.allowed_routes.iter().any(|x| x.contains("UDPRoute")));
+        let rt = &enc[0].routes[0];
+        assert!(rt.udp_route);
+        assert!(!rt.tcp_route);
         assert!(!rt.tls_route);
         assert!(!rt.grpc_route);
     }

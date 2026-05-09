@@ -5,7 +5,7 @@ use std::collections::BTreeMap;
 use uuid::Uuid;
 
 /// Schema version embedded on every snapshot (bump when wire/IR changes).
-pub const IR_VERSION: u32 = 7;
+pub const IR_VERSION: u32 = 8;
 
 /// Per-dataplane scope identity for sharded xDS versions (see module docs).
 #[derive(Clone, Debug, Eq, Hash, PartialEq, Ord, PartialOrd)]
@@ -90,7 +90,7 @@ pub struct ListenerAttachmentIr {
     pub port: u16,
 }
 
-/// Route protocol family (Gateway API HTTPRoute vs GRPCRoute vs TLSRoute vs TCPRoute).
+/// Route protocol family (Gateway API HTTPRoute vs GRPCRoute vs TLSRoute vs TCPRoute vs UDPRoute).
 #[derive(Clone, Debug, Eq, PartialEq, Default, serde::Serialize, serde::Deserialize)]
 pub enum RouteFamily {
     #[default]
@@ -100,6 +100,8 @@ pub enum RouteFamily {
     Tls,
     /// L4 TCP proxy routing (`TCPRoute` on `protocol: TCP` listeners).
     Tcp,
+    /// L4 UDP routing (`UDPRoute` on `protocol: UDP` listeners).
+    Udp,
 }
 
 /// One HTTP match clause (Core: path prefix or exact + header exact matches).

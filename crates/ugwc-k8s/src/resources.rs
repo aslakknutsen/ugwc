@@ -537,6 +537,35 @@ pub struct TCPRouteStatus {
     pub parents: Vec<serde_json::Value>,
 }
 
+/// `UDPRoute` — L4 UDP routing for `protocol: UDP` listeners (Gateway API experimental / v1alpha2).
+#[derive(CustomResource, Clone, Debug, Deserialize, Serialize)]
+#[kube(
+    group = "gateway.networking.k8s.io",
+    version = "v1alpha2",
+    kind = "UDPRoute",
+    namespaced,
+    status = "UDPRouteStatus",
+    schema = "disabled"
+)]
+pub struct UDPRouteSpec {
+    #[serde(rename = "parentRefs", default)]
+    pub parent_refs: Vec<ParentReferenceSpec>,
+    #[serde(default)]
+    pub rules: Vec<UDPRouteRuleSpec>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+pub struct UDPRouteRuleSpec {
+    #[serde(rename = "backendRefs", default)]
+    pub backend_refs: Vec<HTTPBackendRefSpec>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+pub struct UDPRouteStatus {
+    #[serde(default)]
+    pub parents: Vec<serde_json::Value>,
+}
+
 /// [`InferencePool`](https://gateway-api-inference-extension.sigs.k8s.io/reference/spec/) — inference.networking.k8s.io/v1.
 #[derive(CustomResource, Clone, Debug, Deserialize, Serialize)]
 #[kube(

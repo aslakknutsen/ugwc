@@ -11,12 +11,13 @@ use tracing::warn;
 use crate::loader::parent_reference_to_snap;
 use crate::resources::{
     BackendTLSPolicy, GRPCRoute, Gateway, GatewayClass, HTTPRoute, InferencePool, ListenerSet,
-    TCPRoute, TLSRoute,
+    TCPRoute, TLSRoute, UDPRoute,
 };
 use ugwc_core::compile::CompileReport;
 use ugwc_core::{
     grpc_route_accepted_condition_for_parent, http_route_accepted_condition_for_parent,
     tcp_route_accepted_condition_for_parent, tls_route_accepted_condition_for_parent,
+    udp_route_accepted_condition_for_parent,
 };
 
 fn supported_kinds_json(
@@ -59,6 +60,24 @@ fn supported_kinds_json(
         if kinds.is_empty() {
             return vec![
                 serde_json::json!({"group": "gateway.networking.k8s.io", "kind": "TCPRoute"}),
+            ];
+        }
+        return kinds
+            .iter()
+            .map(|k| {
+                serde_json::json!({"group": k.group.as_deref().unwrap_or("gateway.networking.k8s.io"), "kind": &k.kind})
+            })
+            .collect();
+    }
+    if proto == "UDP" {
+        let kinds = e
+            .allowed_routes
+            .as_ref()
+            .map(|a| &a.kinds[..])
+            .unwrap_or(&[]);
+        if kinds.is_empty() {
+            return vec![
+                serde_json::json!({"group": "gateway.networking.k8s.io", "kind": "UDPRoute"}),
             ];
         }
         return kinds
@@ -402,6 +421,24 @@ pub struct TlsRouteMergedParentStatusArgs<'a> {
 
 /// Merge `TCPRoute.status.parents` for parentRefs owned by this reconcile (Gateway + attached ListenerSets).
 pub struct TcpRouteMergedParentStatusArgs<'a> {
+    pub client: &'a Client,
+    pub route_ns: &'a str,
+    pub route_name: &'a str,
+    pub controller_name: &'a str,
+    pub route_generation: i64,
+    pub programmed_ok: bool,
+    pub resolved_refs_status: &'a str,
+    pub resolved_refs_reason: &'a str,
+    pub resolved_refs_message: &'a str,
+    pub reconciled_gateway_ns: &'a str,
+    pub reconciled_gateway_name: &'a str,
+    pub snapshot: &'a ugwc_core::ClusterSnapshot,
+    pub compile_report: &'a ugwc_core::CompileReport,
+    pub status_cache: Option<Arc<Mutex<HashMap<String, String>>>>,
+}
+
+/// Merge `UDPRoute.status.parents` for parentRefs owned by this reconcile (Gateway + attached ListenerSets).
+pub struct UdpRouteMergedParentStatusArgs<'a> {
     pub client: &'a Client,
     pub route_ns: &'a str,
     pub route_name: &'a str,
@@ -1070,6 +1107,160 @@ pub async fn apply_tcp_route_merged_parent_status(
     Ok(())
 }
 
+pub async fn apply_udp_route_merged_parent_status(
+    args: UdpRouteMergedParentStatusArgs<'_>,
+) -> Result<(), kube::Error> {
+    let UdpRouteMergedParentStatusArgs {
+        client,
+        route_ns,
+        route_name,
+        controller_name,
+        route_generation,
+        programmed_ok,
+        resolved_refs_status,
+        resolved_refs_reason,
+        resolved_refs_message,
+        reconciled_gateway_ns,
+        reconciled_gateway_name,
+        snapshot,
+        compile_report,
+        status_cache,
+    } = args;
+
+    let attached_ls: std::collections::HashSet<(String, String)> = snapshot
+        .listener_sets
+        .iter()
+        .map(|ls| (ls.namespace.clone(), ls.name.clone()))
+        .collect();
+
+    let api: Api<UDPRoute> = Api::namespaced(client.clone(), route_ns);
+    let route = api.get(route_name).await?;
+
+    let mut ours: Vec<&crate::resources::ParentReferenceSpec> = Vec::new();
+    for p in &route.spec.parent_refs {
+        let g = p.group.as_deref().unwrap_or("gateway.networking.k8s.io");
+        let k = p.kind.as_deref().unwrap_or("Gateway");
+        if g != "gateway.networking.k8s.io" {
+            continue;
+        }
+        let pns = p.namespace.as_deref().unwrap_or(route_ns);
+        if k == "Gateway"
+            && pns == reconciled_gateway_ns
+            && p.name.as_str() == reconciled_gateway_name
+        {
+            ours.push(p);
+            continue;
+        }
+        if k == "ListenerSet" && attached_ls.contains(&(pns.to_string(), p.name.clone())) {
+            ours.push(p);
+        }
+    }
+
+    if ours.is_empty() {
+        return Ok(());
+    }
+
+    let mut parents: Vec<serde_json::Value> = route
+        .status
+        .as_ref()
+        .map(|s| s.parents.clone())
+        .unwrap_or_default();
+
+    parents.retain(|row| {
+        let ctrl = row.get("controllerName").and_then(|x| x.as_str());
+        if ctrl != Some(controller_name) {
+            return true;
+        }
+        let Some(pref) = row.get("parentRef") else {
+            return true;
+        };
+        !ours
+            .iter()
+            .any(|p| parent_ref_matches_json(pref, &parent_ref_json_from_spec(p, route_ns)))
+    });
+
+    let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+    let (p_st, reason) = if programmed_ok {
+        ("True", "Programmed")
+    } else {
+        ("False", "CompileErrors")
+    };
+
+    let route_snap = snapshot
+        .udp_routes
+        .iter()
+        .find(|r| r.namespace == route_ns && r.name == route_name);
+
+    for p in ours {
+        let pref_snap = parent_reference_to_snap(p);
+        let (acc_status, acc_reason, acc_message) = match route_snap {
+            Some(rs) => udp_route_accepted_condition_for_parent(
+                rs,
+                &pref_snap,
+                snapshot,
+                &attached_ls,
+                compile_report,
+            ),
+            None => (
+                "False",
+                "Pending",
+                "UDPRoute not loaded into gateway snapshot",
+            ),
+        };
+
+        let pref = parent_ref_json_from_spec(p, route_ns);
+        parents.push(serde_json::json!({
+            "parentRef": pref,
+            "controllerName": controller_name,
+            "conditions": [
+                {
+                    "type": "Accepted",
+                    "status": acc_status,
+                    "reason": acc_reason,
+                    "message": acc_message,
+                    "lastTransitionTime": now,
+                    "observedGeneration": route_generation
+                },
+                {
+                    "type": "ResolvedRefs",
+                    "status": resolved_refs_status,
+                    "reason": resolved_refs_reason,
+                    "message": resolved_refs_message,
+                    "lastTransitionTime": now,
+                    "observedGeneration": route_generation
+                },
+                {
+                    "type": "Programmed",
+                    "status": p_st,
+                    "reason": reason,
+                    "message": "ugwc compile outcome",
+                    "lastTransitionTime": now,
+                    "observedGeneration": route_generation
+                }
+            ]
+        }));
+    }
+
+    let status = serde_json::json!({ "status": { "parents": parents } });
+
+    if let Some(cache) = &status_cache {
+        let key = format!(
+            "udproute-merge:{route_ns}/{route_name}/{reconciled_gateway_ns}/{reconciled_gateway_name}"
+        );
+        let serialized = serde_json::to_string(&status).unwrap_or_default();
+        let mut c = cache.lock().unwrap();
+        if c.get(&key) == Some(&serialized) {
+            return Ok(());
+        }
+        c.insert(key, serialized);
+    }
+
+    let patch = Patch::Merge(status);
+    let params = PatchParams::apply("ugwc");
+    api.patch_status(route_name, &params, &patch).await?;
+    Ok(())
+}
+
 /// Update `ListenerSet` status for listeners merged onto a reconciled Gateway.
 pub async fn apply_listenerset_reconciled_status(
     client: &Client,
@@ -1467,6 +1658,25 @@ fn tcp_route_snap_refs_inference_pool(
     false
 }
 
+fn udp_route_snap_refs_inference_pool(
+    r: &ugwc_core::snapshot::UdpRouteSnap,
+    pool_ns: &str,
+    pool_name: &str,
+) -> bool {
+    for rule in &r.rules {
+        for br in &rule.backend_refs {
+            if !br.is_inference_pool() {
+                continue;
+            }
+            let pns = br.namespace.as_deref().unwrap_or(r.namespace.as_str());
+            if pns == pool_ns && br.name == pool_name {
+                return true;
+            }
+        }
+    }
+    false
+}
+
 fn route_report_breaks_inference_pool_backend_ref(
     report: &CompileReport,
     route_kind: &str,
@@ -1543,6 +1753,15 @@ fn inference_pool_resolved_refs_ok(
             continue;
         }
         if route_report_breaks_inference_pool_backend_ref(report, "TCPRoute", &r.namespace, &r.name)
+        {
+            return false;
+        }
+    }
+    for r in &snapshot.udp_routes {
+        if !udp_route_snap_refs_inference_pool(r, pool_ns, pool_name) {
+            continue;
+        }
+        if route_report_breaks_inference_pool_backend_ref(report, "UDPRoute", &r.namespace, &r.name)
         {
             return false;
         }

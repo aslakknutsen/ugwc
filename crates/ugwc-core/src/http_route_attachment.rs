@@ -4,7 +4,7 @@ use std::collections::{BTreeMap, HashSet};
 
 use crate::snapshot::{
     AllowedRoutesSnap, ClusterSnapshot, EffectiveListenerSnap, GrpcRouteSnap, HttpRouteSnap,
-    ListenerParentSnap, ParentRefSnap, ReferenceGrantSnap, TcpRouteSnap, TlsRouteSnap,
+    ListenerParentSnap, ParentRefSnap, ReferenceGrantSnap, TcpRouteSnap, TlsRouteSnap, UdpRouteSnap,
 };
 
 pub(crate) fn gateway_api_group(g: &Option<String>) -> bool {
@@ -350,10 +350,11 @@ pub fn reference_grant_permits_gateway_secret_ref(
 
 /// Whether `route_namespace` may attach to this listener per `allowedRoutes`.
 ///
-/// `route_kind` is `HTTPRoute`, `GRPCRoute`, `TLSRoute`, or `TCPRoute`. When `allowedRoutes.kinds` is empty and the protocol
+/// `route_kind` is `HTTPRoute`, `GRPCRoute`, `TLSRoute`, `TCPRoute`, or `UDPRoute`. When `allowedRoutes.kinds` is empty and the protocol
 /// is HTTP-like, both HTTP and GRPC route kinds are permitted (ugwc implements GRPCRoute on HTTP/HTTPS listeners).
 /// When the protocol is TLS, only `TLSRoute` is permitted by default.
 /// When the protocol is TCP, only `TCPRoute` is permitted by default.
+/// When the protocol is UDP, only `UDPRoute` is permitted by default.
 #[must_use]
 pub fn listener_accepts_route_kind(
     route_kind: &str,
@@ -367,6 +368,7 @@ pub fn listener_accepts_route_kind(
     let http_like = proto_u == "HTTP" || proto_u == "HTTPS";
     let tls_like = proto_u == "TLS";
     let tcp_like = proto_u == "TCP";
+    let udp_like = proto_u == "UDP";
 
     let ns_from = allowed
         .and_then(|a| a.namespaces.as_ref())
@@ -410,6 +412,9 @@ pub fn listener_accepts_route_kind(
         }
         if tcp_like {
             return route_kind == "TCPRoute";
+        }
+        if udp_like {
+            return route_kind == "UDPRoute";
         }
         return false;
     }
@@ -507,6 +512,12 @@ pub fn tls_route_listener_hostname_ok(route: &TlsRouteSnap, eff: &EffectiveListe
 #[must_use]
 pub fn tcp_route_listener_ok(_route: &TcpRouteSnap, eff: &EffectiveListenerSnap) -> bool {
     eff.protocol.trim().eq_ignore_ascii_case("TCP")
+}
+
+/// UDPRoute has no hostnames; attachment requires a UDP listener.
+#[must_use]
+pub fn udp_route_listener_ok(_route: &UdpRouteSnap, eff: &EffectiveListenerSnap) -> bool {
+    eff.protocol.trim().eq_ignore_ascii_case("UDP")
 }
 
 /// Collect attachment keys from one route `parentRef` relevant to this Gateway reconcile scope.
@@ -675,6 +686,15 @@ pub(crate) fn tcp_attachment_keys_for_parent_ref(
     attachment_keys_for_parent_ref_ns(&route.namespace, "TCPRoute", p, snapshot, attached_ls)
 }
 
+pub(crate) fn udp_attachment_keys_for_parent_ref(
+    route: &UdpRouteSnap,
+    p: &ParentRefSnap,
+    snapshot: &ClusterSnapshot,
+    attached_ls: &HashSet<(String, String)>,
+) -> Vec<crate::ir::ListenerAttachmentIr> {
+    attachment_keys_for_parent_ref_ns(&route.namespace, "UDPRoute", p, snapshot, attached_ls)
+}
+
 pub(crate) fn route_attachment_keys(
     route: &HttpRouteSnap,
     snapshot: &ClusterSnapshot,
@@ -740,6 +760,25 @@ pub(crate) fn tcp_route_attachment_keys(
     let mut keys: Vec<crate::ir::ListenerAttachmentIr> = Vec::new();
     for p in &route.parent_refs {
         keys.extend(tcp_attachment_keys_for_parent_ref(
+            route,
+            p,
+            snapshot,
+            attached_ls,
+        ));
+    }
+    keys.sort();
+    keys.dedup();
+    keys
+}
+
+pub(crate) fn udp_route_attachment_keys(
+    route: &UdpRouteSnap,
+    snapshot: &ClusterSnapshot,
+    attached_ls: &HashSet<(String, String)>,
+) -> Vec<crate::ir::ListenerAttachmentIr> {
+    let mut keys: Vec<crate::ir::ListenerAttachmentIr> = Vec::new();
+    for p in &route.parent_refs {
+        keys.extend(udp_attachment_keys_for_parent_ref(
             route,
             p,
             snapshot,
@@ -849,6 +888,32 @@ pub fn tcp_route_accepted_for_parent_ref(
             continue;
         }
         if !tcp_route_listener_ok(route, eff) {
+            continue;
+        }
+        return true;
+    }
+    false
+}
+
+#[must_use]
+pub fn udp_route_accepted_for_parent_ref(
+    route: &UdpRouteSnap,
+    parent: &ParentRefSnap,
+    snapshot: &ClusterSnapshot,
+    attached_ls: &HashSet<(String, String)>,
+) -> bool {
+    let keys = udp_attachment_keys_for_parent_ref(route, parent, snapshot, attached_ls);
+    if keys.is_empty() {
+        return false;
+    }
+    for lk in &keys {
+        let Some(eff) = find_effective_for_key(snapshot, lk) else {
+            continue;
+        };
+        if eff.conflicted {
+            continue;
+        }
+        if !udp_route_listener_ok(route, eff) {
             continue;
         }
         return true;
@@ -1037,6 +1102,29 @@ mod tests {
             "default",
             "default",
             "TCP",
+            None,
+            &labels,
+        ));
+    }
+
+    #[test]
+    fn udp_listener_accepts_udproute_when_route_kinds_unset() {
+        use std::collections::BTreeMap;
+
+        let labels = BTreeMap::new();
+        assert!(listener_accepts_route_kind(
+            "UDPRoute",
+            "default",
+            "default",
+            "UDP",
+            None,
+            &labels,
+        ));
+        assert!(!listener_accepts_route_kind(
+            "HTTPRoute",
+            "default",
+            "default",
+            "UDP",
             None,
             &labels,
         ));

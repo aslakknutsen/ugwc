@@ -24,12 +24,12 @@ use ugwc_core::snapshot::{
     InferencePoolSelectorSnap, InferencePoolSnap, ListenerNamespacesSnap, ListenerSetSnap,
     ParentRefSnap, ReferenceGrantFromSnap, ReferenceGrantSnap, ReferenceGrantToSnap,
     RouteGroupKindSnap, SecretObjectReferenceSnap, ServicePortSnap, ServiceSnap, TcpRouteRuleSnap,
-    TcpRouteSnap, TlsRouteRuleSnap, TlsRouteSnap,
+    TcpRouteSnap, TlsRouteRuleSnap, TlsRouteSnap, UdpRouteRuleSnap, UdpRouteSnap,
 };
 
 use crate::resources::{
     BackendTLSPolicy, GRPCRoute, Gateway, GatewayClass, HTTPBackendRefSpec, HTTPRoute,
-    InferencePool, ListenerSet, ParentReferenceSpec, ReferenceGrant, TCPRoute, TLSRoute,
+    InferencePool, ListenerSet, ParentReferenceSpec, ReferenceGrant, TCPRoute, TLSRoute, UDPRoute,
 };
 
 #[derive(Debug, Error)]
@@ -529,6 +529,21 @@ fn tcp_route_relevant_to_gateway(
     )
 }
 
+fn udp_route_relevant_to_gateway(
+    route: &UDPRoute,
+    gw_ns: &str,
+    gw_name: &str,
+    attached_ls: &HashSet<(String, String)>,
+) -> bool {
+    route_relevant_to_gateway_refs(
+        &route.spec.parent_refs,
+        route.metadata.namespace.as_deref(),
+        gw_ns,
+        gw_name,
+        attached_ls,
+    )
+}
+
 fn http_route_to_snap(route: &HTTPRoute) -> HttpRouteSnap {
     let gen = route.metadata.generation.unwrap_or(0);
     let creation_timestamp_rfc3339 = route
@@ -716,6 +731,44 @@ fn tcp_route_to_snap(route: &TCPRoute) -> TcpRouteSnap {
         .collect();
 
     TcpRouteSnap {
+        namespace: route.metadata.namespace.clone().unwrap_or_default(),
+        name: route.metadata.name.clone().unwrap_or_default(),
+        generation: gen,
+        creation_timestamp_rfc3339,
+        parent_refs: route.spec.parent_refs.iter().map(parent_to_snap).collect(),
+        rules,
+    }
+}
+
+fn udp_route_to_snap(route: &UDPRoute) -> UdpRouteSnap {
+    let gen = route.metadata.generation.unwrap_or(0);
+    let creation_timestamp_rfc3339 = route
+        .metadata
+        .creation_timestamp
+        .as_ref()
+        .map(|t| t.0.to_rfc3339());
+    let rules: Vec<UdpRouteRuleSnap> = route
+        .spec
+        .rules
+        .iter()
+        .map(|r| UdpRouteRuleSnap {
+            backend_refs: r
+                .backend_refs
+                .iter()
+                .map(|b| HttpBackendRefSnap {
+                    group: b.group.clone(),
+                    kind: b.kind.clone(),
+                    namespace: b.namespace.clone(),
+                    name: b.name.clone(),
+                    port: b.port,
+                    port_name: b.port_name.clone(),
+                    weight: b.weight,
+                })
+                .collect(),
+        })
+        .collect();
+
+    UdpRouteSnap {
         namespace: route.metadata.namespace.clone().unwrap_or_default(),
         name: route.metadata.name.clone().unwrap_or_default(),
         generation: gen,
@@ -1089,6 +1142,7 @@ pub async fn load_cluster_snapshot(
     let mut grpc_routes: Vec<GrpcRouteSnap> = Vec::new();
     let mut tls_routes: Vec<TlsRouteSnap> = Vec::new();
     let mut tcp_routes: Vec<TcpRouteSnap> = Vec::new();
+    let mut udp_routes: Vec<UdpRouteSnap> = Vec::new();
     let mut needed_services: Vec<(String, String)> = Vec::new();
     let mut needed_pools: Vec<(String, String)> = Vec::new();
     let mut ns_for_labels: HashSet<String> = HashSet::new();
@@ -1274,6 +1328,56 @@ pub async fn load_cluster_snapshot(
             warn!(
                 error = %e,
                 "TCPRoute list failed — clusters without TCPRoute CRD skip TCP routes"
+            );
+        }
+    }
+
+    let udp_api: Api<UDPRoute> = Api::all(client.clone());
+    match udp_api.list(&ListParams::default()).await {
+        Ok(udp_list) => {
+            for item in udp_list.items {
+                if !udp_route_relevant_to_gateway(
+                    &item,
+                    gateway_ns,
+                    gateway_name,
+                    &attached_ls_keys,
+                ) {
+                    continue;
+                }
+                let rns = item.metadata.namespace.clone().unwrap_or_default();
+                ns_for_labels.insert(rns.clone());
+
+                let snap = udp_route_to_snap(&item);
+                for rule in &item.spec.rules {
+                    for br in &rule.backend_refs {
+                        if crate::resources::is_inference_pool_backend_ref(br) {
+                            collect_inference_pool_backend_ref(
+                                br,
+                                &rns,
+                                &mut needed_pools,
+                                &mut ns_for_labels,
+                            );
+                            continue;
+                        }
+                        if br.kind.as_deref().unwrap_or("Service") != "Service" {
+                            continue;
+                        }
+                        let sns = br
+                            .namespace
+                            .clone()
+                            .or(item.metadata.namespace.clone())
+                            .unwrap_or_default();
+                        ns_for_labels.insert(sns.clone());
+                        needed_services.push((sns, br.name.clone()));
+                    }
+                }
+                udp_routes.push(snap);
+            }
+        }
+        Err(e) => {
+            warn!(
+                error = %e,
+                "UDPRoute list failed — clusters without UDPRoute CRD skip UDP routes"
             );
         }
     }
@@ -1468,6 +1572,7 @@ pub async fn load_cluster_snapshot(
         grpc_routes,
         tls_routes,
         tcp_routes,
+        udp_routes,
         services,
         endpoint_slices,
         gateway_class,

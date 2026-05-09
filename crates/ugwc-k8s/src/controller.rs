@@ -1,4 +1,4 @@
-//! Multi-watch controller graph: `Gateway`, `HTTPRoute`, `GRPCRoute`, `TLSRoute`, `TCPRoute`, `ListenerSet`,
+//! Multi-watch controller graph: `Gateway`, `HTTPRoute`, `GRPCRoute`, `TLSRoute`, `TCPRoute`, `UDPRoute`, `ListenerSet`,
 //! `ReferenceGrant`, `BackendTLSPolicy`, `ConfigMap` (BackendTLS CA), `EndpointSlice`, `Secret`,
 //! `GatewayClass`, `InferencePool` (fan-out via routes that reference a pool).
 
@@ -23,7 +23,7 @@ use crate::resources::{
     backend_tls_policy_spec_references_configmap, backend_tls_policy_targets_service,
     gateway_spec_references_secret, listenerset_spec_references_secret, BackendTLSPolicy,
     GRPCRoute, Gateway, GatewayClass, HTTPRoute, InferencePool, ListenerSet, ParentReferenceSpec,
-    ReferenceGrant, TCPRoute, TLSRoute,
+    ReferenceGrant, TCPRoute, TLSRoute, UDPRoute,
 };
 
 pub type ReconcileFuture = Pin<Box<dyn Future<Output = Result<(), String>> + Send>>;
@@ -147,6 +147,19 @@ async fn gateway_targets_for_tcp_route(
     .await
 }
 
+async fn gateway_targets_for_udp_route(
+    client: &Client,
+    route: &UDPRoute,
+) -> HashSet<(String, String)> {
+    gateway_targets_from_parent_refs(
+        client,
+        route.metadata.namespace.clone(),
+        route.name_any().as_ref(),
+        &route.spec.parent_refs,
+    )
+    .await
+}
+
 fn http_route_references_inference_pool(route: &HTTPRoute, pool_ns: &str, pool_name: &str) -> bool {
     let rns = route.metadata.namespace.as_deref().unwrap_or("");
     for rule in &route.spec.rules {
@@ -196,6 +209,22 @@ fn tls_route_references_inference_pool(route: &TLSRoute, pool_ns: &str, pool_nam
 }
 
 fn tcp_route_references_inference_pool(route: &TCPRoute, pool_ns: &str, pool_name: &str) -> bool {
+    let rns = route.metadata.namespace.as_deref().unwrap_or("");
+    for rule in &route.spec.rules {
+        for br in &rule.backend_refs {
+            if !crate::resources::is_inference_pool_backend_ref(br) {
+                continue;
+            }
+            let pns = br.namespace.as_deref().unwrap_or(rns);
+            if pns == pool_ns && br.name == pool_name {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+fn udp_route_references_inference_pool(route: &UDPRoute, pool_ns: &str, pool_name: &str) -> bool {
     let rns = route.metadata.namespace.as_deref().unwrap_or("");
     for rule in &route.spec.rules {
         for br in &rule.backend_refs {
@@ -279,6 +308,22 @@ async fn gateway_targets_for_inference_pool(
             pool_ns = %pool_ns,
             pool_name = %pool_name,
             "list tcproute after inferencepool change"
+        ),
+    }
+    let udp_api: Api<UDPRoute> = Api::all(client.clone());
+    match udp_api.list(&ListParams::default()).await {
+        Ok(list) => {
+            for route in list.items {
+                if udp_route_references_inference_pool(&route, pool_ns, pool_name) {
+                    out.extend(gateway_targets_for_udp_route(client, &route).await);
+                }
+            }
+        }
+        Err(e) => warn!(
+            error = %e,
+            pool_ns = %pool_ns,
+            pool_name = %pool_name,
+            "list udproute after inferencepool change"
         ),
     }
     out
@@ -376,6 +421,29 @@ fn tcp_route_references_backend_tls_policy_target(
     false
 }
 
+fn udp_route_references_backend_tls_policy_target(
+    pol: &BackendTLSPolicy,
+    route: &UDPRoute,
+) -> bool {
+    let pol_ns = pol.metadata.namespace.as_deref().unwrap_or("");
+    for rule in &route.spec.rules {
+        for br in &rule.backend_refs {
+            if br.kind.as_deref().unwrap_or("Service") != "Service" {
+                continue;
+            }
+            let sns = br
+                .namespace
+                .as_deref()
+                .or(route.metadata.namespace.as_deref())
+                .unwrap_or("");
+            if backend_tls_policy_targets_service(&pol.spec, pol_ns, sns, &br.name) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
 async fn gateway_targets_for_backend_tls_policy(
     client: &Client,
     pol: &BackendTLSPolicy,
@@ -410,6 +478,14 @@ async fn gateway_targets_for_backend_tls_policy(
         for route in list.items {
             if tcp_route_references_backend_tls_policy_target(pol, &route) {
                 out.extend(gateway_targets_for_tcp_route(client, &route).await);
+            }
+        }
+    }
+    let udp_api: Api<UDPRoute> = Api::all(client.clone());
+    if let Ok(list) = udp_api.list(&ListParams::default()).await {
+        for route in list.items {
+            if udp_route_references_backend_tls_policy_target(pol, &route) {
+                out.extend(gateway_targets_for_udp_route(client, &route).await);
             }
         }
     }
@@ -572,6 +648,35 @@ pub async fn run_gateway_controller(
         info!("tcproute watcher shutdown");
     });
 
+    let sd_udp = shutdown.clone();
+    let c_udp = client.clone();
+    let tx_udp = tx.clone();
+    tokio::spawn(async move {
+        let api: Api<UDPRoute> = Api::all(c_udp.clone());
+        let cfg = WatcherConfig::default().any_semantic();
+        let mut stream = Box::pin(watcher(api, cfg).applied_objects());
+        loop {
+            tokio::select! {
+                _ = sd_udp.cancelled() => break,
+                ev = stream.next() => {
+                    match ev {
+                        Some(Ok(route)) => {
+                            let targets = gateway_targets_for_udp_route(&c_udp, &route).await;
+                            for (pns, pname) in targets {
+                                if tx_udp.send((pns, pname)).await.is_err() {
+                                    return;
+                                }
+                            }
+                        }
+                        Some(Err(e)) => warn!(error = %e, "udproute watch stream"),
+                        None => break,
+                    }
+                }
+            }
+        }
+        info!("udproute watcher shutdown");
+    });
+
     let sd_ipool = shutdown.clone();
     let c_ipool = client.clone();
     let tx_ipool = tx.clone();
@@ -720,6 +825,25 @@ pub async fn run_gateway_controller(
                                         "list tcproute after referencegrant change (fallback)"
                                     ),
                                 }
+                                let udp_api: Api<UDPRoute> = Api::all(c_rg.clone());
+                                match udp_api.list(&ListParams::default()).await {
+                                    Ok(list) => {
+                                        for route in list.items {
+                                            let targets = gateway_targets_for_udp_route(
+                                                &c_rg,
+                                                &route,
+                                            )
+                                            .await;
+                                            for t in targets {
+                                                keys.insert(t);
+                                            }
+                                        }
+                                    }
+                                    Err(e) => warn!(
+                                        error = %e,
+                                        "list udproute after referencegrant change (fallback)"
+                                    ),
+                                }
                             } else {
                                 for ns in route_ns_list {
                                     let hr_api: Api<HTTPRoute> =
@@ -796,6 +920,25 @@ pub async fn run_gateway_controller(
                                             error = %e,
                                             route_ns = %ns,
                                             "list tcproute after referencegrant change"
+                                        ),
+                                    }
+                                    let udp_api: Api<UDPRoute> =
+                                        Api::namespaced(c_rg.clone(), &ns);
+                                    match udp_api.list(&ListParams::default()).await {
+                                        Ok(list) => {
+                                            for route in list.items {
+                                                let targets =
+                                                    gateway_targets_for_udp_route(&c_rg, &route)
+                                                        .await;
+                                                for t in targets {
+                                                    keys.insert(t);
+                                                }
+                                            }
+                                        }
+                                        Err(e) => warn!(
+                                            error = %e,
+                                            route_ns = %ns,
+                                            "list udproute after referencegrant change"
                                         ),
                                     }
                                 }
