@@ -2,7 +2,7 @@
 
 **Goal:** Track latest **Gateway API** (standard + extended channel semantics where relevant) and **Gateway API Inference Extension** so the controller observes, loads into `ClusterSnapshot`, compiles, publishes IR/xDS, and writes status for all resource kinds required for parity—not only `HTTPRoute` + `Service`.
 
-**Baseline (current code):** Watches `Gateway`, `HTTPRoute`, `GRPCRoute`, `TLSRoute`, `ListenerSet`, `ReferenceGrant`, `BackendTLSPolicy`, `ConfigMap` (when referenced as BackendTLS CA bundles), `EndpointSlice` (debounced full-gateway fan-out), `GatewayClass` (owned classes), `InferencePool` (routes → gateways). Snapshot loads merged listeners (`Gateway` + attached `ListenerSet` when `allowedListeners` permits), HTTP / GRPC / TLS routes attached to either parent kind, `Service` + `InferencePool` backends (pool spec + EPP `Service`), resolved upstream TLS rows from `BackendTLSPolicy`, `EndpointSlice`s, relevant `ReferenceGrant`s, `GatewayClass`. `InferenceObjective` and broader policy APIs remain tracked below but are not implemented.
+**Baseline (current code):** Watches `Gateway`, `HTTPRoute`, `GRPCRoute`, `TLSRoute`, `ListenerSet`, `ReferenceGrant`, `BackendTLSPolicy`, `ConfigMap` (when referenced as BackendTLS CA bundles), `EndpointSlice` (debounced full-gateway fan-out), `GatewayClass` (owned classes), `InferencePool` (routes → gateways). Snapshot loads merged listeners (`Gateway` + attached `ListenerSet` when `allowedListeners` permits), HTTP / GRPC / TLS routes attached to either parent kind (with **ReferenceGrant** required for cross-namespace route→Gateway / route→ListenerSet parents), `Service` + `InferencePool` backends (pool spec + EPP `Service`), resolved upstream TLS rows from `BackendTLSPolicy`, `EndpointSlice`s, cluster-wide `ReferenceGrant`s, `GatewayClass`. `InferenceObjective` and broader policy APIs remain tracked below but are not implemented.
 
 ---
 
@@ -16,7 +16,7 @@ For each new resource type, define:
 
 Concrete additions:
 
-- [ ] **`ReferenceGrant`** (`gateway.networking.k8s.io`) — reconcile when cross-namespace refs depend on grants; map affected namespaces/routes/gateways (may require an index of refs → gateways).
+- [x] **`ReferenceGrant`** (`gateway.networking.k8s.io`) — cluster-wide watch; enqueue gateways in the grant namespace plus targets from routes in each `spec.from[].namespace` (full route list fallback when `from` is empty).
 - [x] **`GRPCRoute`** — parent refs to `Gateway`; same attachment rules as `HTTPRoute`; reconcile key from parent Gateway.
 - [ ] **`TLSRoute`** / **`TCPRoute`** / **`UDPRoute`** (as applicable to supported protocols) — watch + map + snapshot fields.
 - [x] **`BackendTLSPolicy`** (`gateway.networking.k8s.io/v1`) — cluster-wide watch + namespaced `ConfigMap` watch when policies reference CA `ConfigMap`s; fan-out to gateways whose attached routes use a targeted `Service` backend. **Scope:** `Service` targets only (extended core); not arbitrary backend kinds.
@@ -32,7 +32,7 @@ Extend types and `load_cluster_snapshot` (or successor) to include:
 
 - [x] **ListenerSet merge + effective listeners** on `ClusterSnapshot` (`listener_sets`, `effective_listeners`, `allowedListeners` snapshot fields).
 - [x] **Routes:** `GRPCRoute` (and TLS/TCP/UDP as scoped).
-- [ ] **Grants:** relevant `ReferenceGrant` documents for allowed cross-namespace reference pairs touching that Gateway’s scope (partial: HTTPRoute + GRPCRoute Service refs).
+- [x] **Grants:** cluster-wide `ReferenceGrant` list in `ClusterSnapshot`; enforced for cross-namespace route→Gateway / route→ListenerSet parents, Service / InferencePool backends, listener TLS Secrets; `to.group` must match core/Gateway API groups for `Service` targets.
 - [x] **TLS:** resolved `BackendTLSPolicy` → `ClusterSnapshot.backend_tls_effective` (`ns/name:port` → `BackendTlsIr`) plus `backend_tls_policy_outcomes` for status.
 - [x] **Inference:** `InferencePool` specs (selector, `targetPorts`, `appProtocol`, `endpointPickerRef`, failure modes) for pools referenced by routes; optional **InferenceObjective** if part of routing (still open).
 
@@ -46,7 +46,7 @@ Ensure:
 ## 3. Core compile / IR
 
 - [x] **Normalize** GRPC (and other L4/L7) routes into IR alongside HTTP (core filters / exact matches; extended filters tracked separately).
-- [ ] **Enforce ReferenceGrant** semantics in compile reports (conditions / errors when refs are illegal) (partial for Service backends from HTTPRoute/GRPCRoute).
+- [x] **Enforce ReferenceGrant** semantics in compile reports and route parent status (`RefNotPermitted` when cross-namespace attachment lacks a grant; `Accepted` uses explicit reason).
 - [x] **Backend TLS:** map winning policy per backend → `BackendIr.backend_tls`; invalid CA → compile error / route `ResolvedRefs` (`InvalidCACertificateRef`).
 - [x] **Inference:** map `InferencePool` → IR + `gwxds` `Backend.inference_pool` (`endpointPickerRef`, failure modes); ReferenceGrant for cross-namespace pool refs.
 - [ ] **InferenceObjective:** if request-scoped objectives affect routing or filters, thread through IR and the data plane contract.
@@ -80,7 +80,7 @@ Ensure:
 ## 7. Testing and conformance
 
 - [ ] Fixture tests for new snapshot + compile inputs (pure `ugwc-core`). **Partial:** BackendTLS via `backend_tls_effective` → `BackendIr` / compile errors (`from_cluster`); loader section/precedence helpers (`ugwc-k8s`).
-- [ ] Integration tests with envtest/kind: ReferenceGrant cross-namespace, GRPCRoute attach, BackendTLSPolicy, InferencePool backend ref. **Partial:** BackendTLSPolicy covered in unit tests only so far.
+- [ ] Integration tests with envtest/kind: ReferenceGrant cross-namespace, GRPCRoute attach, BackendTLSPolicy, InferencePool backend ref. **Partial:** `crates/ugwc-k8s/tests/reference_grant_kube.rs` ignored test stub + `ugwc-core` fixture coverage for route parent grants.
 - [ ] Optional: upstream **Gateway API conformance** and **inference extension** conformance subsets when implementations exist.
 
 ---
@@ -94,7 +94,7 @@ Ensure:
 
 ## Dependencies / ordering (suggested)
 
-1. **ReferenceGrant** + cross-namespace ref resolution (blocks correct behavior on shared clusters).
+1. ~~**ReferenceGrant**~~ — route parent attachment, backend refs, listener Secrets; narrowed controller fan-out (optional envtest/kind later).
 2. **GRPCRoute** + snapshot + compile (large surface; can parallelize with grants).
 3. ~~**BackendTLSPolicy**~~ — implemented (`Service` targets, snapshot + IR + gwxds + status + watches); envtest/kind still optional (§7).
 4. ~~**InferencePool**~~ — watch + loader + compile + xDS + pool status (depends on non-Service `backendRefs`).

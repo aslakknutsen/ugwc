@@ -14,22 +14,22 @@ use ugwc_core::ir::BackendTlsIr;
 use ugwc_core::listener_merge::merge_effective_listeners;
 use ugwc_core::snapshot::{
     AllowedListenersSnap, AllowedRoutesNamespacesSnap, AllowedRoutesSnap, BackendTlsEffectiveSnap,
-    BackendTlsPolicyOutcomeSnap, ClusterSnapshot,
-    EffectiveListenerSnap, EndpointPortSnap, EndpointSliceSnap, EndpointSnap, GatewayAddressSnap,
-    GatewayClassSnap, GatewayInfrastructureSnap, GatewayListenerSnap, GatewayListenerTlsSnap,
-    GrpcHeaderMatchSnap, GrpcMethodMatchSnap, GrpcRouteFilterSnap, GrpcRouteMatchSnap,
-    GrpcRouteRuleSnap, GrpcRouteSnap, TlsRouteRuleSnap, TlsRouteSnap,
+    BackendTlsPolicyOutcomeSnap, ClusterSnapshot, EffectiveListenerSnap, EndpointPickerRefSnap,
+    EndpointPortSnap, EndpointSliceSnap, EndpointSnap, GatewayAddressSnap, GatewayClassSnap,
+    GatewayInfrastructureSnap, GatewayListenerSnap, GatewayListenerTlsSnap, GrpcHeaderMatchSnap,
+    GrpcMethodMatchSnap, GrpcRouteFilterSnap, GrpcRouteMatchSnap, GrpcRouteRuleSnap, GrpcRouteSnap,
     HttpBackendRefSnap, HttpHeaderFilterSnap, HttpHeaderMatchSnap, HttpHeaderNameValueSnap,
     HttpPathMatchSnap, HttpPathModifierSnap, HttpRequestMatchSnap, HttpRequestRedirectFilterSnap,
-    EndpointPickerRefSnap, HttpRouteFilterSnap, HttpRouteRuleSnap, HttpRouteSnap,
-    InferencePoolPortSnap, InferencePoolSelectorSnap, InferencePoolSnap, ListenerNamespacesSnap,
-    ListenerSetSnap, ParentRefSnap, ReferenceGrantFromSnap, ReferenceGrantSnap, ReferenceGrantToSnap,
-    RouteGroupKindSnap, SecretObjectReferenceSnap, ServicePortSnap, ServiceSnap,
+    HttpRouteFilterSnap, HttpRouteRuleSnap, HttpRouteSnap, InferencePoolPortSnap,
+    InferencePoolSelectorSnap, InferencePoolSnap, ListenerNamespacesSnap, ListenerSetSnap,
+    ParentRefSnap, ReferenceGrantFromSnap, ReferenceGrantSnap, ReferenceGrantToSnap,
+    RouteGroupKindSnap, SecretObjectReferenceSnap, ServicePortSnap, ServiceSnap, TlsRouteRuleSnap,
+    TlsRouteSnap,
 };
 
 use crate::resources::{
-    BackendTLSPolicy, Gateway, GatewayClass, GRPCRoute, HTTPRoute, InferencePool, ListenerSet,
-    HTTPBackendRefSpec, ParentReferenceSpec, ReferenceGrant, TLSRoute,
+    BackendTLSPolicy, GRPCRoute, Gateway, GatewayClass, HTTPBackendRefSpec, HTTPRoute,
+    InferencePool, ListenerSet, ParentReferenceSpec, ReferenceGrant, TLSRoute,
 };
 
 #[derive(Debug, Error)]
@@ -64,10 +64,7 @@ fn collect_inference_pool_backend_ref(
     if !crate::resources::is_inference_pool_backend_ref(br) {
         return;
     }
-    let pns = br
-        .namespace
-        .clone()
-        .unwrap_or_else(|| route_ns.to_string());
+    let pns = br.namespace.clone().unwrap_or_else(|| route_ns.to_string());
     ns_for_labels.insert(pns.clone());
     needed_pools.push((pns, br.name.clone()));
 }
@@ -88,9 +85,7 @@ fn inference_pool_to_snap(ip: InferencePool) -> InferencePoolSnap {
             .filter_map(|p| {
                 let n = p.number;
                 if (1..=65535).contains(&n) {
-                    Some(InferencePoolPortSnap {
-                        number: n as u16,
-                    })
+                    Some(InferencePoolPortSnap { number: n as u16 })
                 } else {
                     None
                 }
@@ -104,9 +99,7 @@ fn inference_pool_to_snap(ip: InferencePool) -> InferencePoolSnap {
             port: spec.endpoint_picker_ref.port.and_then(|x| {
                 let n = x.number;
                 if (1..=65535).contains(&n) {
-                    Some(InferencePoolPortSnap {
-                        number: n as u16,
-                    })
+                    Some(InferencePoolPortSnap { number: n as u16 })
                 } else {
                     None
                 }
@@ -277,7 +270,11 @@ async fn resolve_gateway_listener_tls(
             e.tls_resolve_error = Some("UnsupportedValue: HTTPS TLS Passthrough".into());
             continue;
         }
-        let refs = e.tls.as_ref().map(|t| &t.certificate_refs[..]).unwrap_or(&[]);
+        let refs = e
+            .tls
+            .as_ref()
+            .map(|t| &t.certificate_refs[..])
+            .unwrap_or(&[]);
         if refs.is_empty() {
             e.tls_resolve_error =
                 Some("InvalidCertificateRef: HTTPS listener requires certificateRefs".into());
@@ -341,17 +338,20 @@ fn http_header_filter_snap(h: &crate::resources::HTTPHeaderFilterSpec) -> HttpHe
 fn http_route_filter_snap(f: &crate::resources::HTTPRouteFilterSpec) -> HttpRouteFilterSnap {
     HttpRouteFilterSnap {
         filter_type: f.filter_type.clone(),
-        request_redirect: f.request_redirect.as_ref().map(|rr| HttpRequestRedirectFilterSnap {
-            scheme: rr.scheme.clone(),
-            hostname: rr.hostname.clone(),
-            port: rr.port,
-            status_code: rr.status_code,
-            path: rr.path.as_ref().map(|pm| HttpPathModifierSnap {
-                modifier_type: pm.modifier_type.clone(),
-                replace_full_path: pm.replace_full_path.clone(),
-                replace_prefix_match: pm.replace_prefix_match.clone(),
+        request_redirect: f
+            .request_redirect
+            .as_ref()
+            .map(|rr| HttpRequestRedirectFilterSnap {
+                scheme: rr.scheme.clone(),
+                hostname: rr.hostname.clone(),
+                port: rr.port,
+                status_code: rr.status_code,
+                path: rr.path.as_ref().map(|pm| HttpPathModifierSnap {
+                    modifier_type: pm.modifier_type.clone(),
+                    replace_full_path: pm.replace_full_path.clone(),
+                    replace_prefix_match: pm.replace_prefix_match.clone(),
+                }),
             }),
-        }),
         request_header_modifier: f
             .request_header_modifier
             .as_ref()
@@ -433,11 +433,7 @@ fn route_attaches_to_gateway_parent(
     if g != "gateway.networking.k8s.io" || k != "Gateway" {
         return false;
     }
-    let pns = p
-        .namespace
-        .as_deref()
-        .or(route_namespace)
-        .unwrap_or("");
+    let pns = p.namespace.as_deref().or(route_namespace).unwrap_or("");
     pns == gw_ns && p.name == gw_name
 }
 
@@ -825,7 +821,13 @@ async fn load_backend_tls_for_gateway(
     client: &Client,
     needed_services: &[(String, String)],
     services: &[ServiceSnap],
-) -> Result<(BTreeMap<String, BackendTlsEffectiveSnap>, Vec<BackendTlsPolicyOutcomeSnap>), LoaderError> {
+) -> Result<
+    (
+        BTreeMap<String, BackendTlsEffectiveSnap>,
+        Vec<BackendTlsPolicyOutcomeSnap>,
+    ),
+    LoaderError,
+> {
     let mut effective: BTreeMap<String, BackendTlsEffectiveSnap> = BTreeMap::new();
 
     let needed_set: HashSet<(String, String)> = needed_services.iter().cloned().collect();
@@ -909,8 +911,7 @@ async fn load_backend_tls_for_gateway(
                     if svc_name != &svc.name || lp.policy_ns != svc.namespace {
                         continue;
                     }
-                    let applies =
-                        backend_tls_section_applies(section.as_deref(), sp.name.as_str());
+                    let applies = backend_tls_section_applies(section.as_deref(), sp.name.as_str());
                     if applies {
                         candidates.push(Candidate {
                             created_rfc3339: lp.created_rfc3339.clone(),
@@ -933,9 +934,9 @@ async fn load_backend_tls_for_gateway(
             let mut candidates = uniq;
 
             candidates.sort_by(|a, b| {
-                a.created_rfc3339
-                    .cmp(&b.created_rfc3339)
-                    .then_with(|| (&a.policy_ns, &a.policy_name).cmp(&(&b.policy_ns, &b.policy_name)))
+                a.created_rfc3339.cmp(&b.created_rfc3339).then_with(|| {
+                    (&a.policy_ns, &a.policy_name).cmp(&(&b.policy_ns, &b.policy_name))
+                })
             });
 
             if candidates.is_empty() {
@@ -949,12 +950,7 @@ async fn load_backend_tls_for_gateway(
                 }
             }
 
-            effective.insert(
-                backend_k,
-                BackendTlsEffectiveSnap {
-                    tls: winner.tls_ir,
-                },
-            );
+            effective.insert(backend_k, BackendTlsEffectiveSnap { tls: winner.tls_ir });
         }
     }
 
@@ -1055,7 +1051,12 @@ pub async fn load_cluster_snapshot(
         for rule in &item.spec.rules {
             for br in &rule.backend_refs {
                 if crate::resources::is_inference_pool_backend_ref(br) {
-                    collect_inference_pool_backend_ref(br, &rns, &mut needed_pools, &mut ns_for_labels);
+                    collect_inference_pool_backend_ref(
+                        br,
+                        &rns,
+                        &mut needed_pools,
+                        &mut ns_for_labels,
+                    );
                     continue;
                 }
                 if br.kind.as_deref().unwrap_or("Service") != "Service" {
@@ -1077,8 +1078,12 @@ pub async fn load_cluster_snapshot(
     match grpc_api.list(&ListParams::default()).await {
         Ok(grpc_list) => {
             for item in grpc_list.items {
-                if !grpc_route_relevant_to_gateway(&item, gateway_ns, gateway_name, &attached_ls_keys)
-                {
+                if !grpc_route_relevant_to_gateway(
+                    &item,
+                    gateway_ns,
+                    gateway_name,
+                    &attached_ls_keys,
+                ) {
                     continue;
                 }
                 let rns = item.metadata.namespace.clone().unwrap_or_default();
@@ -1123,8 +1128,12 @@ pub async fn load_cluster_snapshot(
     match tls_api.list(&ListParams::default()).await {
         Ok(tls_list) => {
             for item in tls_list.items {
-                if !tls_route_relevant_to_gateway(&item, gateway_ns, gateway_name, &attached_ls_keys)
-                {
+                if !tls_route_relevant_to_gateway(
+                    &item,
+                    gateway_ns,
+                    gateway_name,
+                    &attached_ls_keys,
+                ) {
                     continue;
                 }
                 let rns = item.metadata.namespace.clone().unwrap_or_default();
@@ -1288,7 +1297,11 @@ pub async fn load_cluster_snapshot(
     let rg_api: Api<ReferenceGrant> = Api::all(client.clone());
     match rg_api.list(&ListParams::default()).await {
         Ok(list) => {
-            reference_grants = list.items.into_iter().map(reference_grant_to_snap).collect();
+            reference_grants = list
+                .items
+                .into_iter()
+                .map(reference_grant_to_snap)
+                .collect();
         }
         Err(e) => {
             warn!(
@@ -1337,9 +1350,11 @@ pub async fn load_cluster_snapshot(
                 value: a.value.clone(),
             })
             .collect(),
-        gateway_infrastructure: gw.spec.infrastructure.as_ref().map(|inf| GatewayInfrastructureSnap {
-            labels: inf.labels.clone(),
-            annotations: inf.annotations.clone(),
+        gateway_infrastructure: gw.spec.infrastructure.as_ref().map(|inf| {
+            GatewayInfrastructureSnap {
+                labels: inf.labels.clone(),
+                annotations: inf.annotations.clone(),
+            }
         }),
         listeners,
         effective_listeners,

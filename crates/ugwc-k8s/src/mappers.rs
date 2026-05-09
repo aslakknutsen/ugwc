@@ -5,7 +5,7 @@ use std::sync::Arc;
 use k8s_openapi::api::core::v1::Service;
 use k8s_openapi::api::discovery::v1::EndpointSlice;
 
-use crate::resources::{Gateway as GwcGateway, GatewayClass, GRPCRoute, HTTPRoute, TLSRoute};
+use crate::resources::{GRPCRoute, Gateway as GwcGateway, GatewayClass, HTTPRoute, TLSRoute};
 
 /// Namespace/name pair used as a controller queue key.
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]

@@ -9,9 +9,9 @@ pub mod istio {
 }
 
 use istio::gwxds::{
-    Backend, BackendRef, BackendTls, FailureMode, HeaderNameValue, InferencePool as InferencePoolPb,
-    Listener, Protocol, RequestHeaderModifier, RequestRedirect, Resource, Route, RouteMatch,
-    TlsConfig,
+    Backend, BackendRef, BackendTls, FailureMode, HeaderNameValue,
+    InferencePool as InferencePoolPb, Listener, Protocol, RequestHeaderModifier, RequestRedirect,
+    Resource, Route, RouteMatch, TlsConfig,
 };
 use ugwc_core::ir::{RouteFamily, TlsMode};
 use ugwc_core::IrSnapshot;
@@ -83,7 +83,10 @@ fn backend_tls_proto(t: &ugwc_core::ir::BackendTlsIr) -> BackendTls {
     }
 }
 
-fn route_matches_proto(family: RouteFamily, matches: &[ugwc_core::ir::RouteMatchIr]) -> Vec<RouteMatch> {
+fn route_matches_proto(
+    family: RouteFamily,
+    matches: &[ugwc_core::ir::RouteMatchIr],
+) -> Vec<RouteMatch> {
     let src: Vec<ugwc_core::ir::RouteMatchIr> = if matches.is_empty() {
         match family {
             RouteFamily::Grpc => vec![ugwc_core::ir::RouteMatchIr {
@@ -240,12 +243,10 @@ pub fn encode_ir(ir: &IrSnapshot) -> Vec<Resource> {
                         wb.backend.port_number.unwrap_or(80)
                     );
                     let eps = ir.backends.get(&key).cloned().unwrap_or_default();
-                    let host = qualify_host(&wb.backend.service_namespace, &wb.backend.service_name);
+                    let host =
+                        qualify_host(&wb.backend.service_namespace, &wb.backend.service_name);
                     let port = wb.backend.port_number.unwrap_or(80) as u32;
-                    let dial_port = eps
-                        .first()
-                        .map(|e| u32::from(e.port))
-                        .unwrap_or(port);
+                    let dial_port = eps.first().map(|e| u32::from(e.port)).unwrap_or(port);
                     let tls = wb.backend.backend_tls.as_ref().map(backend_tls_proto);
                     backends_pb.push(Backend {
                         host,
@@ -315,8 +316,8 @@ pub fn encode_ir(ir: &IrSnapshot) -> Vec<Resource> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ugwc_core::ir::TlsMode;
     use ugwc_core::http_ir::HttpCompileFixture;
+    use ugwc_core::ir::TlsMode;
 
     #[test]
     fn encode_minimal_fixture_non_empty() {
@@ -522,9 +523,9 @@ mod tests {
         use std::collections::BTreeMap;
 
         use ugwc_core::ir::{
-            BackendEndpointIr, BackendIr, BackendTlsIr, IrRevision, IrScopeId, ListenerAttachmentIr,
-            ListenerIr, RouteFamily, RouteMatchIr, RouteRuleIr, SnapshotMeta, TlsMode,
-            WeightedBackendIr, IR_VERSION,
+            BackendEndpointIr, BackendIr, BackendTlsIr, IrRevision, IrScopeId,
+            ListenerAttachmentIr, ListenerIr, RouteFamily, RouteMatchIr, RouteRuleIr, SnapshotMeta,
+            TlsMode, WeightedBackendIr, IR_VERSION,
         };
         use ugwc_core::IrSnapshot;
 

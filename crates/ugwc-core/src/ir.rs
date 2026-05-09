@@ -76,7 +76,9 @@ pub struct ListenerIr {
 }
 
 /// Route binding to a specific effective listener (parent + `sectionName` + port).
-#[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Hash, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Hash, serde::Serialize, serde::Deserialize,
+)]
 pub struct ListenerAttachmentIr {
     pub parent_kind: String,
     pub parent_namespace: String,

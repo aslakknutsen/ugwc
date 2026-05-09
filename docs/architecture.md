@@ -16,6 +16,8 @@ Rust workspace (`Cargo.toml` `[workspace]`) with these members:
 
 Target **Gateway API** bundle: **v1.5.x standard channel** (see [Gateway API releases](https://github.com/kubernetes-sigs/gateway-api/releases)). Install e.g. `standard-install.yaml` for the pinned minor; extended-channel installs must also include **`BackendTLSPolicy` `gateway.networking.k8s.io/v1`** if you use upstream TLS to Services. **Inference Extension:** install [`inference.networking.k8s.io`](https://gateway-api-inference-extension.sigs.k8s.io/guides/) CRDs when using `InferencePool` backends. ugwc focuses on `Gateway` / `HTTPRoute` / `GRPCRoute` / `TLSRoute` / `ListenerSet` / `ReferenceGrant`, with HTTPS listeners terminating TLS using `listener.tls.certificateRefs` → `Secret` (`tls.crt` / `tls.key`), optional `Gateway.spec.addresses` validation, and `Gateway.spec.infrastructure.labels` merged into per-gateway Praxis workload labels.
 
+**ReferenceGrant:** Cross-namespace references require grants in the **referenced resource namespace** — attachment of routes from namespace A to a `Gateway` or attached `ListenerSet` in namespace B, `Service` / `InferencePool` backends, and cross-namespace TLS `Secret` refs on listeners are enforced during snapshot load / compile. The `ReferenceGrant` watcher enqueues gateways in the grant’s namespace plus gateways referenced by routes living in each `spec.from[].namespace` (cluster-wide route listing remains the fallback when `from` is empty).
+
 **Backend TLS:** `BackendTLSPolicy` objects (same namespace as target `Service`) are listed for namespaces of backend Services needed by attached routes. Validation material (`ca.crt` on referenced `ConfigMap`s, or `wellKnownCACertificates: System`) is resolved at snapshot load time and attached per backend (`namespace/name:port`) on the compiled IR; `ugwc-gwxds` maps this to `Backend.tls`. Conflicting policies or bad CA refs surface on policy **ancestor** status toward each reconciled `Gateway` and as **`ResolvedRefs`** errors on affected routes when compilation fails closed.
 
 ## Diagrams
@@ -126,7 +128,7 @@ flowchart LR
     subgraph watchers["Parallel watcher tasks"]
         W1["Gateway watcher\n→ (ns, name)"]
         W2["HTTPRoute / GRPCRoute /\nTLSRoute → parent Gateway keys"]
-        W3["ListenerSet / ReferenceGrant /\nBackendTLSPolicy / ConfigMap /\nInferencePool\n→ affected gateways"]
+        W3["ListenerSet / ReferenceGrant /\nBackendTLSPolicy / ConfigMap /\nInferencePool\n→ affected gateways\n(ReferenceGrant: grant ns\n+ route namespaces\nfrom spec.from)"]
         W4["EndpointSlice watcher\n→ debounce → list all Gateways\n→ enqueue each"]
         W5["GatewayClass watcher\n→ owned class → list Gateways\nof that class → enqueue"]
     end

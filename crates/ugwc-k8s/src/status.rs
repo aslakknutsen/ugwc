@@ -10,7 +10,7 @@ use tracing::warn;
 
 use crate::loader::parent_reference_to_snap;
 use crate::resources::{
-    BackendTLSPolicy, Gateway, GatewayClass, GRPCRoute, HTTPRoute, InferencePool, ListenerSet,
+    BackendTLSPolicy, GRPCRoute, Gateway, GatewayClass, HTTPRoute, InferencePool, ListenerSet,
     TLSRoute,
 };
 use ugwc_core::compile::CompileReport;
@@ -33,9 +33,15 @@ fn supported_kinds_json(
     };
     let proto = e.protocol.trim().to_ascii_uppercase();
     if proto == "TLS" {
-        let kinds = e.allowed_routes.as_ref().map(|a| &a.kinds[..]).unwrap_or(&[]);
+        let kinds = e
+            .allowed_routes
+            .as_ref()
+            .map(|a| &a.kinds[..])
+            .unwrap_or(&[]);
         if kinds.is_empty() {
-            return vec![serde_json::json!({"group": "gateway.networking.k8s.io", "kind": "TLSRoute"})];
+            return vec![
+                serde_json::json!({"group": "gateway.networking.k8s.io", "kind": "TLSRoute"}),
+            ];
         }
         return kinds
             .iter()
@@ -48,7 +54,11 @@ fn supported_kinds_json(
     if !http_like {
         return vec![];
     }
-    let kinds = e.allowed_routes.as_ref().map(|a| &a.kinds[..]).unwrap_or(&[]);
+    let kinds = e
+        .allowed_routes
+        .as_ref()
+        .map(|a| &a.kinds[..])
+        .unwrap_or(&[]);
     if kinds.is_empty() {
         return default_http_grpc();
     }
@@ -78,9 +88,7 @@ fn gateway_listener_https_cert_unresolved(
     if eff.protocol.trim().to_ascii_uppercase() != "HTTPS" {
         return false;
     }
-    eff.tls_resolve_error.is_some()
-        || eff.tls_cert_pem.is_empty()
-        || eff.tls_key_pem.is_empty()
+    eff.tls_resolve_error.is_some() || eff.tls_cert_pem.is_empty() || eff.tls_key_pem.is_empty()
 }
 
 /// Apply Gateway + listener status after a compile/reconcile pass.
@@ -148,9 +156,11 @@ pub async fn apply_gateway_reconciled_status(
         })
         .unwrap_or(false);
 
-    let gateway_spec_errors = outcome.report.errors.iter().any(|e| {
-        e.kind == "Gateway" && e.namespace == gw_ns && e.name == name
-    });
+    let gateway_spec_errors = outcome
+        .report
+        .errors
+        .iter()
+        .any(|e| e.kind == "Gateway" && e.namespace == gw_ns && e.name == name);
 
     let (gw_acc_status, gw_acc_reason, gw_acc_msg) = if inline_listener_conflicted {
         (
@@ -1119,11 +1129,18 @@ pub async fn apply_backend_tls_policies_for_gateway(
             .filter(|_| !outcome.accepted)
             .unwrap_or_else(|| "ugwc backend TLS policy".into());
 
-        let rr_st = if outcome.resolved_refs_ok { "True" } else { "False" };
+        let rr_st = if outcome.resolved_refs_ok {
+            "True"
+        } else {
+            "False"
+        };
         let rr_reason = if outcome.resolved_refs_ok {
             "ResolvedRefs"
         } else {
-            outcome.message.as_deref().unwrap_or("InvalidCACertificateRef")
+            outcome
+                .message
+                .as_deref()
+                .unwrap_or("InvalidCACertificateRef")
         };
         let rr_msg: String = if outcome.resolved_refs_ok {
             "backend TLS refs resolved".into()
@@ -1194,10 +1211,7 @@ fn http_route_snap_refs_inference_pool(
             if !br.is_inference_pool() {
                 continue;
             }
-            let pns = br
-                .namespace
-                .as_deref()
-                .unwrap_or(r.namespace.as_str());
+            let pns = br.namespace.as_deref().unwrap_or(r.namespace.as_str());
             if pns == pool_ns && br.name == pool_name {
                 return true;
             }
@@ -1216,10 +1230,7 @@ fn grpc_route_snap_refs_inference_pool(
             if !br.is_inference_pool() {
                 continue;
             }
-            let pns = br
-                .namespace
-                .as_deref()
-                .unwrap_or(r.namespace.as_str());
+            let pns = br.namespace.as_deref().unwrap_or(r.namespace.as_str());
             if pns == pool_ns && br.name == pool_name {
                 return true;
             }
@@ -1238,10 +1249,7 @@ fn tls_route_snap_refs_inference_pool(
             if !br.is_inference_pool() {
                 continue;
             }
-            let pns = br
-                .namespace
-                .as_deref()
-                .unwrap_or(r.namespace.as_str());
+            let pns = br.namespace.as_deref().unwrap_or(r.namespace.as_str());
             if pns == pool_ns && br.name == pool_name {
                 return true;
             }
@@ -1260,8 +1268,7 @@ fn route_report_breaks_inference_pool_backend_ref(
         e.kind == route_kind
             && e.namespace == route_ns
             && e.name == route_name
-            && (e.reason == "RefNotPermitted"
-                || e.reason.starts_with("InvalidExtensionRef"))
+            && (e.reason == "RefNotPermitted" || e.reason.starts_with("InvalidExtensionRef"))
     })
 }
 
@@ -1317,12 +1324,8 @@ fn inference_pool_resolved_refs_ok(
         if !tls_route_snap_refs_inference_pool(r, pool_ns, pool_name) {
             continue;
         }
-        if route_report_breaks_inference_pool_backend_ref(
-            report,
-            "TLSRoute",
-            &r.namespace,
-            &r.name,
-        ) {
+        if route_report_breaks_inference_pool_backend_ref(report, "TLSRoute", &r.namespace, &r.name)
+        {
             return false;
         }
     }
@@ -1453,9 +1456,8 @@ pub async fn apply_inference_pools_for_gateway(
         let status = serde_json::json!({ "status": { "parents": parents } });
 
         if let Some(cache) = &status_cache {
-            let key = format!(
-                "inferencepool-merge:{pool_ns}/{pool_name}/{gateway_ns}/{gateway_name}"
-            );
+            let key =
+                format!("inferencepool-merge:{pool_ns}/{pool_name}/{gateway_ns}/{gateway_name}");
             let serialized = serde_json::to_string(&status).unwrap_or_default();
             let mut c = cache.lock().unwrap();
             if c.get(&key) == Some(&serialized) {

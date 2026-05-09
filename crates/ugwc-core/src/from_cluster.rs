@@ -160,7 +160,7 @@ fn resolve_inference_pool_backend(
     let svc_name = ep.name.as_str();
     if svc_name.is_empty() {
         report.errors.push(err(
-            "InvalidExtensionRef: EndpointPickerRef.name required".into(),
+            "InvalidExtensionRef: EndpointPickerRef.name required".into()
         ));
         return None;
     }
@@ -336,7 +336,9 @@ fn validate_and_convert_matches(
             if mt != "Exact" {
                 report.errors.push(httproute_obj_err(
                     route,
-                    format!("UnsupportedValue: header match type {mt} (rule {rule_idx} match {mi})"),
+                    format!(
+                        "UnsupportedValue: header match type {mt} (rule {rule_idx} match {mi})"
+                    ),
                 ));
                 return None;
             }
@@ -1037,7 +1039,10 @@ fn allowed_route_group_kinds_for_effective(e: &EffectiveListenerSnap) -> Vec<Str
         .collect()
 }
 
-fn hosts_for_grpc_route_on_listener(route: &GrpcRouteSnap, eff: &EffectiveListenerSnap) -> Vec<String> {
+fn hosts_for_grpc_route_on_listener(
+    route: &GrpcRouteSnap,
+    eff: &EffectiveListenerSnap,
+) -> Vec<String> {
     let Some(intersected) = intersect_route_listener_hosts(&route.hostnames, &eff.hostname) else {
         return Vec::new();
     };
@@ -1048,7 +1053,10 @@ fn hosts_for_grpc_route_on_listener(route: &GrpcRouteSnap, eff: &EffectiveListen
     }
 }
 
-fn hosts_for_tls_route_on_listener(route: &TlsRouteSnap, eff: &EffectiveListenerSnap) -> Vec<String> {
+fn hosts_for_tls_route_on_listener(
+    route: &TlsRouteSnap,
+    eff: &EffectiveListenerSnap,
+) -> Vec<String> {
     let Some(intersected) = intersect_route_listener_hosts(&route.hostnames, &eff.hostname) else {
         return Vec::new();
     };
@@ -1167,12 +1175,18 @@ fn compute_http_grpc_conflict_losers(
     }
 
     losers.sort_by(|a, b| {
-        (&a.route_kind, &a.route_namespace, &a.route_name, &a.listener).cmp(&(
-            &b.route_kind,
-            &b.route_namespace,
-            &b.route_name,
-            &b.listener,
-        ))
+        (
+            &a.route_kind,
+            &a.route_namespace,
+            &a.route_name,
+            &a.listener,
+        )
+            .cmp(&(
+                &b.route_kind,
+                &b.route_namespace,
+                &b.route_name,
+                &b.listener,
+            ))
     });
     losers.dedup_by(|a, b| {
         a.route_kind == b.route_kind
@@ -1283,12 +1297,18 @@ fn compute_tls_route_conflict_losers(
     }
 
     losers.sort_by(|a, b| {
-        (&a.route_kind, &a.route_namespace, &a.route_name, &a.listener).cmp(&(
-            &b.route_kind,
-            &b.route_namespace,
-            &b.route_name,
-            &b.listener,
-        ))
+        (
+            &a.route_kind,
+            &a.route_namespace,
+            &a.route_name,
+            &a.listener,
+        )
+            .cmp(&(
+                &b.route_kind,
+                &b.route_namespace,
+                &b.route_name,
+                &b.listener,
+            ))
     });
     losers.dedup_by(|a, b| {
         a.route_kind == b.route_kind
@@ -1336,14 +1356,13 @@ pub fn ir_from_cluster(snapshot: &ClusterSnapshot) -> (IrSnapshot, CompileReport
         .map(|ls| (ls.namespace.clone(), ls.name.clone()))
         .collect();
 
-    report.http_grpc_conflict_losers =
-        compute_http_grpc_conflict_losers(snapshot, &attached_ls);
-    report.tls_route_conflict_losers =
-        compute_tls_route_conflict_losers(snapshot, &attached_ls);
+    report.http_grpc_conflict_losers = compute_http_grpc_conflict_losers(snapshot, &attached_ls);
+    report.tls_route_conflict_losers = compute_tls_route_conflict_losers(snapshot, &attached_ls);
 
     let mut listeners = Vec::new();
     for e in &snapshot.effective_listeners {
-        let (tls_mode, tls_cert_pem, tls_key_pem) = listener_tls_ir_fields(e, snapshot, &mut report);
+        let (tls_mode, tls_cert_pem, tls_key_pem) =
+            listener_tls_ir_fields(e, snapshot, &mut report);
         let (pk, pns, pn) = match &e.parent {
             ListenerParentSnap::InlineGateway => (
                 "Gateway".to_string(),
@@ -1388,7 +1407,8 @@ pub fn ir_from_cluster(snapshot: &ClusterSnapshot) -> (IrSnapshot, CompileReport
             let (redirect_ir, hdr_mod_ir) =
                 extract_rule_filters(route, rule, rule_idx, &mut report);
 
-            let backends_ir = resolve_weighted_backends(route, rule, rule_idx, snapshot, &mut report);
+            let backends_ir =
+                resolve_weighted_backends(route, rule, rule_idx, snapshot, &mut report);
 
             if redirect_ir.is_some() && !rule.backend_refs.is_empty() {
                 report.errors.push(httproute_obj_err(
@@ -1413,10 +1433,7 @@ pub fn ir_from_cluster(snapshot: &ClusterSnapshot) -> (IrSnapshot, CompileReport
                 continue;
             }
 
-            let meta_ts = route
-                .creation_timestamp_rfc3339
-                .clone()
-                .unwrap_or_default();
+            let meta_ts = route.creation_timestamp_rfc3339.clone().unwrap_or_default();
 
             for lk in &attach_keys {
                 let Some(eff) = find_effective_for_key(snapshot, lk) else {
@@ -1425,8 +1442,12 @@ pub fn ir_from_cluster(snapshot: &ClusterSnapshot) -> (IrSnapshot, CompileReport
                 if eff.conflicted {
                     continue;
                 }
-                if report.http_grpc_conflict_loser_at("HTTPRoute", &route.namespace, &route.name, lk)
-                {
+                if report.http_grpc_conflict_loser_at(
+                    "HTTPRoute",
+                    &route.namespace,
+                    &route.name,
+                    lk,
+                ) {
                     continue;
                 }
                 let hosts = hosts_for_route_on_listener(route, eff);
@@ -1496,10 +1517,7 @@ pub fn ir_from_cluster(snapshot: &ClusterSnapshot) -> (IrSnapshot, CompileReport
                 continue;
             }
 
-            let meta_ts = route
-                .creation_timestamp_rfc3339
-                .clone()
-                .unwrap_or_default();
+            let meta_ts = route.creation_timestamp_rfc3339.clone().unwrap_or_default();
 
             for lk in &attach_keys {
                 let Some(eff) = find_effective_for_key(snapshot, lk) else {
@@ -1508,8 +1526,12 @@ pub fn ir_from_cluster(snapshot: &ClusterSnapshot) -> (IrSnapshot, CompileReport
                 if eff.conflicted {
                     continue;
                 }
-                if report.http_grpc_conflict_loser_at("GRPCRoute", &route.namespace, &route.name, lk)
-                {
+                if report.http_grpc_conflict_loser_at(
+                    "GRPCRoute",
+                    &route.namespace,
+                    &route.name,
+                    lk,
+                ) {
                     continue;
                 }
                 let hosts = hosts_for_grpc_route_on_listener(route, eff);
@@ -1568,10 +1590,7 @@ pub fn ir_from_cluster(snapshot: &ClusterSnapshot) -> (IrSnapshot, CompileReport
             continue;
         }
 
-        let meta_ts = route
-            .creation_timestamp_rfc3339
-            .clone()
-            .unwrap_or_default();
+        let meta_ts = route.creation_timestamp_rfc3339.clone().unwrap_or_default();
 
         for lk in &attach_keys {
             let Some(eff) = find_effective_for_key(snapshot, lk) else {
@@ -1697,13 +1716,16 @@ pub fn ir_from_cluster(snapshot: &ClusterSnapshot) -> (IrSnapshot, CompileReport
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::listener_merge::merge_effective_listeners;
+    use std::collections::BTreeMap;
+
     use crate::ir::{BackendTlsIr, RouteFamily};
+    use crate::listener_merge::merge_effective_listeners;
     use crate::snapshot::{
-        BackendTlsEffectiveSnap, EndpointPortSnap, EndpointSliceSnap, EndpointSnap,
-        GatewayListenerSnap, GatewayListenerTlsSnap, GrpcRouteRuleSnap, GrpcRouteSnap,
-        HttpBackendRefSnap, HttpPathMatchSnap, HttpRouteRuleSnap, ListenerSetSnap, ParentRefSnap,
-        ServicePortSnap, ServiceSnap, TlsRouteRuleSnap, TlsRouteSnap,
+        AllowedRoutesNamespacesSnap, AllowedRoutesSnap, BackendTlsEffectiveSnap, EndpointPortSnap,
+        EndpointSliceSnap, EndpointSnap, GatewayListenerSnap, GatewayListenerTlsSnap,
+        GrpcRouteRuleSnap, GrpcRouteSnap, HttpBackendRefSnap, HttpPathMatchSnap, HttpRouteRuleSnap,
+        ListenerSetSnap, ParentRefSnap, ReferenceGrantFromSnap, ReferenceGrantSnap,
+        ReferenceGrantToSnap, ServicePortSnap, ServiceSnap, TlsRouteRuleSnap, TlsRouteSnap,
     };
 
     fn minimal_cluster() -> ClusterSnapshot {
@@ -1871,7 +1893,10 @@ mod tests {
         );
         let (_ir, rep) = ir_from_cluster(&snap);
         assert!(rep.has_errors());
-        assert!(rep.errors.iter().any(|e| e.reason == "InvalidCACertificateRef"));
+        assert!(rep
+            .errors
+            .iter()
+            .any(|e| e.reason == "InvalidCACertificateRef"));
     }
 
     #[test]
@@ -2130,15 +2155,17 @@ mod tests {
     #[test]
     fn weighted_backends_in_rule() {
         let mut c = minimal_cluster();
-        c.http_routes[0].rules[0].backend_refs.push(HttpBackendRefSnap {
-            group: None,
-            kind: Some("Service".into()),
-            namespace: None,
-            name: "svc".into(),
-            port: Some(80),
-            port_name: None,
-            weight: Some(3),
-        });
+        c.http_routes[0].rules[0]
+            .backend_refs
+            .push(HttpBackendRefSnap {
+                group: None,
+                kind: Some("Service".into()),
+                namespace: None,
+                name: "svc".into(),
+                port: Some(80),
+                port_name: None,
+                weight: Some(3),
+            });
         let (ir, rep) = ir_from_cluster(&c);
         assert!(!rep.has_errors(), "{:?}", rep.errors);
         let r0 = ir.routes.iter().find(|r| !r.backends.is_empty()).unwrap();
@@ -2176,43 +2203,96 @@ mod tests {
         assert!(rep.has_errors());
         assert!(ir.routes.is_empty() || rep.errors.iter().any(|e| e.reason == "RefNotPermitted"));
 
-        c.reference_grants.push(crate::snapshot::ReferenceGrantSnap {
-            namespace: "other".into(),
-            name: "g".into(),
-            from: vec![crate::snapshot::ReferenceGrantFromSnap {
-                group: Some("gateway.networking.k8s.io".into()),
-                kind: "HTTPRoute".into(),
-                namespace: "default".into(),
-            }],
-            to: vec![crate::snapshot::ReferenceGrantToSnap {
-                group: Some("".into()),
-                kind: "Service".into(),
-                name: None,
-            }],
-        });
+        c.reference_grants
+            .push(crate::snapshot::ReferenceGrantSnap {
+                namespace: "other".into(),
+                name: "g".into(),
+                from: vec![crate::snapshot::ReferenceGrantFromSnap {
+                    group: Some("gateway.networking.k8s.io".into()),
+                    kind: "HTTPRoute".into(),
+                    namespace: "default".into(),
+                }],
+                to: vec![crate::snapshot::ReferenceGrantToSnap {
+                    group: Some("".into()),
+                    kind: "Service".into(),
+                    name: None,
+                }],
+            });
         let (ir2, rep2) = ir_from_cluster(&c);
         assert!(!rep2.has_errors(), "{:?}", rep2.errors);
         assert!(!ir2.routes.is_empty());
     }
 
     #[test]
+    fn cross_namespace_route_parent_requires_reference_grant() {
+        let mut c = minimal_cluster();
+        c.gateway_namespace = "infra".into();
+        c.gateway_name = "gw".into();
+        c.listeners[0].allowed_routes = Some(AllowedRoutesSnap {
+            namespaces: Some(AllowedRoutesNamespacesSnap {
+                from: Some("All".into()),
+                selector_match_labels: BTreeMap::new(),
+            }),
+            kinds: vec![],
+        });
+        c.effective_listeners = merge_effective_listeners(&c.listeners, &[]);
+        c.http_routes[0].namespace = "team-a".into();
+        c.http_routes[0].parent_refs[0].namespace = Some("infra".into());
+        c.http_routes[0].parent_refs[0].name = "gw".into();
+        c.services[0].namespace = "team-a".into();
+        c.endpoint_slices[0].namespace = "team-a".into();
+
+        let (ir, _rep) = ir_from_cluster(&c);
+        assert!(
+            ir.routes.is_empty(),
+            "cross-namespace parent without ReferenceGrant must not attach"
+        );
+
+        c.reference_grants.push(ReferenceGrantSnap {
+            namespace: "infra".into(),
+            name: "rg".into(),
+            from: vec![ReferenceGrantFromSnap {
+                group: Some("gateway.networking.k8s.io".into()),
+                kind: "HTTPRoute".into(),
+                namespace: "team-a".into(),
+            }],
+            to: vec![ReferenceGrantToSnap {
+                group: Some("gateway.networking.k8s.io".into()),
+                kind: "Gateway".into(),
+                name: Some("gw".into()),
+            }],
+        });
+        let (ir2, rep2) = ir_from_cluster(&c);
+        assert!(
+            !ir2.routes.is_empty(),
+            "expected routes with grant: {:?}",
+            rep2.errors
+        );
+    }
+
+    #[test]
     fn redirect_rule_emits_no_backend_cluster() {
         let mut c = minimal_cluster();
         c.http_routes[0].rules[0].backend_refs.clear();
-        c.http_routes[0].rules[0].filters.push(crate::snapshot::HttpRouteFilterSnap {
-            filter_type: "RequestRedirect".into(),
-            request_redirect: Some(crate::snapshot::HttpRequestRedirectFilterSnap {
-                scheme: Some("https".into()),
-                hostname: Some("other.example".into()),
-                path: None,
-                port: None,
-                status_code: Some(302),
-            }),
-            request_header_modifier: None,
-        });
+        c.http_routes[0].rules[0]
+            .filters
+            .push(crate::snapshot::HttpRouteFilterSnap {
+                filter_type: "RequestRedirect".into(),
+                request_redirect: Some(crate::snapshot::HttpRequestRedirectFilterSnap {
+                    scheme: Some("https".into()),
+                    hostname: Some("other.example".into()),
+                    path: None,
+                    port: None,
+                    status_code: Some(302),
+                }),
+                request_header_modifier: None,
+            });
         let (ir, rep) = ir_from_cluster(&c);
         assert!(!rep.has_errors(), "{:?}", rep.errors);
-        assert!(ir.routes.iter().any(|r| r.request_redirect.is_some() && r.backends.is_empty()));
+        assert!(ir
+            .routes
+            .iter()
+            .any(|r| r.request_redirect.is_some() && r.backends.is_empty()));
     }
 
     #[test]
@@ -2248,8 +2328,14 @@ mod tests {
         });
         let (ir, rep) = ir_from_cluster(&c);
         assert!(!rep.has_errors(), "{:?}", rep.errors);
-        assert!(ir.routes.iter().any(|r| r.route_family == RouteFamily::Grpc));
-        assert!(ir.routes.iter().any(|r| r.route_family == RouteFamily::Http));
+        assert!(ir
+            .routes
+            .iter()
+            .any(|r| r.route_family == RouteFamily::Grpc));
+        assert!(ir
+            .routes
+            .iter()
+            .any(|r| r.route_family == RouteFamily::Http));
     }
 
     #[test]
@@ -2286,10 +2372,14 @@ mod tests {
         });
         let (ir, rep) = ir_from_cluster(&c);
         assert!(!rep.has_errors(), "{:?}", rep.errors);
-        assert!(ir.routes.iter().all(|r| r.route_family != RouteFamily::Grpc));
-        assert!(rep.http_grpc_conflict_losers.iter().any(|l| {
-            l.route_kind == "GRPCRoute" && l.route_name == "gr1"
-        }));
+        assert!(ir
+            .routes
+            .iter()
+            .all(|r| r.route_family != RouteFamily::Grpc));
+        assert!(rep
+            .http_grpc_conflict_losers
+            .iter()
+            .any(|l| { l.route_kind == "GRPCRoute" && l.route_name == "gr1" }));
     }
 
     fn tls_passthrough_cluster_one_route(tr: TlsRouteSnap) -> ClusterSnapshot {
@@ -2466,23 +2556,27 @@ mod tests {
                 || rep.errors.iter().any(|e| e.reason == "RefNotPermitted")
         );
 
-        snap.reference_grants.push(crate::snapshot::ReferenceGrantSnap {
-            namespace: "other".into(),
-            name: "g".into(),
-            from: vec![crate::snapshot::ReferenceGrantFromSnap {
-                group: Some("gateway.networking.k8s.io".into()),
-                kind: "TLSRoute".into(),
-                namespace: "default".into(),
-            }],
-            to: vec![crate::snapshot::ReferenceGrantToSnap {
-                group: Some("".into()),
-                kind: "Service".into(),
-                name: None,
-            }],
-        });
+        snap.reference_grants
+            .push(crate::snapshot::ReferenceGrantSnap {
+                namespace: "other".into(),
+                name: "g".into(),
+                from: vec![crate::snapshot::ReferenceGrantFromSnap {
+                    group: Some("gateway.networking.k8s.io".into()),
+                    kind: "TLSRoute".into(),
+                    namespace: "default".into(),
+                }],
+                to: vec![crate::snapshot::ReferenceGrantToSnap {
+                    group: Some("".into()),
+                    kind: "Service".into(),
+                    name: None,
+                }],
+            });
         let (ir2, rep2) = ir_from_cluster(&snap);
         assert!(!rep2.has_errors(), "{:?}", rep2.errors);
-        assert!(ir2.routes.iter().any(|r| r.route_family == RouteFamily::Tls));
+        assert!(ir2
+            .routes
+            .iter()
+            .any(|r| r.route_family == RouteFamily::Tls));
     }
 
     #[test]
@@ -2533,11 +2627,13 @@ mod tests {
                 .count(),
             1
         );
-        assert!(ir.routes.iter().any(|r| {
-            r.route_family == RouteFamily::Tls && r.name.contains("tr-old")
-        }));
-        assert!(rep.tls_route_conflict_losers.iter().any(|l| {
-            l.route_kind == "TLSRoute" && l.route_name == "tr-new"
-        }));
+        assert!(ir
+            .routes
+            .iter()
+            .any(|r| { r.route_family == RouteFamily::Tls && r.name.contains("tr-old") }));
+        assert!(rep
+            .tls_route_conflict_losers
+            .iter()
+            .any(|l| { l.route_kind == "TLSRoute" && l.route_name == "tr-new" }));
     }
 }

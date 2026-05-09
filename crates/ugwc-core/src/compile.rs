@@ -7,12 +7,13 @@ use uuid::Uuid;
 
 use crate::failure_policy::FailurePolicy;
 use crate::from_cluster::ir_from_cluster;
+use crate::http_ir::{build_http_ir_from_fixture, HttpCompileFixture};
 use crate::http_route_attachment::{
     attachment_keys_for_parent_ref, find_effective_for_key, grpc_attachment_keys_for_parent_ref,
     grpc_route_listener_hostname_ok, route_listener_hostname_ok,
-    tls_attachment_keys_for_parent_ref, tls_route_listener_hostname_ok,
+    route_parent_attachment_ref_not_permitted, tls_attachment_keys_for_parent_ref,
+    tls_route_listener_hostname_ok,
 };
-use crate::http_ir::{build_http_ir_from_fixture, HttpCompileFixture};
 use crate::inference::InferenceIr;
 use crate::ir::{IrRevision, IrSnapshot, SnapshotMeta, IR_VERSION};
 use crate::policy::PolicyOverlayIr;
@@ -124,6 +125,19 @@ pub fn http_route_accepted_condition_for_parent(
     attached_ls: &HashSet<(String, String)>,
     report: &CompileReport,
 ) -> (&'static str, &'static str, &'static str) {
+    if route_parent_attachment_ref_not_permitted(
+        snapshot,
+        &route.namespace,
+        "HTTPRoute",
+        parent,
+        attached_ls,
+    ) {
+        return (
+            "False",
+            "RefNotPermitted",
+            "cross-namespace route attachment requires a ReferenceGrant in the parent resource namespace",
+        );
+    }
     let keys = attachment_keys_for_parent_ref(route, parent, snapshot, attached_ls);
     if keys.is_empty() {
         return (
@@ -152,11 +166,7 @@ pub fn http_route_accepted_condition_for_parent(
         break;
     }
     if accepted {
-        (
-            "True",
-            "Accepted",
-            "ugwc reconciled parent attachment",
-        )
+        ("True", "Accepted", "ugwc reconciled parent attachment")
     } else if eligible {
         (
             "False",
@@ -181,6 +191,19 @@ pub fn grpc_route_accepted_condition_for_parent(
     attached_ls: &HashSet<(String, String)>,
     report: &CompileReport,
 ) -> (&'static str, &'static str, &'static str) {
+    if route_parent_attachment_ref_not_permitted(
+        snapshot,
+        &route.namespace,
+        "GRPCRoute",
+        parent,
+        attached_ls,
+    ) {
+        return (
+            "False",
+            "RefNotPermitted",
+            "cross-namespace route attachment requires a ReferenceGrant in the parent resource namespace",
+        );
+    }
     let keys = grpc_attachment_keys_for_parent_ref(route, parent, snapshot, attached_ls);
     if keys.is_empty() {
         return (
@@ -209,11 +232,7 @@ pub fn grpc_route_accepted_condition_for_parent(
         break;
     }
     if accepted {
-        (
-            "True",
-            "Accepted",
-            "ugwc reconciled parent attachment",
-        )
+        ("True", "Accepted", "ugwc reconciled parent attachment")
     } else if eligible {
         (
             "False",
@@ -238,6 +257,19 @@ pub fn tls_route_accepted_condition_for_parent(
     attached_ls: &HashSet<(String, String)>,
     report: &CompileReport,
 ) -> (&'static str, &'static str, &'static str) {
+    if route_parent_attachment_ref_not_permitted(
+        snapshot,
+        &route.namespace,
+        "TLSRoute",
+        parent,
+        attached_ls,
+    ) {
+        return (
+            "False",
+            "RefNotPermitted",
+            "cross-namespace route attachment requires a ReferenceGrant in the parent resource namespace",
+        );
+    }
     let keys = tls_attachment_keys_for_parent_ref(route, parent, snapshot, attached_ls);
     if keys.is_empty() {
         return (
@@ -266,11 +298,7 @@ pub fn tls_route_accepted_condition_for_parent(
         break;
     }
     if accepted {
-        (
-            "True",
-            "Accepted",
-            "ugwc reconciled parent attachment",
-        )
+        ("True", "Accepted", "ugwc reconciled parent attachment")
     } else if eligible {
         (
             "False",
@@ -589,8 +617,11 @@ mod tests {
     use super::*;
     use crate::failure_policy::{FailurePolicy, OnPartialCompile};
     use crate::http_ir::HttpCompileFixture;
+    use crate::listener_merge::merge_effective_listeners;
     use crate::snapshot::{
-        HttpBackendRefSnap, HttpRouteRuleSnap, HttpRouteSnap, TlsRouteSnap,
+        AllowedRoutesNamespacesSnap, AllowedRoutesSnap, ClusterSnapshot, GatewayListenerSnap,
+        HttpBackendRefSnap, HttpRouteRuleSnap, HttpRouteSnap, ParentRefSnap,
+        ReferenceGrantFromSnap, ReferenceGrantSnap, ReferenceGrantToSnap, TlsRouteSnap,
     };
 
     #[test]
@@ -705,8 +736,98 @@ mod tests {
         };
         assert_eq!(
             http_route_resolved_refs_row(&report, &route),
-            ("False", "RefNotPermitted", "compile report lists ref issues for this HTTPRoute")
+            (
+                "False",
+                "RefNotPermitted",
+                "compile report lists ref issues for this HTTPRoute"
+            )
         );
+    }
+
+    #[test]
+    fn http_route_accepted_cross_namespace_parent_requires_grant() {
+        let listeners = vec![GatewayListenerSnap {
+            name: "http".into(),
+            port: 80,
+            protocol: "HTTP".into(),
+            hostname: None,
+            allowed_routes: Some(AllowedRoutesSnap {
+                namespaces: Some(AllowedRoutesNamespacesSnap {
+                    from: Some("All".into()),
+                    selector_match_labels: Default::default(),
+                }),
+                kinds: vec![],
+            }),
+            tls: None,
+        }];
+        let snap = ClusterSnapshot {
+            gateway_namespace: "infra".into(),
+            gateway_name: "gw".into(),
+            gateway_class_name: "gc".into(),
+            gateway_generation: 1,
+            gateway_addresses: vec![],
+            gateway_infrastructure: None,
+            listeners: listeners.clone(),
+            effective_listeners: merge_effective_listeners(&listeners, &[]),
+            listener_sets: vec![],
+            allowed_listeners: None,
+            http_routes: vec![],
+            grpc_routes: vec![],
+            tls_routes: vec![],
+            services: vec![],
+            endpoint_slices: vec![],
+            gateway_class: None,
+            reference_grants: vec![],
+            backend_tls_effective: Default::default(),
+            backend_tls_policy_outcomes: vec![],
+            namespace_labels: Default::default(),
+            inference_pools: vec![],
+        };
+        let route = HttpRouteSnap {
+            namespace: "team-a".into(),
+            name: "r".into(),
+            generation: 1,
+            parent_refs: vec![ParentRefSnap {
+                group: Some("gateway.networking.k8s.io".into()),
+                kind: Some("Gateway".into()),
+                namespace: Some("infra".into()),
+                name: "gw".into(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let attached_ls = HashSet::new();
+        let report = CompileReport::default();
+        let parent = &route.parent_refs[0];
+        let (st, reason, _) =
+            http_route_accepted_condition_for_parent(&route, parent, &snap, &attached_ls, &report);
+        assert_eq!(st, "False");
+        assert_eq!(reason, "RefNotPermitted");
+
+        let mut snap_ok = snap.clone();
+        snap_ok.reference_grants.push(ReferenceGrantSnap {
+            namespace: "infra".into(),
+            name: "rg".into(),
+            from: vec![ReferenceGrantFromSnap {
+                group: Some("gateway.networking.k8s.io".into()),
+                kind: "HTTPRoute".into(),
+                namespace: "team-a".into(),
+            }],
+            to: vec![ReferenceGrantToSnap {
+                group: Some("gateway.networking.k8s.io".into()),
+                kind: "Gateway".into(),
+                name: Some("gw".into()),
+            }],
+        });
+        let (st2, reason2, _) = http_route_accepted_condition_for_parent(
+            &route,
+            parent,
+            &snap_ok,
+            &attached_ls,
+            &report,
+        );
+        assert_eq!(st2, "True");
+        assert_eq!(reason2, "Accepted");
     }
 
     #[test]

@@ -10,8 +10,8 @@ use std::time::Duration;
 use std::collections::HashSet;
 
 use futures::StreamExt;
-use k8s_openapi::api::discovery::v1::EndpointSlice;
 use k8s_openapi::api::core::v1::{ConfigMap, Secret};
+use k8s_openapi::api::discovery::v1::EndpointSlice;
 use kube::api::ListParams;
 use kube::runtime::watcher::{watcher, Config as WatcherConfig};
 use kube::runtime::WatchStreamExt;
@@ -21,8 +21,8 @@ use tracing::{info, instrument, warn};
 
 use crate::resources::{
     backend_tls_policy_spec_references_configmap, backend_tls_policy_targets_service,
-    gateway_spec_references_secret, listenerset_spec_references_secret, BackendTLSPolicy, Gateway,
-    GatewayClass, GRPCRoute, HTTPRoute, InferencePool, ListenerSet, ParentReferenceSpec,
+    gateway_spec_references_secret, listenerset_spec_references_secret, BackendTLSPolicy,
+    GRPCRoute, Gateway, GatewayClass, HTTPRoute, InferencePool, ListenerSet, ParentReferenceSpec,
     ReferenceGrant, TLSRoute,
 };
 
@@ -95,7 +95,10 @@ async fn gateway_targets_from_parent_refs(
     targets
 }
 
-async fn gateway_targets_for_route(client: &Client, route: &HTTPRoute) -> HashSet<(String, String)> {
+async fn gateway_targets_for_route(
+    client: &Client,
+    route: &HTTPRoute,
+) -> HashSet<(String, String)> {
     gateway_targets_from_parent_refs(
         client,
         route.metadata.namespace.clone(),
@@ -131,11 +134,7 @@ async fn gateway_targets_for_tls_route(
     .await
 }
 
-fn http_route_references_inference_pool(
-    route: &HTTPRoute,
-    pool_ns: &str,
-    pool_name: &str,
-) -> bool {
+fn http_route_references_inference_pool(route: &HTTPRoute, pool_ns: &str, pool_name: &str) -> bool {
     let rns = route.metadata.namespace.as_deref().unwrap_or("");
     for rule in &route.spec.rules {
         for br in &rule.backend_refs {
@@ -151,11 +150,7 @@ fn http_route_references_inference_pool(
     false
 }
 
-fn grpc_route_references_inference_pool(
-    route: &GRPCRoute,
-    pool_ns: &str,
-    pool_name: &str,
-) -> bool {
+fn grpc_route_references_inference_pool(route: &GRPCRoute, pool_ns: &str, pool_name: &str) -> bool {
     let rns = route.metadata.namespace.as_deref().unwrap_or("");
     for rule in &route.spec.rules {
         for br in &rule.backend_refs {
@@ -171,11 +166,7 @@ fn grpc_route_references_inference_pool(
     false
 }
 
-fn tls_route_references_inference_pool(
-    route: &TLSRoute,
-    pool_ns: &str,
-    pool_name: &str,
-) -> bool {
+fn tls_route_references_inference_pool(route: &TLSRoute, pool_ns: &str, pool_name: &str) -> bool {
     let rns = route.metadata.namespace.as_deref().unwrap_or("");
     for rule in &route.spec.rules {
         for br in &rule.backend_refs {
@@ -248,7 +239,10 @@ async fn gateway_targets_for_inference_pool(
     out
 }
 
-fn http_route_references_backend_tls_policy_target(pol: &BackendTLSPolicy, route: &HTTPRoute) -> bool {
+fn http_route_references_backend_tls_policy_target(
+    pol: &BackendTLSPolicy,
+    route: &HTTPRoute,
+) -> bool {
     let pol_ns = pol.metadata.namespace.as_deref().unwrap_or("");
     for rule in &route.spec.rules {
         for br in &rule.backend_refs {
@@ -268,7 +262,10 @@ fn http_route_references_backend_tls_policy_target(pol: &BackendTLSPolicy, route
     false
 }
 
-fn grpc_route_references_backend_tls_policy_target(pol: &BackendTLSPolicy, route: &GRPCRoute) -> bool {
+fn grpc_route_references_backend_tls_policy_target(
+    pol: &BackendTLSPolicy,
+    route: &GRPCRoute,
+) -> bool {
     let pol_ns = pol.metadata.namespace.as_deref().unwrap_or("");
     for rule in &route.spec.rules {
         for br in &rule.backend_refs {
@@ -288,7 +285,10 @@ fn grpc_route_references_backend_tls_policy_target(pol: &BackendTLSPolicy, route
     false
 }
 
-fn tls_route_references_backend_tls_policy_target(pol: &BackendTLSPolicy, route: &TLSRoute) -> bool {
+fn tls_route_references_backend_tls_policy_target(
+    pol: &BackendTLSPolicy,
+    route: &TLSRoute,
+) -> bool {
     let pol_ns = pol.metadata.namespace.as_deref().unwrap_or("");
     for rule in &route.spec.rules {
         for br in &rule.backend_refs {
@@ -511,50 +511,157 @@ pub async fn run_gateway_controller(
                 _ = sd_rg.cancelled() => break,
                 ev = stream.next() => {
                     match ev {
-                        Some(Ok(_)) => {
-                            let hr_api: Api<HTTPRoute> = Api::all(c_rg.clone());
-                            match hr_api.list(&ListParams::default()).await {
-                                Ok(list) => {
-                                    for route in list.items {
-                                        let targets = gateway_targets_for_route(&c_rg, &route).await;
-                                        for (pns, pname) in targets {
-                                            if tx_rg.send((pns, pname)).await.is_err() {
-                                                return;
-                                            }
+                        Some(Ok(rg)) => {
+                            let mut keys: HashSet<(String, String)> = HashSet::new();
+                            let grant_ns = rg.metadata.namespace.clone().unwrap_or_default();
+                            if !grant_ns.is_empty() {
+                                let gw_api: Api<Gateway> =
+                                    Api::namespaced(c_rg.clone(), &grant_ns);
+                                match gw_api.list(&ListParams::default()).await {
+                                    Ok(list) => {
+                                        for gw in list.items {
+                                            keys.insert((grant_ns.clone(), gw.name_any()));
                                         }
                                     }
+                                    Err(e) => warn!(
+                                        error = %e,
+                                        grant_ns = %grant_ns,
+                                        "list gateways in ReferenceGrant namespace after grant change"
+                                    ),
                                 }
-                                Err(e) => warn!(error = %e, "list httproute after referencegrant change"),
                             }
-                            let gr_api: Api<GRPCRoute> = Api::all(c_rg.clone());
-                            match gr_api.list(&ListParams::default()).await {
-                                Ok(list) => {
-                                    for route in list.items {
-                                        let targets =
-                                            gateway_targets_for_grpc_route(&c_rg, &route).await;
-                                        for (pns, pname) in targets {
-                                            if tx_rg.send((pns, pname)).await.is_err() {
-                                                return;
+
+                            let mut route_ns_list: Vec<String> = rg
+                                .spec
+                                .from
+                                .iter()
+                                .map(|f| f.namespace.trim().to_string())
+                                .filter(|s| !s.is_empty())
+                                .collect();
+                            route_ns_list.sort();
+                            route_ns_list.dedup();
+
+                            if route_ns_list.is_empty() {
+                                let hr_api: Api<HTTPRoute> = Api::all(c_rg.clone());
+                                match hr_api.list(&ListParams::default()).await {
+                                    Ok(list) => {
+                                        for route in list.items {
+                                            let targets =
+                                                gateway_targets_for_route(&c_rg, &route).await;
+                                            for t in targets {
+                                                keys.insert(t);
                                             }
                                         }
                                     }
+                                    Err(e) => warn!(
+                                        error = %e,
+                                        "list httproute after referencegrant change (fallback)"
+                                    ),
                                 }
-                                Err(e) => warn!(error = %e, "list grpcroute after referencegrant change"),
+                                let gr_api: Api<GRPCRoute> = Api::all(c_rg.clone());
+                                match gr_api.list(&ListParams::default()).await {
+                                    Ok(list) => {
+                                        for route in list.items {
+                                            let targets = gateway_targets_for_grpc_route(
+                                                &c_rg,
+                                                &route,
+                                            )
+                                            .await;
+                                            for t in targets {
+                                                keys.insert(t);
+                                            }
+                                        }
+                                    }
+                                    Err(e) => warn!(
+                                        error = %e,
+                                        "list grpcroute after referencegrant change (fallback)"
+                                    ),
+                                }
+                                let tls_api: Api<TLSRoute> = Api::all(c_rg.clone());
+                                match tls_api.list(&ListParams::default()).await {
+                                    Ok(list) => {
+                                        for route in list.items {
+                                            let targets = gateway_targets_for_tls_route(
+                                                &c_rg,
+                                                &route,
+                                            )
+                                            .await;
+                                            for t in targets {
+                                                keys.insert(t);
+                                            }
+                                        }
+                                    }
+                                    Err(e) => warn!(
+                                        error = %e,
+                                        "list tlsroute after referencegrant change (fallback)"
+                                    ),
+                                }
+                            } else {
+                                for ns in route_ns_list {
+                                    let hr_api: Api<HTTPRoute> =
+                                        Api::namespaced(c_rg.clone(), &ns);
+                                    match hr_api.list(&ListParams::default()).await {
+                                        Ok(list) => {
+                                            for route in list.items {
+                                                let targets =
+                                                    gateway_targets_for_route(&c_rg, &route)
+                                                        .await;
+                                                for t in targets {
+                                                    keys.insert(t);
+                                                }
+                                            }
+                                        }
+                                        Err(e) => warn!(
+                                            error = %e,
+                                            route_ns = %ns,
+                                            "list httproute after referencegrant change"
+                                        ),
+                                    }
+                                    let gr_api: Api<GRPCRoute> =
+                                        Api::namespaced(c_rg.clone(), &ns);
+                                    match gr_api.list(&ListParams::default()).await {
+                                        Ok(list) => {
+                                            for route in list.items {
+                                                let targets =
+                                                    gateway_targets_for_grpc_route(&c_rg, &route)
+                                                        .await;
+                                                for t in targets {
+                                                    keys.insert(t);
+                                                }
+                                            }
+                                        }
+                                        Err(e) => warn!(
+                                            error = %e,
+                                            route_ns = %ns,
+                                            "list grpcroute after referencegrant change"
+                                        ),
+                                    }
+                                    let tls_api: Api<TLSRoute> =
+                                        Api::namespaced(c_rg.clone(), &ns);
+                                    match tls_api.list(&ListParams::default()).await {
+                                        Ok(list) => {
+                                            for route in list.items {
+                                                let targets =
+                                                    gateway_targets_for_tls_route(&c_rg, &route)
+                                                        .await;
+                                                for t in targets {
+                                                    keys.insert(t);
+                                                }
+                                            }
+                                        }
+                                        Err(e) => warn!(
+                                            error = %e,
+                                            route_ns = %ns,
+                                            "list tlsroute after referencegrant change"
+                                        ),
+                                    }
+                                }
                             }
-                            let tls_api: Api<TLSRoute> = Api::all(c_rg.clone());
-                            match tls_api.list(&ListParams::default()).await {
-                                Ok(list) => {
-                                    for route in list.items {
-                                        let targets =
-                                            gateway_targets_for_tls_route(&c_rg, &route).await;
-                                        for (pns, pname) in targets {
-                                            if tx_rg.send((pns, pname)).await.is_err() {
-                                                return;
-                                            }
-                                        }
-                                    }
+
+                            for (pns, pname) in keys {
+                                if tx_rg.send((pns, pname)).await.is_err() {
+                                    return;
                                 }
-                                Err(e) => warn!(error = %e, "list tlsroute after referencegrant change"),
                             }
                         }
                         Some(Err(e)) => warn!(error = %e, "referencegrant watch stream"),
@@ -852,5 +959,56 @@ pub async fn run_gateway_controller(
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod reference_grant_route_ns_tests {
+    use crate::resources::ReferenceGrantFromSpec;
+
+    fn route_namespace_hints(from: &[ReferenceGrantFromSpec]) -> Vec<String> {
+        let mut route_ns_list: Vec<String> = from
+            .iter()
+            .map(|f| f.namespace.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect();
+        route_ns_list.sort();
+        route_ns_list.dedup();
+        route_ns_list
+    }
+
+    #[test]
+    fn route_namespace_hints_sort_dedup() {
+        let from = vec![
+            ReferenceGrantFromSpec {
+                namespace: "b".into(),
+                kind: "HTTPRoute".into(),
+                ..Default::default()
+            },
+            ReferenceGrantFromSpec {
+                namespace: "a".into(),
+                kind: "HTTPRoute".into(),
+                ..Default::default()
+            },
+            ReferenceGrantFromSpec {
+                namespace: "b".into(),
+                kind: "GRPCRoute".into(),
+                ..Default::default()
+            },
+        ];
+        assert_eq!(
+            route_namespace_hints(&from),
+            vec!["a".to_string(), "b".to_string()]
+        );
+    }
+
+    #[test]
+    fn route_namespace_hints_skips_blank() {
+        let from = vec![ReferenceGrantFromSpec {
+            namespace: "  ".into(),
+            kind: "HTTPRoute".into(),
+            ..Default::default()
+        }];
+        assert!(route_namespace_hints(&from).is_empty());
     }
 }

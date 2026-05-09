@@ -5,8 +5,8 @@
 pub mod compile;
 pub mod failure_policy;
 pub mod from_cluster;
-pub mod http_route_attachment;
 pub mod http_ir;
+pub mod http_route_attachment;
 pub mod inference;
 pub mod ir;
 pub mod listener_merge;
@@ -22,16 +22,15 @@ pub use compile::{
 };
 pub use failure_policy::FailurePolicy;
 pub use from_cluster::ir_from_cluster;
+pub use http_ir::{build_http_ir_from_fixture, HttpCompileFixture};
 pub use http_route_attachment::{
     reference_grant_permits_gateway_secret_ref, reference_grant_permits_service_ref,
     route_accepted_for_parent_ref,
 };
-pub use http_ir::{build_http_ir_from_fixture, HttpCompileFixture};
 pub use ir::{
     BackendEndpointIr, BackendIr, BackendTlsIr, IrRevision, IrScopeId, IrSnapshot,
-    ListenerAttachmentIr,
-    ListenerIr, NamedHeaderIr, RequestHeaderModifierIr, RequestRedirectIr, RouteMatchIr,
-    RouteRuleIr, SnapshotMeta, TlsMode, WeightedBackendIr, IR_VERSION,
+    ListenerAttachmentIr, ListenerIr, NamedHeaderIr, RequestHeaderModifierIr, RequestRedirectIr,
+    RouteMatchIr, RouteRuleIr, SnapshotMeta, TlsMode, WeightedBackendIr, IR_VERSION,
 };
 pub use listener_merge::merge_effective_listeners;
 pub use publish::{plan_publish, PublishAction, PublishPlan};

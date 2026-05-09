@@ -88,7 +88,10 @@ pub fn reference_grant_permits_service_ref(
             if to.kind != "Service" {
                 continue;
             }
-            let _ = to.group.as_deref().unwrap_or("");
+            let tg = to.group.as_deref().unwrap_or("");
+            if !tg.is_empty() {
+                continue;
+            }
             match &to.name {
                 None => return true,
                 Some(n) if n.is_empty() => return true,
@@ -147,6 +150,154 @@ pub fn reference_grant_permits_inference_pool_ref(
         }
     }
     false
+}
+
+/// Cross-namespace route parentRef to a `Gateway` requires a [`ReferenceGrant`] in the Gateway namespace.
+#[must_use]
+pub fn reference_grant_permits_route_to_gateway_parent(
+    grants: &[ReferenceGrantSnap],
+    route_namespace: &str,
+    route_kind: &str,
+    gateway_namespace: &str,
+    gateway_name: &str,
+) -> bool {
+    if route_namespace == gateway_namespace {
+        return true;
+    }
+    const G_FROM: &str = "gateway.networking.k8s.io";
+    const G_TO: &str = "gateway.networking.k8s.io";
+
+    for g in grants {
+        if g.namespace != gateway_namespace {
+            continue;
+        }
+        let mut from_ok = false;
+        for fr in &g.from {
+            let fg = fr.group.as_deref().unwrap_or(G_FROM);
+            if fg == G_FROM && fr.kind == route_kind && fr.namespace == route_namespace {
+                from_ok = true;
+                break;
+            }
+        }
+        if !from_ok {
+            continue;
+        }
+        for to in &g.to {
+            if to.kind != "Gateway" {
+                continue;
+            }
+            let tg = to.group.as_deref().unwrap_or("");
+            if !(tg.is_empty() || tg == G_TO) {
+                continue;
+            }
+            match &to.name {
+                None => return true,
+                Some(n) if n.is_empty() => return true,
+                Some(n) if n == gateway_name => return true,
+                _ => {}
+            }
+        }
+    }
+    false
+}
+
+/// Cross-namespace route parentRef to a `ListenerSet` requires a [`ReferenceGrant`] in the ListenerSet namespace.
+#[must_use]
+pub fn reference_grant_permits_route_to_listener_set_parent(
+    grants: &[ReferenceGrantSnap],
+    route_namespace: &str,
+    route_kind: &str,
+    listener_set_namespace: &str,
+    listener_set_name: &str,
+) -> bool {
+    if route_namespace == listener_set_namespace {
+        return true;
+    }
+    const G_FROM: &str = "gateway.networking.k8s.io";
+    const G_TO: &str = "gateway.networking.k8s.io";
+
+    for g in grants {
+        if g.namespace != listener_set_namespace {
+            continue;
+        }
+        let mut from_ok = false;
+        for fr in &g.from {
+            let fg = fr.group.as_deref().unwrap_or(G_FROM);
+            if fg == G_FROM && fr.kind == route_kind && fr.namespace == route_namespace {
+                from_ok = true;
+                break;
+            }
+        }
+        if !from_ok {
+            continue;
+        }
+        for to in &g.to {
+            if to.kind != "ListenerSet" {
+                continue;
+            }
+            let tg = to.group.as_deref().unwrap_or("");
+            if !(tg.is_empty() || tg == G_TO) {
+                continue;
+            }
+            match &to.name {
+                None => return true,
+                Some(n) if n.is_empty() => return true,
+                Some(n) if n == listener_set_name => return true,
+                _ => {}
+            }
+        }
+    }
+    false
+}
+
+/// True when a route is denied attachment to this reconcile scope solely because of a missing cross-namespace [`ReferenceGrant`] on the parent ref.
+#[must_use]
+pub fn route_parent_attachment_ref_not_permitted(
+    snapshot: &ClusterSnapshot,
+    route_namespace: &str,
+    route_kind: &str,
+    parent: &ParentRefSnap,
+    attached_ls: &HashSet<(String, String)>,
+) -> bool {
+    let g = parent
+        .group
+        .as_deref()
+        .unwrap_or("gateway.networking.k8s.io");
+    let k = parent.kind.as_deref().unwrap_or("Gateway");
+    if !gateway_api_group(&Some(g.to_string())) {
+        return false;
+    }
+    match k {
+        "Gateway" => {
+            let pns = parent_namespace(parent, route_namespace);
+            if pns != snapshot.gateway_namespace || parent.name != snapshot.gateway_name {
+                return false;
+            }
+            route_namespace != snapshot.gateway_namespace.as_str()
+                && !reference_grant_permits_route_to_gateway_parent(
+                    &snapshot.reference_grants,
+                    route_namespace,
+                    route_kind,
+                    &snapshot.gateway_namespace,
+                    &snapshot.gateway_name,
+                )
+        }
+        "ListenerSet" => {
+            let ls_ns = parent_namespace(parent, route_namespace);
+            if !attached_ls.contains(&(ls_ns.clone(), parent.name.clone())) {
+                return false;
+            }
+            route_namespace != ls_ns.as_str()
+                && !reference_grant_permits_route_to_listener_set_parent(
+                    &snapshot.reference_grants,
+                    route_namespace,
+                    route_kind,
+                    &ls_ns,
+                    &parent.name,
+                )
+        }
+        _ => false,
+    }
 }
 
 /// Cross-namespace `Secret` certificate ref from a `Gateway` requires a [`ReferenceGrant`] in the Secret namespace.
@@ -365,6 +516,17 @@ pub(crate) fn attachment_keys_for_parent_ref_ns(
         if pns != snapshot.gateway_namespace || p.name != snapshot.gateway_name {
             return keys;
         }
+        if route_ns != snapshot.gateway_namespace.as_str()
+            && !reference_grant_permits_route_to_gateway_parent(
+                &snapshot.reference_grants,
+                route_ns,
+                route_kind,
+                &snapshot.gateway_namespace,
+                &snapshot.gateway_name,
+            )
+        {
+            return keys;
+        }
         for e in &snapshot.effective_listeners {
             if !matches!(e.parent, ListenerParentSnap::InlineGateway) {
                 continue;
@@ -406,6 +568,17 @@ pub(crate) fn attachment_keys_for_parent_ref_ns(
     if gateway_api_group(&Some(g.to_string())) && k == "ListenerSet" {
         let ls_ns = parent_namespace(p, route_ns);
         if !attached_ls.contains(&(ls_ns.clone(), p.name.clone())) {
+            return keys;
+        }
+        if route_ns != ls_ns.as_str()
+            && !reference_grant_permits_route_to_listener_set_parent(
+                &snapshot.reference_grants,
+                route_ns,
+                route_kind,
+                &ls_ns,
+                &p.name,
+            )
+        {
             return keys;
         }
         for e in &snapshot.effective_listeners {
@@ -657,10 +830,7 @@ mod tests {
             "tls-secret"
         ));
         assert!(!reference_grant_permits_gateway_secret_ref(
-            &grants,
-            "ns-a",
-            "ns-b",
-            "other"
+            &grants, "ns-a", "ns-b", "other"
         ));
     }
 
@@ -704,6 +874,107 @@ mod tests {
             "route-ns",
             "pool-ns",
             "other-pool",
+            "HTTPRoute",
+        ));
+    }
+
+    #[test]
+    fn route_to_gateway_parent_grant_same_namespace() {
+        let grants: Vec<ReferenceGrantSnap> = vec![];
+        assert!(reference_grant_permits_route_to_gateway_parent(
+            &grants,
+            "default",
+            "HTTPRoute",
+            "default",
+            "gw",
+        ));
+    }
+
+    #[test]
+    fn route_to_gateway_parent_grant_cross_namespace() {
+        let grants = vec![ReferenceGrantSnap {
+            namespace: "infra".into(),
+            name: "rg".into(),
+            from: vec![crate::snapshot::ReferenceGrantFromSnap {
+                group: Some("gateway.networking.k8s.io".into()),
+                kind: "HTTPRoute".into(),
+                namespace: "team-a".into(),
+            }],
+            to: vec![crate::snapshot::ReferenceGrantToSnap {
+                group: Some("gateway.networking.k8s.io".into()),
+                kind: "Gateway".into(),
+                name: Some("gw".into()),
+            }],
+        }];
+        assert!(reference_grant_permits_route_to_gateway_parent(
+            &grants,
+            "team-a",
+            "HTTPRoute",
+            "infra",
+            "gw",
+        ));
+        assert!(!reference_grant_permits_route_to_gateway_parent(
+            &grants,
+            "team-b",
+            "HTTPRoute",
+            "infra",
+            "gw",
+        ));
+    }
+
+    #[test]
+    fn route_to_listener_set_parent_grant_cross_namespace() {
+        let grants = vec![ReferenceGrantSnap {
+            namespace: "infra".into(),
+            name: "rg".into(),
+            from: vec![crate::snapshot::ReferenceGrantFromSnap {
+                group: Some("gateway.networking.k8s.io".into()),
+                kind: "GRPCRoute".into(),
+                namespace: "team-a".into(),
+            }],
+            to: vec![crate::snapshot::ReferenceGrantToSnap {
+                group: Some("gateway.networking.k8s.io".into()),
+                kind: "ListenerSet".into(),
+                name: Some("shared".into()),
+            }],
+        }];
+        assert!(reference_grant_permits_route_to_listener_set_parent(
+            &grants,
+            "team-a",
+            "GRPCRoute",
+            "infra",
+            "shared",
+        ));
+        assert!(!reference_grant_permits_route_to_listener_set_parent(
+            &grants,
+            "team-a",
+            "HTTPRoute",
+            "infra",
+            "shared",
+        ));
+    }
+
+    #[test]
+    fn service_grant_rejects_non_core_group_on_to() {
+        let grants = vec![ReferenceGrantSnap {
+            namespace: "other".into(),
+            name: "bad".into(),
+            from: vec![crate::snapshot::ReferenceGrantFromSnap {
+                group: Some("gateway.networking.k8s.io".into()),
+                kind: "HTTPRoute".into(),
+                namespace: "default".into(),
+            }],
+            to: vec![crate::snapshot::ReferenceGrantToSnap {
+                group: Some("example.com".into()),
+                kind: "Service".into(),
+                name: None,
+            }],
+        }];
+        assert!(!reference_grant_permits_service_ref(
+            &grants,
+            "default",
+            "other",
+            "svc",
             "HTTPRoute",
         ));
     }
