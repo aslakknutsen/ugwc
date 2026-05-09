@@ -110,6 +110,13 @@ fn route_matches_proto(
                 grpc_service: None,
                 grpc_method: None,
             }],
+            RouteFamily::Tcp => vec![ugwc_core::ir::RouteMatchIr {
+                path_prefix: None,
+                path_exact: None,
+                headers_exact: Default::default(),
+                grpc_service: None,
+                grpc_method: None,
+            }],
         }
     } else {
         matches.to_vec()
@@ -144,10 +151,17 @@ pub fn encode_ir(ir: &IrSnapshot) -> Vec<Resource> {
             "{gw_ns}/{gw_name}/{}/{}/{}/{}/{}",
             ln.parent_kind, ln.parent_namespace, ln.parent_name, ln.section_name, ln.bind_port
         );
-        let protocol = match ln.tls {
-            TlsMode::Passthrough => Protocol::Tls as i32,
-            TlsMode::Terminate => Protocol::Https as i32,
-            TlsMode::Plaintext => Protocol::Http as i32,
+        let gp_norm = ln.gateway_protocol.trim().to_ascii_uppercase();
+        let protocol = if gp_norm == "TCP" {
+            Protocol::Tcp as i32
+        } else if gp_norm == "UDP" {
+            Protocol::Unknown as i32
+        } else {
+            match ln.tls {
+                TlsMode::Passthrough => Protocol::Tls as i32,
+                TlsMode::Terminate => Protocol::Https as i32,
+                TlsMode::Plaintext => Protocol::Http as i32,
+            }
         };
         let hostname = ln
             .hostname
@@ -168,7 +182,9 @@ pub fn encode_ir(ir: &IrSnapshot) -> Vec<Resource> {
             None
         };
         let allowed_routes = if ln.allowed_route_group_kinds.is_empty() {
-            if matches!(ln.tls, TlsMode::Passthrough) {
+            if gp_norm == "TCP" {
+                vec!["gateway.networking.k8s.io/TCPRoute".into()]
+            } else if matches!(ln.tls, TlsMode::Passthrough) {
                 vec!["gateway.networking.k8s.io/TLSRoute".into()]
             } else {
                 vec![
@@ -273,6 +289,7 @@ pub fn encode_ir(ir: &IrSnapshot) -> Vec<Resource> {
                 .map(header_modifier_proto);
             let grpc_route = matches!(r.route_family, RouteFamily::Grpc);
             let tls_route = matches!(r.route_family, RouteFamily::Tls);
+            let tcp_route = matches!(r.route_family, RouteFamily::Tcp);
 
             routes.push(Route {
                 key: route_key,
@@ -286,6 +303,7 @@ pub fn encode_ir(ir: &IrSnapshot) -> Vec<Resource> {
                 response_header_modifier,
                 grpc_route,
                 tls_route,
+                tcp_route,
             });
         }
 
@@ -360,6 +378,7 @@ mod tests {
             section_name: "https".into(),
             bind_port: 443,
             tls: TlsMode::Terminate,
+            gateway_protocol: "HTTPS".into(),
             parent_kind: "Gateway".into(),
             parent_namespace: "default".into(),
             parent_name: "gw".into(),
@@ -434,6 +453,7 @@ mod tests {
         assert_eq!(m.grpc_service, "hello.Greeter");
         assert_eq!(m.grpc_method, "SayHello");
         assert!(!rt.tls_route);
+        assert!(!rt.tcp_route);
     }
 
     #[test]
@@ -451,6 +471,7 @@ mod tests {
             section_name: "tls".into(),
             bind_port: 443,
             tls: TlsMode::Passthrough,
+            gateway_protocol: "TLS".into(),
             parent_kind: "Gateway".into(),
             parent_namespace: "default".into(),
             parent_name: "gw".into(),
@@ -516,6 +537,90 @@ mod tests {
         let rt = &enc[0].routes[0];
         assert!(rt.tls_route);
         assert!(!rt.grpc_route);
+        assert!(!rt.tcp_route);
+    }
+
+    #[test]
+    fn encode_tcp_listener_protocol_and_tcp_route_flag() {
+        use std::collections::BTreeMap;
+
+        use ugwc_core::ir::{
+            BackendEndpointIr, BackendIr, IrRevision, IrScopeId, ListenerAttachmentIr, ListenerIr,
+            RouteFamily, RouteRuleIr, SnapshotMeta, TlsMode, WeightedBackendIr, IR_VERSION,
+        };
+        use ugwc_core::IrSnapshot;
+
+        let scope = IrScopeId::new("default", "gw");
+        let listener = ListenerIr {
+            section_name: "tcp".into(),
+            bind_port: 9000,
+            tls: TlsMode::Plaintext,
+            gateway_protocol: "TCP".into(),
+            parent_kind: "Gateway".into(),
+            parent_namespace: "default".into(),
+            parent_name: "gw".into(),
+            conflicted: false,
+            hostname: None,
+            tls_cert_pem: vec![],
+            tls_key_pem: vec![],
+            allowed_route_group_kinds: vec![],
+        };
+        let attach = ListenerAttachmentIr {
+            parent_kind: "Gateway".into(),
+            parent_namespace: "default".into(),
+            parent_name: "gw".into(),
+            section_name: "tcp".into(),
+            port: 9000,
+        };
+        let backends_map = BTreeMap::from([(
+            "default/svc:9000".into(),
+            vec![BackendEndpointIr {
+                address: "10.1.2.3".into(),
+                port: 19000,
+            }],
+        )]);
+        let ir = IrSnapshot {
+            ir_version: IR_VERSION,
+            revision: IrRevision::Sequence(0),
+            scope,
+            listeners: vec![listener],
+            routes: vec![RouteRuleIr {
+                name: "tcp/x".into(),
+                route_family: RouteFamily::Tcp,
+                hosts: vec![],
+                matches: vec![],
+                backends: vec![WeightedBackendIr {
+                    backend: BackendIr {
+                        service_namespace: "default".into(),
+                        service_name: "svc".into(),
+                        port_name: None,
+                        port_number: Some(9000),
+                        backend_tls: None,
+                        inference: None,
+                    },
+                    weight: 1,
+                }],
+                request_redirect: None,
+                request_header_modifier: None,
+                response_header_modifier: None,
+                listener: Some(attach),
+            }],
+            backends: backends_map,
+            meta: SnapshotMeta {
+                correlation_id: uuid::Uuid::nil(),
+                has_errors: false,
+            },
+            policy: Default::default(),
+            inference: Default::default(),
+        };
+        let enc = encode_ir(&ir);
+        let ln = enc[0].listener.as_ref().expect("listener");
+        assert_eq!(ln.protocol, Protocol::Tcp as i32);
+        assert!(ln.allowed_routes.iter().any(|x| x.contains("TCPRoute")));
+        let rt = &enc[0].routes[0];
+        assert!(rt.tcp_route);
+        assert!(!rt.tls_route);
+        assert!(!rt.grpc_route);
     }
 
     #[test]
@@ -534,6 +639,7 @@ mod tests {
             section_name: "http".into(),
             bind_port: 80,
             tls: TlsMode::Plaintext,
+            gateway_protocol: "HTTP".into(),
             parent_kind: "Gateway".into(),
             parent_namespace: "default".into(),
             parent_name: "gw".into(),
@@ -628,6 +734,7 @@ mod tests {
             section_name: "http".into(),
             bind_port: 80,
             tls: TlsMode::Plaintext,
+            gateway_protocol: "HTTP".into(),
             parent_kind: "Gateway".into(),
             parent_namespace: "default".into(),
             parent_name: "gw".into(),

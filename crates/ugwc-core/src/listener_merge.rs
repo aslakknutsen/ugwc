@@ -96,16 +96,24 @@ fn mark_distinctness_conflicts(effective: &mut [EffectiveListenerSnap]) {
 /// Gateway API: TCP listeners sharing a port with HTTP/HTTPS/TLS listeners are indistinct.
 fn mark_tcp_layer7_port_conflicts(effective: &mut [EffectiveListenerSnap]) {
     let mut tcp_ports: HashSet<u16> = HashSet::new();
+    let mut l7_ports: HashSet<u16> = HashSet::new();
     for e in effective.iter() {
-        if e.protocol == "TCP" {
-            tcp_ports.insert(e.port);
+        match e.protocol.as_str() {
+            "TCP" => {
+                tcp_ports.insert(e.port);
+            }
+            "HTTP" | "HTTPS" | "TLS" => {
+                l7_ports.insert(e.port);
+            }
+            _ => {}
         }
     }
-    if tcp_ports.is_empty() {
+    let conflict_ports: HashSet<u16> = tcp_ports.intersection(&l7_ports).copied().collect();
+    if conflict_ports.is_empty() {
         return;
     }
     for e in effective.iter_mut() {
-        if !tcp_ports.contains(&e.port) {
+        if !conflict_ports.contains(&e.port) {
             continue;
         }
         let l7 = matches!(e.protocol.as_str(), "HTTP" | "HTTPS" | "TLS");

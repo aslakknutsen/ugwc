@@ -12,12 +12,14 @@ use crate::http_route_attachment::{
     attachment_keys_for_parent_ref, find_effective_for_key, grpc_attachment_keys_for_parent_ref,
     grpc_route_listener_hostname_ok, route_listener_hostname_ok,
     route_parent_attachment_ref_not_permitted, tls_attachment_keys_for_parent_ref,
-    tls_route_listener_hostname_ok,
+    tls_route_listener_hostname_ok, tcp_attachment_keys_for_parent_ref, tcp_route_listener_ok,
 };
 use crate::inference::InferenceIr;
 use crate::ir::{IrRevision, IrSnapshot, SnapshotMeta, IR_VERSION};
 use crate::policy::PolicyOverlayIr;
-use crate::snapshot::{ClusterSnapshot, GrpcRouteSnap, HttpRouteSnap, ParentRefSnap, TlsRouteSnap};
+use crate::snapshot::{
+    ClusterSnapshot, GrpcRouteSnap, HttpRouteSnap, ParentRefSnap, TcpRouteSnap, TlsRouteSnap,
+};
 
 /// Stable cross-layer reference to a Kubernetes object when something goes wrong.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -55,6 +57,8 @@ pub struct CompileReport {
     pub http_grpc_conflict_losers: Vec<HttpGrpcConflictLoser>,
     /// TLSRoutes rejected due to lower precedence vs another TLSRoute on the same TLS listener (overlapping SNI).
     pub tls_route_conflict_losers: Vec<HttpGrpcConflictLoser>,
+    /// TCPRoutes rejected due to lower precedence vs another TCPRoute on the same TCP listener.
+    pub tcp_route_conflict_losers: Vec<HttpGrpcConflictLoser>,
 }
 
 impl CompileReport {
@@ -88,6 +92,22 @@ impl CompileReport {
         lk: &crate::ir::ListenerAttachmentIr,
     ) -> bool {
         self.tls_route_conflict_losers.iter().any(|x| {
+            x.route_kind == route_kind
+                && x.route_namespace == route_namespace
+                && x.route_name == route_name
+                && x.listener == *lk
+        })
+    }
+
+    #[must_use]
+    pub fn tcp_route_conflict_loser_at(
+        &self,
+        route_kind: &str,
+        route_namespace: &str,
+        route_name: &str,
+        lk: &crate::ir::ListenerAttachmentIr,
+    ) -> bool {
+        self.tcp_route_conflict_losers.iter().any(|x| {
             x.route_kind == route_kind
                 && x.route_namespace == route_namespace
                 && x.route_name == route_name
@@ -314,6 +334,72 @@ pub fn tls_route_accepted_condition_for_parent(
     }
 }
 
+/// `Accepted` condition tuple for one `TCPRoute` `parentRef`, including TCP-vs-TCP precedence on same listener.
+#[must_use]
+pub fn tcp_route_accepted_condition_for_parent(
+    route: &TcpRouteSnap,
+    parent: &ParentRefSnap,
+    snapshot: &ClusterSnapshot,
+    attached_ls: &HashSet<(String, String)>,
+    report: &CompileReport,
+) -> (&'static str, &'static str, &'static str) {
+    if route_parent_attachment_ref_not_permitted(
+        snapshot,
+        &route.namespace,
+        "TCPRoute",
+        parent,
+        attached_ls,
+    ) {
+        return (
+            "False",
+            "RefNotPermitted",
+            "cross-namespace route attachment requires a ReferenceGrant in the parent resource namespace",
+        );
+    }
+    let keys = tcp_attachment_keys_for_parent_ref(route, parent, snapshot, attached_ls);
+    if keys.is_empty() {
+        return (
+            "False",
+            "NotAcceptedByListeners",
+            "route not accepted by listener policy or allowedRoutes",
+        );
+    }
+    let mut eligible = false;
+    let mut accepted = false;
+    for lk in &keys {
+        let Some(eff) = find_effective_for_key(snapshot, lk) else {
+            continue;
+        };
+        if eff.conflicted {
+            continue;
+        }
+        if !tcp_route_listener_ok(route, eff) {
+            continue;
+        }
+        eligible = true;
+        if report.tcp_route_conflict_loser_at("TCPRoute", &route.namespace, &route.name, lk) {
+            continue;
+        }
+        accepted = true;
+        break;
+    }
+    if accepted {
+        ("True", "Accepted", "ugwc reconciled parent attachment")
+    } else if eligible {
+        (
+            "False",
+            "TCPRouteConflict",
+            "TCPRoute lost precedence vs another TCPRoute on all matching listeners",
+        )
+    } else {
+        (
+            "False",
+            "NotAcceptedByListeners",
+            "route not accepted by listener policy or allowedRoutes",
+        )
+    }
+}
+
 fn http_route_service_backends(route: &HttpRouteSnap) -> Vec<(String, String)> {
     let mut v = Vec::new();
     for rule in &route.rules {
@@ -454,6 +540,26 @@ fn tls_route_service_backends(route: &TlsRouteSnap) -> Vec<(String, String)> {
     v
 }
 
+fn tcp_route_service_backends(route: &TcpRouteSnap) -> Vec<(String, String)> {
+    let mut v = Vec::new();
+    for rule in &route.rules {
+        for br in &rule.backend_refs {
+            if br.kind.as_deref().unwrap_or("Service") != "Service" {
+                continue;
+            }
+            let ns = br
+                .namespace
+                .as_deref()
+                .unwrap_or(route.namespace.as_str())
+                .to_string();
+            v.push((ns, br.name.clone()));
+        }
+    }
+    v.sort();
+    v.dedup();
+    v
+}
+
 /// `ResolvedRefs` condition fields for one `TLSRoute` vs [`CompileReport`] errors.
 #[must_use]
 pub fn tls_route_resolved_refs_row(
@@ -468,6 +574,46 @@ pub fn tls_route_resolved_refs_row(
                 "False",
                 reason,
                 "compile report lists ref issues for this TLSRoute",
+            );
+        }
+        if e.kind == "Service"
+            && e.reason == "BackendNotFound"
+            && backends
+                .iter()
+                .any(|(ns, n)| ns == &e.namespace && n == &e.name)
+        {
+            return ("False", "BackendNotFound", "backend Service not found");
+        }
+        if e.kind == "Endpoints"
+            && e.reason == "NoReadyEndpoints"
+            && backends
+                .iter()
+                .any(|(ns, n)| ns == &e.namespace && n == &e.name)
+        {
+            return (
+                "False",
+                "NoReadyEndpoints",
+                "no ready endpoints for backend Service",
+            );
+        }
+    }
+    ("True", "ResolvedRefs", "refs resolved for v0 slice")
+}
+
+/// `ResolvedRefs` condition fields for one `TCPRoute` vs [`CompileReport`] errors.
+#[must_use]
+pub fn tcp_route_resolved_refs_row(
+    report: &CompileReport,
+    route: &TcpRouteSnap,
+) -> (&'static str, &'static str, &'static str) {
+    let backends = tcp_route_service_backends(route);
+    for e in &report.errors {
+        if e.kind == "TCPRoute" && e.namespace == route.namespace && e.name == route.name {
+            let reason = route_ref_error_reason(&e.reason);
+            return (
+                "False",
+                reason,
+                "compile report lists ref issues for this TCPRoute",
             );
         }
         if e.kind == "Service"
@@ -541,6 +687,7 @@ pub fn compile(policy: &FailurePolicy, input: &CompileInput) -> Result<CompileOu
         listener_route_attachment_counts: BTreeMap::new(),
         http_grpc_conflict_losers: Vec::new(),
         tls_route_conflict_losers: Vec::new(),
+        tcp_route_conflict_losers: Vec::new(),
     };
 
     let mut snapshot = if let Some(fix) = &input.fixture {
@@ -552,6 +699,7 @@ pub fn compile(policy: &FailurePolicy, input: &CompileInput) -> Result<CompileOu
         report.listener_route_attachment_counts = cluster_report.listener_route_attachment_counts;
         report.http_grpc_conflict_losers = cluster_report.http_grpc_conflict_losers;
         report.tls_route_conflict_losers = cluster_report.tls_route_conflict_losers;
+        report.tcp_route_conflict_losers = cluster_report.tcp_route_conflict_losers;
         snap
     } else {
         IrSnapshot {
@@ -774,6 +922,7 @@ mod tests {
             http_routes: vec![],
             grpc_routes: vec![],
             tls_routes: vec![],
+            tcp_routes: vec![],
             services: vec![],
             endpoint_slices: vec![],
             gateway_class: None,

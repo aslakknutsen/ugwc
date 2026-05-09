@@ -29,6 +29,7 @@ impl HttpCompileFixture {
                 section_name: "http".into(),
                 bind_port: 80,
                 tls: TlsMode::Plaintext,
+                gateway_protocol: "HTTP".into(),
                 parent_kind: "Gateway".into(),
                 parent_namespace: "default".into(),
                 parent_name: "gw".into(),

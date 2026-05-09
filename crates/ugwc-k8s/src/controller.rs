@@ -1,4 +1,4 @@
-//! Multi-watch controller graph: `Gateway`, `HTTPRoute`, `GRPCRoute`, `TLSRoute`, `ListenerSet`,
+//! Multi-watch controller graph: `Gateway`, `HTTPRoute`, `GRPCRoute`, `TLSRoute`, `TCPRoute`, `ListenerSet`,
 //! `ReferenceGrant`, `BackendTLSPolicy`, `ConfigMap` (BackendTLS CA), `EndpointSlice`, `Secret`,
 //! `GatewayClass`, `InferencePool` (fan-out via routes that reference a pool).
 
@@ -23,7 +23,7 @@ use crate::resources::{
     backend_tls_policy_spec_references_configmap, backend_tls_policy_targets_service,
     gateway_spec_references_secret, listenerset_spec_references_secret, BackendTLSPolicy,
     GRPCRoute, Gateway, GatewayClass, HTTPRoute, InferencePool, ListenerSet, ParentReferenceSpec,
-    ReferenceGrant, TLSRoute,
+    ReferenceGrant, TCPRoute, TLSRoute,
 };
 
 pub type ReconcileFuture = Pin<Box<dyn Future<Output = Result<(), String>> + Send>>;
@@ -134,6 +134,19 @@ async fn gateway_targets_for_tls_route(
     .await
 }
 
+async fn gateway_targets_for_tcp_route(
+    client: &Client,
+    route: &TCPRoute,
+) -> HashSet<(String, String)> {
+    gateway_targets_from_parent_refs(
+        client,
+        route.metadata.namespace.clone(),
+        route.name_any().as_ref(),
+        &route.spec.parent_refs,
+    )
+    .await
+}
+
 fn http_route_references_inference_pool(route: &HTTPRoute, pool_ns: &str, pool_name: &str) -> bool {
     let rns = route.metadata.namespace.as_deref().unwrap_or("");
     for rule in &route.spec.rules {
@@ -167,6 +180,22 @@ fn grpc_route_references_inference_pool(route: &GRPCRoute, pool_ns: &str, pool_n
 }
 
 fn tls_route_references_inference_pool(route: &TLSRoute, pool_ns: &str, pool_name: &str) -> bool {
+    let rns = route.metadata.namespace.as_deref().unwrap_or("");
+    for rule in &route.spec.rules {
+        for br in &rule.backend_refs {
+            if !crate::resources::is_inference_pool_backend_ref(br) {
+                continue;
+            }
+            let pns = br.namespace.as_deref().unwrap_or(rns);
+            if pns == pool_ns && br.name == pool_name {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+fn tcp_route_references_inference_pool(route: &TCPRoute, pool_ns: &str, pool_name: &str) -> bool {
     let rns = route.metadata.namespace.as_deref().unwrap_or("");
     for rule in &route.spec.rules {
         for br in &rule.backend_refs {
@@ -234,6 +263,22 @@ async fn gateway_targets_for_inference_pool(
             pool_ns = %pool_ns,
             pool_name = %pool_name,
             "list tlsroute after inferencepool change"
+        ),
+    }
+    let tcp_api: Api<TCPRoute> = Api::all(client.clone());
+    match tcp_api.list(&ListParams::default()).await {
+        Ok(list) => {
+            for route in list.items {
+                if tcp_route_references_inference_pool(&route, pool_ns, pool_name) {
+                    out.extend(gateway_targets_for_tcp_route(client, &route).await);
+                }
+            }
+        }
+        Err(e) => warn!(
+            error = %e,
+            pool_ns = %pool_ns,
+            pool_name = %pool_name,
+            "list tcproute after inferencepool change"
         ),
     }
     out
@@ -308,6 +353,29 @@ fn tls_route_references_backend_tls_policy_target(
     false
 }
 
+fn tcp_route_references_backend_tls_policy_target(
+    pol: &BackendTLSPolicy,
+    route: &TCPRoute,
+) -> bool {
+    let pol_ns = pol.metadata.namespace.as_deref().unwrap_or("");
+    for rule in &route.spec.rules {
+        for br in &rule.backend_refs {
+            if br.kind.as_deref().unwrap_or("Service") != "Service" {
+                continue;
+            }
+            let sns = br
+                .namespace
+                .as_deref()
+                .or(route.metadata.namespace.as_deref())
+                .unwrap_or("");
+            if backend_tls_policy_targets_service(&pol.spec, pol_ns, sns, &br.name) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
 async fn gateway_targets_for_backend_tls_policy(
     client: &Client,
     pol: &BackendTLSPolicy,
@@ -334,6 +402,14 @@ async fn gateway_targets_for_backend_tls_policy(
         for route in list.items {
             if tls_route_references_backend_tls_policy_target(pol, &route) {
                 out.extend(gateway_targets_for_tls_route(client, &route).await);
+            }
+        }
+    }
+    let tcp_api: Api<TCPRoute> = Api::all(client.clone());
+    if let Ok(list) = tcp_api.list(&ListParams::default()).await {
+        for route in list.items {
+            if tcp_route_references_backend_tls_policy_target(pol, &route) {
+                out.extend(gateway_targets_for_tcp_route(client, &route).await);
             }
         }
     }
@@ -467,6 +543,35 @@ pub async fn run_gateway_controller(
         info!("tlsroute watcher shutdown");
     });
 
+    let sd_tcp = shutdown.clone();
+    let c_tcp = client.clone();
+    let tx_tcp = tx.clone();
+    tokio::spawn(async move {
+        let api: Api<TCPRoute> = Api::all(c_tcp.clone());
+        let cfg = WatcherConfig::default().any_semantic();
+        let mut stream = Box::pin(watcher(api, cfg).applied_objects());
+        loop {
+            tokio::select! {
+                _ = sd_tcp.cancelled() => break,
+                ev = stream.next() => {
+                    match ev {
+                        Some(Ok(route)) => {
+                            let targets = gateway_targets_for_tcp_route(&c_tcp, &route).await;
+                            for (pns, pname) in targets {
+                                if tx_tcp.send((pns, pname)).await.is_err() {
+                                    return;
+                                }
+                            }
+                        }
+                        Some(Err(e)) => warn!(error = %e, "tcproute watch stream"),
+                        None => break,
+                    }
+                }
+            }
+        }
+        info!("tcproute watcher shutdown");
+    });
+
     let sd_ipool = shutdown.clone();
     let c_ipool = client.clone();
     let tx_ipool = tx.clone();
@@ -596,6 +701,25 @@ pub async fn run_gateway_controller(
                                         "list tlsroute after referencegrant change (fallback)"
                                     ),
                                 }
+                                let tcp_api: Api<TCPRoute> = Api::all(c_rg.clone());
+                                match tcp_api.list(&ListParams::default()).await {
+                                    Ok(list) => {
+                                        for route in list.items {
+                                            let targets = gateway_targets_for_tcp_route(
+                                                &c_rg,
+                                                &route,
+                                            )
+                                            .await;
+                                            for t in targets {
+                                                keys.insert(t);
+                                            }
+                                        }
+                                    }
+                                    Err(e) => warn!(
+                                        error = %e,
+                                        "list tcproute after referencegrant change (fallback)"
+                                    ),
+                                }
                             } else {
                                 for ns in route_ns_list {
                                     let hr_api: Api<HTTPRoute> =
@@ -653,6 +777,25 @@ pub async fn run_gateway_controller(
                                             error = %e,
                                             route_ns = %ns,
                                             "list tlsroute after referencegrant change"
+                                        ),
+                                    }
+                                    let tcp_api: Api<TCPRoute> =
+                                        Api::namespaced(c_rg.clone(), &ns);
+                                    match tcp_api.list(&ListParams::default()).await {
+                                        Ok(list) => {
+                                            for route in list.items {
+                                                let targets =
+                                                    gateway_targets_for_tcp_route(&c_rg, &route)
+                                                        .await;
+                                                for t in targets {
+                                                    keys.insert(t);
+                                                }
+                                            }
+                                        }
+                                        Err(e) => warn!(
+                                            error = %e,
+                                            route_ns = %ns,
+                                            "list tcproute after referencegrant change"
                                         ),
                                     }
                                 }

@@ -341,6 +341,27 @@ pub struct TlsRouteSnap {
     pub rules: Vec<TlsRouteRuleSnap>,
 }
 
+/// One `TCPRoute` rule (backend refs only).
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+pub struct TcpRouteRuleSnap {
+    #[serde(rename = "backendRefs", default)]
+    pub backend_refs: Vec<HttpBackendRefSnap>,
+}
+
+/// One `TCPRoute` document relevant to compilation.
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+pub struct TcpRouteSnap {
+    pub namespace: String,
+    pub name: String,
+    pub generation: i64,
+    #[serde(rename = "creationTimestamp", default)]
+    pub creation_timestamp_rfc3339: Option<String>,
+    #[serde(rename = "parentRefs", default)]
+    pub parent_refs: Vec<ParentRefSnap>,
+    #[serde(default)]
+    pub rules: Vec<TcpRouteRuleSnap>,
+}
+
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
 pub struct ServicePortSnap {
     pub name: String,
@@ -544,6 +565,8 @@ pub struct ClusterSnapshot {
     pub grpc_routes: Vec<GrpcRouteSnap>,
     #[serde(rename = "tlsRoutes", default)]
     pub tls_routes: Vec<TlsRouteSnap>,
+    #[serde(rename = "tcpRoutes", default)]
+    pub tcp_routes: Vec<TcpRouteSnap>,
     #[serde(default)]
     pub services: Vec<ServiceSnap>,
     #[serde(rename = "endpointSlices", default)]
@@ -599,6 +622,20 @@ impl ClusterSnapshot {
             }
         }
         for r in &self.tls_routes {
+            for rule in &r.rules {
+                for br in &rule.backend_refs {
+                    if br.is_inference_pool() {
+                        let pns = br
+                            .namespace
+                            .as_deref()
+                            .unwrap_or(r.namespace.as_str())
+                            .to_string();
+                        out.push((pns, br.name.clone()));
+                    }
+                }
+            }
+        }
+        for r in &self.tcp_routes {
             for rule in &r.rules {
                 for br in &rule.backend_refs {
                     if br.is_inference_pool() {
