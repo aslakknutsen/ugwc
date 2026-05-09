@@ -183,6 +183,8 @@ message Route {
   RequestHeaderModifier response_header_modifier = 9;
   // True when this rule came from a GRPCRoute (vs HTTPRoute).
   bool grpc_route = 10;
+  // True when this rule came from a TLSRoute (SNI-based routing on TLS listeners).
+  bool tls_route = 11;
 }
 
 // Resource is the top-level xDS resource served to a gwxds-capable proxy.

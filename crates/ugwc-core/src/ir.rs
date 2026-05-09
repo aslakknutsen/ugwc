@@ -5,7 +5,7 @@ use std::collections::BTreeMap;
 use uuid::Uuid;
 
 /// Schema version embedded on every snapshot (bump when wire/IR changes).
-pub const IR_VERSION: u32 = 4;
+pub const IR_VERSION: u32 = 5;
 
 /// Per-dataplane scope identity for sharded xDS versions (see module docs).
 #[derive(Clone, Debug, Eq, Hash, PartialEq, Ord, PartialOrd)]
@@ -45,6 +45,8 @@ pub enum TlsMode {
     Plaintext,
     /// Terminated TLS at the gateway (certs live in cluster refs, not in IR v0).
     Terminate,
+    /// TLS passthrough (SNI routing; opaque TLS to backends). Used with `protocol: TLS` listeners.
+    Passthrough,
 }
 
 /// Single listener row after Gateway + ListenerSet merge.
@@ -83,12 +85,14 @@ pub struct ListenerAttachmentIr {
     pub port: u16,
 }
 
-/// Route protocol family (Gateway API HTTPRoute vs GRPCRoute).
+/// Route protocol family (Gateway API HTTPRoute vs GRPCRoute vs TLSRoute).
 #[derive(Clone, Debug, Eq, PartialEq, Default, serde::Serialize, serde::Deserialize)]
 pub enum RouteFamily {
     #[default]
     Http,
     Grpc,
+    /// TLS/SNI routing (`TLSRoute` on `protocol: TLS` listeners).
+    Tls,
 }
 
 /// One HTTP match clause (Core: path prefix or exact + header exact matches).

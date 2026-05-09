@@ -4,7 +4,7 @@ use std::collections::{BTreeMap, HashSet};
 
 use crate::snapshot::{
     AllowedRoutesSnap, ClusterSnapshot, EffectiveListenerSnap, GrpcRouteSnap, HttpRouteSnap,
-    ListenerParentSnap, ParentRefSnap, ReferenceGrantSnap,
+    ListenerParentSnap, ParentRefSnap, ReferenceGrantSnap, TlsRouteSnap,
 };
 
 pub(crate) fn gateway_api_group(g: &Option<String>) -> bool {
@@ -150,8 +150,9 @@ pub fn reference_grant_permits_gateway_secret_ref(
 
 /// Whether `route_namespace` may attach to this listener per `allowedRoutes`.
 ///
-/// `route_kind` is `HTTPRoute` or `GRPCRoute`. When `allowedRoutes.kinds` is empty and the protocol
-/// is HTTP-like, both route kinds are permitted (ugwc implements GRPCRoute on HTTP/HTTPS listeners).
+/// `route_kind` is `HTTPRoute`, `GRPCRoute`, or `TLSRoute`. When `allowedRoutes.kinds` is empty and the protocol
+/// is HTTP-like, both HTTP and GRPC route kinds are permitted (ugwc implements GRPCRoute on HTTP/HTTPS listeners).
+/// When the protocol is TLS, only `TLSRoute` is permitted by default.
 #[must_use]
 pub fn listener_accepts_route_kind(
     route_kind: &str,
@@ -163,6 +164,7 @@ pub fn listener_accepts_route_kind(
 ) -> bool {
     let proto_u = protocol.trim().to_ascii_uppercase();
     let http_like = proto_u == "HTTP" || proto_u == "HTTPS";
+    let tls_like = proto_u == "TLS";
 
     let ns_from = allowed
         .and_then(|a| a.namespaces.as_ref())
@@ -198,7 +200,13 @@ pub fn listener_accepts_route_kind(
 
     let kinds = allowed.map(|a| &a.kinds[..]).unwrap_or(&[]);
     if kinds.is_empty() {
-        return http_like && matches!(route_kind, "HTTPRoute" | "GRPCRoute");
+        if http_like {
+            return matches!(route_kind, "HTTPRoute" | "GRPCRoute");
+        }
+        if tls_like {
+            return route_kind == "TLSRoute";
+        }
+        return false;
     }
     kinds.iter().any(|k| {
         let g = k.group.as_deref().unwrap_or("gateway.networking.k8s.io");
@@ -282,6 +290,11 @@ pub fn route_listener_hostname_ok(route: &HttpRouteSnap, eff: &EffectiveListener
 
 #[must_use]
 pub fn grpc_route_listener_hostname_ok(route: &GrpcRouteSnap, eff: &EffectiveListenerSnap) -> bool {
+    intersect_route_listener_hosts(&route.hostnames, &eff.hostname).is_some()
+}
+
+#[must_use]
+pub fn tls_route_listener_hostname_ok(route: &TlsRouteSnap, eff: &EffectiveListenerSnap) -> bool {
     intersect_route_listener_hosts(&route.hostnames, &eff.hostname).is_some()
 }
 
@@ -411,6 +424,15 @@ pub(crate) fn grpc_attachment_keys_for_parent_ref(
     attachment_keys_for_parent_ref_ns(&route.namespace, "GRPCRoute", p, snapshot, attached_ls)
 }
 
+pub(crate) fn tls_attachment_keys_for_parent_ref(
+    route: &TlsRouteSnap,
+    p: &ParentRefSnap,
+    snapshot: &ClusterSnapshot,
+    attached_ls: &HashSet<(String, String)>,
+) -> Vec<crate::ir::ListenerAttachmentIr> {
+    attachment_keys_for_parent_ref_ns(&route.namespace, "TLSRoute", p, snapshot, attached_ls)
+}
+
 pub(crate) fn route_attachment_keys(
     route: &HttpRouteSnap,
     snapshot: &ClusterSnapshot,
@@ -438,6 +460,25 @@ pub(crate) fn grpc_route_attachment_keys(
     let mut keys: Vec<crate::ir::ListenerAttachmentIr> = Vec::new();
     for p in &route.parent_refs {
         keys.extend(grpc_attachment_keys_for_parent_ref(
+            route,
+            p,
+            snapshot,
+            attached_ls,
+        ));
+    }
+    keys.sort();
+    keys.dedup();
+    keys
+}
+
+pub(crate) fn tls_route_attachment_keys(
+    route: &TlsRouteSnap,
+    snapshot: &ClusterSnapshot,
+    attached_ls: &HashSet<(String, String)>,
+) -> Vec<crate::ir::ListenerAttachmentIr> {
+    let mut keys: Vec<crate::ir::ListenerAttachmentIr> = Vec::new();
+    for p in &route.parent_refs {
+        keys.extend(tls_attachment_keys_for_parent_ref(
             route,
             p,
             snapshot,
@@ -495,6 +536,32 @@ pub fn grpc_route_accepted_for_parent_ref(
             continue;
         }
         if !grpc_route_listener_hostname_ok(route, eff) {
+            continue;
+        }
+        return true;
+    }
+    false
+}
+
+#[must_use]
+pub fn tls_route_accepted_for_parent_ref(
+    route: &TlsRouteSnap,
+    parent: &ParentRefSnap,
+    snapshot: &ClusterSnapshot,
+    attached_ls: &HashSet<(String, String)>,
+) -> bool {
+    let keys = tls_attachment_keys_for_parent_ref(route, parent, snapshot, attached_ls);
+    if keys.is_empty() {
+        return false;
+    }
+    for lk in &keys {
+        let Some(eff) = find_effective_for_key(snapshot, lk) else {
+            continue;
+        };
+        if eff.conflicted {
+            continue;
+        }
+        if !tls_route_listener_hostname_ok(route, eff) {
             continue;
         }
         return true;

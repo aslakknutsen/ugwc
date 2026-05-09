@@ -466,3 +466,34 @@ pub struct GRPCRouteStatus {
     #[serde(default)]
     pub parents: Vec<serde_json::Value>,
 }
+
+/// `TLSRoute` — SNI-based routing for `protocol: TLS` listeners (Gateway API v1, experimental CRDs).
+#[derive(CustomResource, Clone, Debug, Deserialize, Serialize)]
+#[kube(
+    group = "gateway.networking.k8s.io",
+    version = "v1",
+    kind = "TLSRoute",
+    namespaced,
+    status = "TLSRouteStatus",
+    schema = "disabled"
+)]
+pub struct TLSRouteSpec {
+    #[serde(rename = "hostnames", default)]
+    pub hostnames: Vec<String>,
+    #[serde(rename = "parentRefs", default)]
+    pub parent_refs: Vec<ParentReferenceSpec>,
+    #[serde(default)]
+    pub rules: Vec<TLSRouteRuleSpec>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+pub struct TLSRouteRuleSpec {
+    #[serde(rename = "backendRefs", default)]
+    pub backend_refs: Vec<HTTPBackendRefSpec>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+pub struct TLSRouteStatus {
+    #[serde(default)]
+    pub parents: Vec<serde_json::Value>,
+}

@@ -305,6 +305,29 @@ pub struct GrpcRouteSnap {
     pub rules: Vec<GrpcRouteRuleSnap>,
 }
 
+/// One `TLSRoute` rule (backend refs only).
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+pub struct TlsRouteRuleSnap {
+    #[serde(rename = "backendRefs", default)]
+    pub backend_refs: Vec<HttpBackendRefSnap>,
+}
+
+/// One `TLSRoute` document relevant to compilation.
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+pub struct TlsRouteSnap {
+    pub namespace: String,
+    pub name: String,
+    pub generation: i64,
+    #[serde(rename = "creationTimestamp", default)]
+    pub creation_timestamp_rfc3339: Option<String>,
+    #[serde(rename = "parentRefs", default)]
+    pub parent_refs: Vec<ParentRefSnap>,
+    #[serde(default)]
+    pub hostnames: Vec<String>,
+    #[serde(default)]
+    pub rules: Vec<TlsRouteRuleSnap>,
+}
+
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
 pub struct ServicePortSnap {
     pub name: String,
@@ -444,6 +467,8 @@ pub struct ClusterSnapshot {
     pub http_routes: Vec<HttpRouteSnap>,
     #[serde(rename = "grpcRoutes", default)]
     pub grpc_routes: Vec<GrpcRouteSnap>,
+    #[serde(rename = "tlsRoutes", default)]
+    pub tls_routes: Vec<TlsRouteSnap>,
     #[serde(default)]
     pub services: Vec<ServiceSnap>,
     #[serde(rename = "endpointSlices", default)]

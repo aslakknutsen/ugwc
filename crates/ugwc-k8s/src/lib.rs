@@ -18,8 +18,10 @@ pub use provision::{
 pub use status::{
     apply_gateway_class_accepted_stub, apply_gateway_reconciled_status,
     apply_grpc_route_merged_parent_status, apply_http_route_merged_parent_status,
-    apply_listenerset_reconciled_status, patch_gateway_programmed_false,
+    apply_listenerset_reconciled_status, apply_tls_route_merged_parent_status,
+    patch_gateway_programmed_false,
     GrpcRouteMergedParentStatusArgs, HttpRouteMergedParentStatusArgs,
+    TlsRouteMergedParentStatusArgs,
 };
 
 /// Stub symbol retained for crate-graph smoke tests.

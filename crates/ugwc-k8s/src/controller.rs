@@ -1,4 +1,4 @@
-//! Multi-watch controller graph: `Gateway`, `HTTPRoute`, `GRPCRoute`, `EndpointSlice` → reconcile key.
+//! Multi-watch controller graph: `Gateway`, `HTTPRoute`, `GRPCRoute`, `TLSRoute`, `EndpointSlice` → reconcile key.
 
 use std::future::Future;
 use std::pin::Pin;
@@ -19,7 +19,7 @@ use tracing::{info, instrument, warn};
 
 use crate::resources::{
     gateway_spec_references_secret, listenerset_spec_references_secret, Gateway, GatewayClass,
-    GRPCRoute, HTTPRoute, ListenerSet, ParentReferenceSpec, ReferenceGrant,
+    GRPCRoute, HTTPRoute, ListenerSet, ParentReferenceSpec, ReferenceGrant, TLSRoute,
 };
 
 pub type ReconcileFuture = Pin<Box<dyn Future<Output = Result<(), String>> + Send>>;
@@ -114,7 +114,20 @@ async fn gateway_targets_for_grpc_route(
     .await
 }
 
-/// Observe `Gateway`, `HTTPRoute`, `GRPCRoute`, `ListenerSet`, `ReferenceGrant`, `EndpointSlice`, and `GatewayClass` (owned classes) cluster-wide until cancelled.
+async fn gateway_targets_for_tls_route(
+    client: &Client,
+    route: &TLSRoute,
+) -> HashSet<(String, String)> {
+    gateway_targets_from_parent_refs(
+        client,
+        route.metadata.namespace.clone(),
+        route.name_any().as_ref(),
+        &route.spec.parent_refs,
+    )
+    .await
+}
+
+/// Observe `Gateway`, `HTTPRoute`, `GRPCRoute`, `TLSRoute`, `ListenerSet`, `ReferenceGrant`, `EndpointSlice`, and `GatewayClass` (owned classes) cluster-wide until cancelled.
 #[instrument(skip(client, shutdown, reconcile))]
 pub async fn run_gateway_controller(
     client: Client,
@@ -211,6 +224,35 @@ pub async fn run_gateway_controller(
         info!("grpcroute watcher shutdown");
     });
 
+    let sd_tr = shutdown.clone();
+    let c_tr = client.clone();
+    let tx_tr = tx.clone();
+    tokio::spawn(async move {
+        let api: Api<TLSRoute> = Api::all(c_tr.clone());
+        let cfg = WatcherConfig::default().any_semantic();
+        let mut stream = Box::pin(watcher(api, cfg).applied_objects());
+        loop {
+            tokio::select! {
+                _ = sd_tr.cancelled() => break,
+                ev = stream.next() => {
+                    match ev {
+                        Some(Ok(route)) => {
+                            let targets = gateway_targets_for_tls_route(&c_tr, &route).await;
+                            for (pns, pname) in targets {
+                                if tx_tr.send((pns, pname)).await.is_err() {
+                                    return;
+                                }
+                            }
+                        }
+                        Some(Err(e)) => warn!(error = %e, "tlsroute watch stream"),
+                        None => break,
+                    }
+                }
+            }
+        }
+        info!("tlsroute watcher shutdown");
+    });
+
     let sd_rg = shutdown.clone();
     let c_rg = client.clone();
     let tx_rg = tx.clone();
@@ -252,6 +294,21 @@ pub async fn run_gateway_controller(
                                     }
                                 }
                                 Err(e) => warn!(error = %e, "list grpcroute after referencegrant change"),
+                            }
+                            let tls_api: Api<TLSRoute> = Api::all(c_rg.clone());
+                            match tls_api.list(&ListParams::default()).await {
+                                Ok(list) => {
+                                    for route in list.items {
+                                        let targets =
+                                            gateway_targets_for_tls_route(&c_rg, &route).await;
+                                        for (pns, pname) in targets {
+                                            if tx_rg.send((pns, pname)).await.is_err() {
+                                                return;
+                                            }
+                                        }
+                                    }
+                                }
+                                Err(e) => warn!(error = %e, "list tlsroute after referencegrant change"),
                             }
                         }
                         Some(Err(e)) => warn!(error = %e, "referencegrant watch stream"),

@@ -5,7 +5,7 @@ use std::sync::Arc;
 use k8s_openapi::api::core::v1::Service;
 use k8s_openapi::api::discovery::v1::EndpointSlice;
 
-use crate::resources::{Gateway as GwcGateway, GatewayClass, GRPCRoute, HTTPRoute};
+use crate::resources::{Gateway as GwcGateway, GatewayClass, GRPCRoute, HTTPRoute, TLSRoute};
 
 /// Namespace/name pair used as a controller queue key.
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
@@ -77,6 +77,25 @@ pub fn mapped_gateway_key(
         }
         return None;
     }
+    if let Some(r) = obj.downcast_ref::<TLSRoute>() {
+        for p in &r.spec.parent_refs {
+            let g = p.group.as_deref().unwrap_or("gateway.networking.k8s.io");
+            let k = p.kind.as_deref().unwrap_or("Gateway");
+            if g != "gateway.networking.k8s.io" || k != "Gateway" {
+                continue;
+            }
+            let ns = p
+                .namespace
+                .clone()
+                .or(r.metadata.namespace.clone())
+                .unwrap_or_default();
+            return Some(GatewayKey {
+                namespace: ns,
+                name: p.name.clone(),
+            });
+        }
+        return None;
+    }
     if let Some(_s) = obj.downcast_ref::<Service>() {
         return None;
     }
@@ -89,7 +108,7 @@ pub fn mapped_gateway_key(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::resources::{GRPCRoute, HTTPRoute};
+    use crate::resources::{GRPCRoute, HTTPRoute, TLSRoute};
     use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
 
     #[test]
@@ -160,6 +179,38 @@ mod tests {
                 ..Default::default()
             },
             spec: crate::resources::GRPCRouteSpec {
+                hostnames: vec![],
+                parent_refs: vec![crate::resources::ParentReferenceSpec {
+                    group: Some("gateway.networking.k8s.io".into()),
+                    kind: Some("Gateway".into()),
+                    namespace: None,
+                    name: "gw".into(),
+                    section_name: None,
+                    port: None,
+                }],
+                rules: vec![],
+            },
+            status: Default::default(),
+        };
+        let key = mapped_gateway_key(Arc::new(r), WatchEventCause::SpecChange);
+        assert_eq!(
+            key,
+            Some(GatewayKey {
+                namespace: "ns1".into(),
+                name: "gw".into(),
+            })
+        );
+    }
+
+    #[test]
+    fn tlsroute_maps_to_gateway_parent() {
+        let r = TLSRoute {
+            metadata: ObjectMeta {
+                namespace: Some("ns1".into()),
+                name: Some("tr".into()),
+                ..Default::default()
+            },
+            spec: crate::resources::TLSRouteSpec {
                 hostnames: vec![],
                 parent_refs: vec![crate::resources::ParentReferenceSpec {
                     group: Some("gateway.networking.k8s.io".into()),

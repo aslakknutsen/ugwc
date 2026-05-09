@@ -16,7 +16,7 @@ use ugwc_core::snapshot::{
     EffectiveListenerSnap, EndpointPortSnap, EndpointSliceSnap, EndpointSnap, GatewayAddressSnap,
     GatewayClassSnap, GatewayInfrastructureSnap, GatewayListenerSnap, GatewayListenerTlsSnap,
     GrpcHeaderMatchSnap, GrpcMethodMatchSnap, GrpcRouteFilterSnap, GrpcRouteMatchSnap,
-    GrpcRouteRuleSnap, GrpcRouteSnap,
+    GrpcRouteRuleSnap, GrpcRouteSnap, TlsRouteRuleSnap, TlsRouteSnap,
     HttpBackendRefSnap, HttpHeaderFilterSnap, HttpHeaderMatchSnap, HttpHeaderNameValueSnap,
     HttpPathMatchSnap, HttpPathModifierSnap, HttpRequestMatchSnap, HttpRequestRedirectFilterSnap,
     HttpRouteFilterSnap, HttpRouteRuleSnap, HttpRouteSnap, ListenerNamespacesSnap, ListenerSetSnap,
@@ -26,6 +26,7 @@ use ugwc_core::snapshot::{
 
 use crate::resources::{
     Gateway, GatewayClass, GRPCRoute, HTTPRoute, ListenerSet, ParentReferenceSpec, ReferenceGrant,
+    TLSRoute,
 };
 
 #[derive(Debug, Error)]
@@ -438,6 +439,21 @@ fn grpc_route_relevant_to_gateway(
     )
 }
 
+fn tls_route_relevant_to_gateway(
+    route: &TLSRoute,
+    gw_ns: &str,
+    gw_name: &str,
+    attached_ls: &HashSet<(String, String)>,
+) -> bool {
+    route_relevant_to_gateway_refs(
+        &route.spec.parent_refs,
+        route.metadata.namespace.as_deref(),
+        gw_ns,
+        gw_name,
+        attached_ls,
+    )
+}
+
 fn http_route_to_snap(route: &HTTPRoute) -> HttpRouteSnap {
     let gen = route.metadata.generation.unwrap_or(0);
     let creation_timestamp_rfc3339 = route
@@ -557,6 +573,45 @@ fn grpc_route_to_snap(route: &GRPCRoute) -> GrpcRouteSnap {
     }
 }
 
+fn tls_route_to_snap(route: &TLSRoute) -> TlsRouteSnap {
+    let gen = route.metadata.generation.unwrap_or(0);
+    let creation_timestamp_rfc3339 = route
+        .metadata
+        .creation_timestamp
+        .as_ref()
+        .map(|t| t.0.to_rfc3339());
+    let rules: Vec<TlsRouteRuleSnap> = route
+        .spec
+        .rules
+        .iter()
+        .map(|r| TlsRouteRuleSnap {
+            backend_refs: r
+                .backend_refs
+                .iter()
+                .map(|b| HttpBackendRefSnap {
+                    group: b.group.clone(),
+                    kind: b.kind.clone(),
+                    namespace: b.namespace.clone(),
+                    name: b.name.clone(),
+                    port: b.port,
+                    port_name: b.port_name.clone(),
+                    weight: b.weight,
+                })
+                .collect(),
+        })
+        .collect();
+
+    TlsRouteSnap {
+        namespace: route.metadata.namespace.clone().unwrap_or_default(),
+        name: route.metadata.name.clone().unwrap_or_default(),
+        generation: gen,
+        creation_timestamp_rfc3339,
+        parent_refs: route.spec.parent_refs.iter().map(parent_to_snap).collect(),
+        hostnames: route.spec.hostnames.clone(),
+        rules,
+    }
+}
+
 /// Build a [`ClusterSnapshot`] for `gateway_ns`/`gateway_name`.
 pub async fn load_cluster_snapshot(
     client: &Client,
@@ -611,6 +666,7 @@ pub async fn load_cluster_snapshot(
     let routes_list = route_api.list(&ListParams::default()).await?;
     let mut http_routes: Vec<HttpRouteSnap> = Vec::new();
     let mut grpc_routes: Vec<GrpcRouteSnap> = Vec::new();
+    let mut tls_routes: Vec<TlsRouteSnap> = Vec::new();
     let mut needed_services: Vec<(String, String)> = Vec::new();
     let mut ns_for_labels: HashSet<String> = HashSet::new();
     ns_for_labels.insert(gateway_ns.to_string());
@@ -673,6 +729,43 @@ pub async fn load_cluster_snapshot(
             warn!(
                 error = %e,
                 "GRPCRoute list failed — clusters without GRPCRoute CRD skip gRPC routes"
+            );
+        }
+    }
+
+    let tls_api: Api<TLSRoute> = Api::all(client.clone());
+    match tls_api.list(&ListParams::default()).await {
+        Ok(tls_list) => {
+            for item in tls_list.items {
+                if !tls_route_relevant_to_gateway(&item, gateway_ns, gateway_name, &attached_ls_keys)
+                {
+                    continue;
+                }
+                let rns = item.metadata.namespace.clone().unwrap_or_default();
+                ns_for_labels.insert(rns.clone());
+
+                let snap = tls_route_to_snap(&item);
+                for rule in &item.spec.rules {
+                    for br in &rule.backend_refs {
+                        if br.kind.as_deref().unwrap_or("Service") != "Service" {
+                            continue;
+                        }
+                        let sns = br
+                            .namespace
+                            .clone()
+                            .or(item.metadata.namespace.clone())
+                            .unwrap_or_default();
+                        ns_for_labels.insert(sns.clone());
+                        needed_services.push((sns, br.name.clone()));
+                    }
+                }
+                tls_routes.push(snap);
+            }
+        }
+        Err(e) => {
+            warn!(
+                error = %e,
+                "TLSRoute list failed — clusters without TLSRoute CRD skip TLS routes"
             );
         }
     }
@@ -829,6 +922,7 @@ pub async fn load_cluster_snapshot(
         allowed_listeners,
         http_routes,
         grpc_routes,
+        tls_routes,
         services,
         endpoint_slices,
         gateway_class,
