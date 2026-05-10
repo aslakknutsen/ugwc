@@ -77,8 +77,8 @@ fn backend_tls_proto(t: &ugwc_core::ir::BackendTlsIr) -> BackendTls {
         ca_cert: t.ca_cert_pem.clone(),
         hostname: t.hostname.clone(),
         sans: t.sans.clone(),
-        client_cert: vec![],
-        client_key: vec![],
+        client_cert: t.client_cert_pem.clone(),
+        client_key: t.client_key_pem.clone(),
         invalid: t.invalid,
     }
 }
@@ -788,6 +788,8 @@ mod tests {
                             hostname: "svc.internal".into(),
                             sans: vec!["alt.internal".into()],
                             trust_system_ca: false,
+                            client_cert_pem: vec![],
+                            client_key_pem: vec![],
                             invalid: false,
                         }),
                         inference: None,

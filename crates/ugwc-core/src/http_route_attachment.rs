@@ -4,7 +4,8 @@ use std::collections::{BTreeMap, HashSet};
 
 use crate::snapshot::{
     AllowedRoutesSnap, ClusterSnapshot, EffectiveListenerSnap, GrpcRouteSnap, HttpRouteSnap,
-    ListenerParentSnap, ParentRefSnap, ReferenceGrantSnap, TcpRouteSnap, TlsRouteSnap, UdpRouteSnap,
+    ListenerParentSnap, ParentRefSnap, ReferenceGrantSnap, TcpRouteSnap, TlsRouteSnap,
+    UdpRouteSnap,
 };
 
 pub(crate) fn gateway_api_group(g: &Option<String>) -> bool {
@@ -341,6 +342,55 @@ pub fn reference_grant_permits_gateway_secret_ref(
                 None => return true,
                 Some(n) if n.is_empty() => return true,
                 Some(n) if n == secret_name => return true,
+                _ => {}
+            }
+        }
+    }
+    false
+}
+
+/// Cross-namespace `ConfigMap` / `Secret` refs from a `BackendTLSPolicy` require a [`ReferenceGrant`] in the resource namespace.
+#[must_use]
+pub fn reference_grant_permits_backend_tls_policy_resource_ref(
+    grants: &[ReferenceGrantSnap],
+    policy_namespace: &str,
+    resource_namespace: &str,
+    resource_kind: &str,
+    resource_name: &str,
+) -> bool {
+    if policy_namespace == resource_namespace {
+        return true;
+    }
+    const GWM: &str = "gateway.networking.k8s.io";
+    const BTP: &str = "BackendTLSPolicy";
+    let rk = resource_kind.trim();
+    for g in grants {
+        if g.namespace != resource_namespace {
+            continue;
+        }
+        let mut from_ok = false;
+        for fr in &g.from {
+            let fg = fr.group.as_deref().unwrap_or(GWM);
+            if fg == GWM && fr.kind == BTP && fr.namespace == policy_namespace {
+                from_ok = true;
+                break;
+            }
+        }
+        if !from_ok {
+            continue;
+        }
+        for to in &g.to {
+            if !to.kind.eq_ignore_ascii_case(rk) {
+                continue;
+            }
+            let tg = to.group.as_deref().unwrap_or("");
+            if !tg.is_empty() {
+                continue;
+            }
+            match &to.name {
+                None => return true,
+                Some(n) if n.is_empty() => return true,
+                Some(n) if n == resource_name => return true,
                 _ => {}
             }
         }
@@ -1090,12 +1140,7 @@ mod tests {
 
         let labels = BTreeMap::new();
         assert!(listener_accepts_route_kind(
-            "TCPRoute",
-            "default",
-            "default",
-            "TCP",
-            None,
-            &labels,
+            "TCPRoute", "default", "default", "TCP", None, &labels,
         ));
         assert!(!listener_accepts_route_kind(
             "HTTPRoute",
@@ -1113,12 +1158,7 @@ mod tests {
 
         let labels = BTreeMap::new();
         assert!(listener_accepts_route_kind(
-            "UDPRoute",
-            "default",
-            "default",
-            "UDP",
-            None,
-            &labels,
+            "UDPRoute", "default", "default", "UDP", None, &labels,
         ));
         assert!(!listener_accepts_route_kind(
             "HTTPRoute",
@@ -1152,6 +1192,38 @@ mod tests {
             "other",
             "svc",
             "HTTPRoute",
+        ));
+    }
+
+    #[test]
+    fn backend_tls_grant_allows_cross_namespace_configmap() {
+        let grants = vec![ReferenceGrantSnap {
+            namespace: "secrets".into(),
+            name: "g".into(),
+            from: vec![crate::snapshot::ReferenceGrantFromSnap {
+                group: Some("gateway.networking.k8s.io".into()),
+                kind: "BackendTLSPolicy".into(),
+                namespace: "policies".into(),
+            }],
+            to: vec![crate::snapshot::ReferenceGrantToSnap {
+                group: None,
+                kind: "ConfigMap".into(),
+                name: Some("ca-bundle".into()),
+            }],
+        }];
+        assert!(reference_grant_permits_backend_tls_policy_resource_ref(
+            &grants,
+            "policies",
+            "secrets",
+            "ConfigMap",
+            "ca-bundle",
+        ));
+        assert!(!reference_grant_permits_backend_tls_policy_resource_ref(
+            &grants,
+            "other",
+            "secrets",
+            "ConfigMap",
+            "ca-bundle",
         ));
     }
 }

@@ -12,13 +12,13 @@ Primary crates: `crates/ugwc-k8s` (watches, loader, status), `crates/ugwc-core` 
 
 | Layer | Implemented |
 | ----- | ----------- |
-| **Watches** | `Gateway`, `HTTPRoute`, `GRPCRoute`, `TLSRoute`, `TCPRoute`, `UDPRoute`, `ListenerSet`, `ReferenceGrant`, `BackendTLSPolicy`, `ConfigMap` (BackendTLS CA refs), `EndpointSlice`, `Secret`, `GatewayClass`, `InferencePool` |
-| **Snapshot** | Merged listeners (`Gateway` + `ListenerSet` when `spec.allowedListeners` permits); HTTP / GRPC / TLS / TCP / UDP routes; `Service` + `InferencePool` backends; `EndpointSlice` for Services; cluster `ReferenceGrant` list; `BackendTLSPolicy` → `backend_tls_effective` (+ outcomes for status) |
-| **Compile / IR** | HTTP + GRPC + TLS + TCP + UDP routes into IR; ReferenceGrant enforcement on cross-namespace parents/backends/secrets; Backend TLS on **Service** backends; InferencePool → IR |
-| **Status** | Gateway/listeners; HTTPRoute / GRPCRoute / TLSRoute / TCPRoute / UDPRoute parents; ListenerSet; BackendTLSPolicy ancestors; InferencePool parents |
-| **xDS** | `gwxds.proto`: GRPC routes, TLS/TCP/UDP route bits, listener `protocol` / `allowed_routes`, `Backend.tls` / `Backend.inference_pool`, EPP Service host/port |
+| **Watches** | `Gateway`, `HTTPRoute`, `GRPCRoute`, `TLSRoute`, `TCPRoute`, `UDPRoute`, `ListenerSet`, `ReferenceGrant`, `BackendTLSPolicy`, `ConfigMap` + `Secret` (BackendTLS validation refs: CA bundles + client certs), `EndpointSlice`, `GatewayClass`, `InferencePool` |
+| **Snapshot** | Merged listeners (`Gateway` + `ListenerSet` when `spec.allowedListeners` permits); HTTP / GRPC / TLS / TCP / UDP routes; `Service` + `InferencePool` backends; `EndpointSlice` for Services; cluster `ReferenceGrant` list; `BackendTLSPolicy` → `backend_tls_effective` keyed by **`namespace/name:port`** (Service) and **`inferencepool/namespace/name:port`** (InferencePool target ports), plus policy outcomes (`accepted_condition_reason` / `resolved_refs_condition_reason`) for status |
+| **Compile / IR** | HTTP + GRPC + TLS + TCP + UDP routes into IR; ReferenceGrant enforcement on cross-namespace parents/backends/secrets and BackendTLS CA/Secret refs where applicable; Backend TLS on **Service** backends and **InferencePool** backends (pool key + route `backendRef.port` / single `targetPorts` default); `BackendTlsIr` includes optional client cert PEM fields |
+| **Status** | Gateway/listeners; HTTPRoute / GRPCRoute / TLSRoute / TCPRoute / UDPRoute parents; ListenerSet; BackendTLSPolicy ancestors (reasons prefer loader outcome fields); InferencePool parents |
+| **xDS** | `gwxds.proto`: GRPC routes, TLS/TCP/UDP route bits, listener `protocol` / `allowed_routes`, `Backend.tls` (CA, hostname, SANs, invalid, **client_cert / client_key** from IR) / `Backend.inference_pool`, EPP Service host/port |
 
-**Explicitly not implemented:** `InferenceObjective` (and related `inference.networking.x-k8s.io` CRDs), BackendTLS targets beyond **Service**, arbitrary HTTP/GRPC extended filters (many surfaces still return `UnsupportedValue` / reject).
+**Explicitly not implemented:** `InferenceObjective` (and related `inference.networking.x-k8s.io` CRDs), BackendTLS `targetRefs` kinds beyond **core Service** and **`InferencePool`** (same-namespace policy/target as coded), forwarding **`spec.options`** to the dataplane, arbitrary HTTP/GRPC extended filters (many surfaces still return `UnsupportedValue` / reject).
 
 **`UDPRoute`:** experimental Gateway API CRD `gateway.networking.k8s.io/v1alpha2` — same bundle requirement as TCPRoute; TCPRoute-shaped pipeline (snapshot → compile → status → `gwxds` `Protocol::UDP` / `Route.udp_route`). First rule only; UDP-vs-UDP precedence mirrors TCP; UDP+L7 same-port conflicts merged like TCP+L7.
 
@@ -39,7 +39,7 @@ Use this as the “done” ledger; keep **Remaining work** for gaps only.
 - [x] **`TLSRoute`** — watch; map + snapshot + compile + status (passthrough / SNI routing per implementation).
 - [x] **`TCPRoute`** (`gateway.networking.k8s.io/v1alpha2`) — watch; map + snapshot + compile + status + gwxds (`Protocol::TCP`, `Route.tcp_route`); requires experimental Gateway API CRDs.
 - [x] **`UDPRoute`** (`gateway.networking.k8s.io/v1alpha2`) — watch; map + snapshot + compile + status + gwxds (`Protocol::UDP`, `Route.udp_route`); requires experimental Gateway API CRDs.
-- [x] **`BackendTLSPolicy`** — cluster-wide watch; `ConfigMap` watch for CA bundles; fan-out to gateways using targeted **Service** backends only.
+- [x] **`BackendTLSPolicy`** — cluster-wide watch; `ConfigMap` / `Secret` watches list policies that reference that object (cluster-wide policy list + policy namespace for ref matching) and fan-out to gateways whose routes reference targeted **Service** or **`InferencePool`** backends (including HTTP/GRPC rule filters and nested backend filters that point at Services).
 - [x] **`ListenerSet`** — watch; merge when `Gateway.spec.allowedListeners` permits (**standard v1.5.x** shape).
 - [x] **`InferencePool`** (`inference.networking.k8s.io/v1`) — watch; fan-out via routes with pool `backendRefs`.
 
@@ -48,7 +48,7 @@ Use this as the “done” ledger; keep **Remaining work** for gaps only.
 - [x] ListenerSet merge fields (`listener_sets`, `effective_listeners`, allowedListeners snapshot).
 - [x] GRPC + TLS + TCP + UDP routes in snapshot alongside HTTP.
 - [x] ReferenceGrant list + enforcement surfaces (parents, Service/InferencePool backends, listener TLS secrets; narrowed `to.group` rules as coded).
-- [x] `backend_tls_effective` + policy outcomes for status writers.
+- [x] `backend_tls_effective` + policy outcomes for status writers (Secret + ConfigMap CA PEM loading; optional cross-namespace refs gated by `ReferenceGrant`; client identity from first client cert Secret ref).
 - [x] InferencePool spec snapshot for referenced pools.
 - [x] Service backends → EndpointSlice; InferencePool backends → no slice-derived endpoints (EPP).
 
@@ -56,15 +56,15 @@ Use this as the “done” ledger; keep **Remaining work** for gaps only.
 
 - [x] GRPC + TLS + TCP + UDP + HTTP normalization into IR (core match/filter paths; extended behavior varies).
 - [x] ReferenceGrant → compile report + route parent conditions (`RefNotPermitted`, etc.).
-- [x] Backend TLS → `BackendIr.backend_tls` / invalid CA handling.
+- [x] Backend TLS → `BackendIr.backend_tls` for Service backends and InferencePool backends (`inferencepool/…` snapshot key); invalid CA / broken refs surface as compile errors where wired.
 - [x] InferencePool → IR + `Backend.inference_pool` + cross-namespace grant checks.
 
 ### Status & xDS
 
 - [x] GRPCRoute / TLSRoute / TCPRoute / UDPRoute parent status merge patterns (with Gateway + ListenerSet parents).
 - [x] InferencePool `status.parents` (`Accepted`, `ResolvedRefs`, …).
-- [x] BackendTLSPolicy `status.ancestors` (`Accepted`, `ResolvedRefs`, `Conflicted`).
-- [x] gwxds encode for GRPC/TLS/TCP/UDP/listener allowed routes/backend TLS/inference backends.
+- [x] BackendTLSPolicy `status.ancestors` (`Accepted`, `ResolvedRefs`, `Conflicted`; reasons aligned with loader outcome snapshots where present).
+- [x] gwxds encode for GRPC/TLS/TCP/UDP/listener allowed routes/backend TLS (including client PEM fields)/inference backends.
 
 ---
 
@@ -77,7 +77,7 @@ Use this as the “done” ledger; keep **Remaining work** for gaps only.
 
 ### Backend TLS expansion
 
-- [ ] **`BackendTLSPolicy` non-Service targets** — e.g. other backend kinds Gateway API allows; snapshot resolution + compile + status fan-out rules.
+- [ ] **`BackendTLSPolicy` further non-Service targets** — kinds beyond **`InferencePool`** (loader/controller/from_cluster already handle Service + InferencePool); e.g. implementation-specific targets Gateway API may allow later (`ServiceImport`, experimental route targets, …): snapshot resolution + compile + status fan-out rules.
 
 ### HTTP / GRPC API completeness
 
@@ -121,4 +121,4 @@ Use this as the “done” ledger; keep **Remaining work** for gaps only.
 
 1. Version pin + compatibility table (unblocks support expectations).
 2. InferenceObjective after pools are validated in integration tests.
-3. BackendTLS non-Service targets if customer backends require it.
+3. BackendTLS additional target kinds if product requires more than Service + InferencePool.

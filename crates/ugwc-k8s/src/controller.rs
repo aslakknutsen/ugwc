@@ -20,7 +20,8 @@ use tokio::sync::mpsc;
 use tracing::{info, instrument, warn};
 
 use crate::resources::{
-    backend_tls_policy_spec_references_configmap, backend_tls_policy_targets_service,
+    backend_tls_policy_spec_references_configmap, backend_tls_policy_spec_references_secret,
+    backend_tls_policy_targets_inference_pool, backend_tls_policy_targets_service,
     gateway_spec_references_secret, listenerset_spec_references_secret, BackendTLSPolicy,
     GRPCRoute, Gateway, GatewayClass, HTTPRoute, InferencePool, ListenerSet, ParentReferenceSpec,
     ReferenceGrant, TCPRoute, TLSRoute, UDPRoute,
@@ -334,17 +335,16 @@ fn http_route_references_backend_tls_policy_target(
     route: &HTTPRoute,
 ) -> bool {
     let pol_ns = pol.metadata.namespace.as_deref().unwrap_or("");
+    let rns = route.metadata.namespace.as_deref().unwrap_or("");
     for rule in &route.spec.rules {
-        for br in &rule.backend_refs {
-            if br.kind.as_deref().unwrap_or("Service") != "Service" {
-                continue;
+        for (sns, sname) in crate::resources::collect_http_route_rule_service_refs(rns, rule) {
+            if backend_tls_policy_targets_service(&pol.spec, pol_ns, &sns, &sname) {
+                return true;
             }
-            let sns = br
-                .namespace
-                .as_deref()
-                .or(route.metadata.namespace.as_deref())
-                .unwrap_or("");
-            if backend_tls_policy_targets_service(&pol.spec, pol_ns, sns, &br.name) {
+        }
+        for (pns, pname) in crate::resources::collect_http_route_rule_inference_pool_refs(rns, rule)
+        {
+            if backend_tls_policy_targets_inference_pool(&pol.spec, pol_ns, &pns, &pname) {
                 return true;
             }
         }
@@ -357,17 +357,16 @@ fn grpc_route_references_backend_tls_policy_target(
     route: &GRPCRoute,
 ) -> bool {
     let pol_ns = pol.metadata.namespace.as_deref().unwrap_or("");
+    let rns = route.metadata.namespace.as_deref().unwrap_or("");
     for rule in &route.spec.rules {
-        for br in &rule.backend_refs {
-            if br.kind.as_deref().unwrap_or("Service") != "Service" {
-                continue;
+        for (sns, sname) in crate::resources::collect_grpc_route_rule_service_refs(rns, rule) {
+            if backend_tls_policy_targets_service(&pol.spec, pol_ns, &sns, &sname) {
+                return true;
             }
-            let sns = br
-                .namespace
-                .as_deref()
-                .or(route.metadata.namespace.as_deref())
-                .unwrap_or("");
-            if backend_tls_policy_targets_service(&pol.spec, pol_ns, sns, &br.name) {
+        }
+        for (pns, pname) in crate::resources::collect_grpc_route_rule_inference_pool_refs(rns, rule)
+        {
+            if backend_tls_policy_targets_inference_pool(&pol.spec, pol_ns, &pns, &pname) {
                 return true;
             }
         }
@@ -380,17 +379,19 @@ fn tls_route_references_backend_tls_policy_target(
     route: &TLSRoute,
 ) -> bool {
     let pol_ns = pol.metadata.namespace.as_deref().unwrap_or("");
+    let rns = route.metadata.namespace.as_deref().unwrap_or("");
     for rule in &route.spec.rules {
-        for br in &rule.backend_refs {
-            if br.kind.as_deref().unwrap_or("Service") != "Service" {
-                continue;
+        for (sns, sname) in
+            crate::resources::collect_backend_refs_service_refs(rns, &rule.backend_refs)
+        {
+            if backend_tls_policy_targets_service(&pol.spec, pol_ns, &sns, &sname) {
+                return true;
             }
-            let sns = br
-                .namespace
-                .as_deref()
-                .or(route.metadata.namespace.as_deref())
-                .unwrap_or("");
-            if backend_tls_policy_targets_service(&pol.spec, pol_ns, sns, &br.name) {
+        }
+        for (pns, pname) in
+            crate::resources::collect_backend_refs_inference_pool_refs(rns, &rule.backend_refs)
+        {
+            if backend_tls_policy_targets_inference_pool(&pol.spec, pol_ns, &pns, &pname) {
                 return true;
             }
         }
@@ -403,17 +404,19 @@ fn tcp_route_references_backend_tls_policy_target(
     route: &TCPRoute,
 ) -> bool {
     let pol_ns = pol.metadata.namespace.as_deref().unwrap_or("");
+    let rns = route.metadata.namespace.as_deref().unwrap_or("");
     for rule in &route.spec.rules {
-        for br in &rule.backend_refs {
-            if br.kind.as_deref().unwrap_or("Service") != "Service" {
-                continue;
+        for (sns, sname) in
+            crate::resources::collect_backend_refs_service_refs(rns, &rule.backend_refs)
+        {
+            if backend_tls_policy_targets_service(&pol.spec, pol_ns, &sns, &sname) {
+                return true;
             }
-            let sns = br
-                .namespace
-                .as_deref()
-                .or(route.metadata.namespace.as_deref())
-                .unwrap_or("");
-            if backend_tls_policy_targets_service(&pol.spec, pol_ns, sns, &br.name) {
+        }
+        for (pns, pname) in
+            crate::resources::collect_backend_refs_inference_pool_refs(rns, &rule.backend_refs)
+        {
+            if backend_tls_policy_targets_inference_pool(&pol.spec, pol_ns, &pns, &pname) {
                 return true;
             }
         }
@@ -426,17 +429,19 @@ fn udp_route_references_backend_tls_policy_target(
     route: &UDPRoute,
 ) -> bool {
     let pol_ns = pol.metadata.namespace.as_deref().unwrap_or("");
+    let rns = route.metadata.namespace.as_deref().unwrap_or("");
     for rule in &route.spec.rules {
-        for br in &rule.backend_refs {
-            if br.kind.as_deref().unwrap_or("Service") != "Service" {
-                continue;
+        for (sns, sname) in
+            crate::resources::collect_backend_refs_service_refs(rns, &rule.backend_refs)
+        {
+            if backend_tls_policy_targets_service(&pol.spec, pol_ns, &sns, &sname) {
+                return true;
             }
-            let sns = br
-                .namespace
-                .as_deref()
-                .or(route.metadata.namespace.as_deref())
-                .unwrap_or("");
-            if backend_tls_policy_targets_service(&pol.spec, pol_ns, sns, &br.name) {
+        }
+        for (pns, pname) in
+            crate::resources::collect_backend_refs_inference_pool_refs(rns, &rule.backend_refs)
+        {
+            if backend_tls_policy_targets_inference_pool(&pol.spec, pol_ns, &pns, &pname) {
                 return true;
             }
         }
@@ -1143,6 +1148,31 @@ pub async fn run_gateway_controller(
                                 }
                                 Err(e) => warn!(error = %e, "list listenersets after secret change"),
                             }
+                            let pol_api: Api<BackendTLSPolicy> = Api::all(c_sec.clone());
+                            match pol_api.list(&ListParams::default()).await {
+                                Ok(pol_list) => {
+                                    let mut gateways = HashSet::new();
+                                    for pol in pol_list.items {
+                                        let pol_ns = pol.metadata.namespace.as_deref().unwrap_or("");
+                                        if backend_tls_policy_spec_references_secret(
+                                            &pol.spec,
+                                            pol_ns,
+                                            &sns,
+                                            &sn,
+                                        ) {
+                                            gateways.extend(
+                                                gateway_targets_for_backend_tls_policy(&c_sec, &pol).await,
+                                            );
+                                        }
+                                    }
+                                    for (pns, pname) in gateways {
+                                        if tx_sec.send((pns, pname)).await.is_err() {
+                                            return;
+                                        }
+                                    }
+                                }
+                                Err(e) => warn!(error = %e, "list BackendTLSPolicy after secret change"),
+                            }
                         }
                         Some(Err(e)) => warn!(error = %e, "secret watch stream"),
                         None => break,
@@ -1197,19 +1227,20 @@ pub async fn run_gateway_controller(
                         Some(Ok(cm)) => {
                             let cm_ns = cm.namespace().unwrap_or_default();
                             let cm_name = cm.name_any();
-                            let pol_api: Api<BackendTLSPolicy> = Api::namespaced(c_cm.clone(), &cm_ns);
+                            let pol_api: Api<BackendTLSPolicy> = Api::all(c_cm.clone());
                             let policies = match pol_api.list(&ListParams::default()).await {
                                 Ok(l) => l.items,
                                 Err(e) => {
-                                    warn!(error = %e, namespace = %cm_ns, "list BackendTLSPolicy after ConfigMap change");
+                                    warn!(error = %e, "list BackendTLSPolicy after ConfigMap change");
                                     continue;
                                 }
                             };
                             let mut gateways = HashSet::new();
                             for pol in policies {
+                                let pol_ns = pol.metadata.namespace.as_deref().unwrap_or("");
                                 if !backend_tls_policy_spec_references_configmap(
                                     &pol.spec,
-                                    &cm_ns,
+                                    pol_ns,
                                     &cm_ns,
                                     &cm_name,
                                 ) {

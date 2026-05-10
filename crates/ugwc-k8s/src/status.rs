@@ -1497,13 +1497,18 @@ pub async fn apply_backend_tls_policies_for_gateway(
         let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
 
         let acc_st = if outcome.accepted { "True" } else { "False" };
-        let acc_reason = if outcome.conflicted {
-            "Conflicted"
-        } else if outcome.accepted {
-            "Accepted"
-        } else {
-            "Invalid"
-        };
+        let acc_reason = outcome
+            .accepted_condition_reason
+            .clone()
+            .unwrap_or_else(|| {
+                if outcome.conflicted {
+                    "Conflicted".into()
+                } else if outcome.accepted {
+                    "Accepted".into()
+                } else {
+                    "Invalid".into()
+                }
+            });
         let acc_msg = outcome
             .message
             .clone()
@@ -1516,12 +1521,16 @@ pub async fn apply_backend_tls_policies_for_gateway(
             "False"
         };
         let rr_reason = if outcome.resolved_refs_ok {
-            "ResolvedRefs"
+            outcome
+                .resolved_refs_condition_reason
+                .clone()
+                .unwrap_or_else(|| "ResolvedRefs".into())
         } else {
             outcome
-                .message
-                .as_deref()
-                .unwrap_or("InvalidCACertificateRef")
+                .resolved_refs_condition_reason
+                .clone()
+                .or_else(|| outcome.message.clone().filter(|m| !m.is_empty()))
+                .unwrap_or_else(|| "InvalidCACertificateRef".into())
         };
         let rr_msg: String = if outcome.resolved_refs_ok {
             "backend TLS refs resolved".into()

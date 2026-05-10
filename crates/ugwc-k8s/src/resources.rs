@@ -323,6 +323,10 @@ pub struct HTTPRouteFilterSpec {
     pub request_redirect: Option<HTTPRequestRedirectFilterSpec>,
     #[serde(rename = "requestHeaderModifier", default)]
     pub request_header_modifier: Option<HTTPHeaderFilterSpec>,
+    #[serde(rename = "requestMirror", default)]
+    pub request_mirror: Option<HTTPRequestMirrorFilterSpec>,
+    #[serde(rename = "externalAuth", default)]
+    pub external_auth: Option<HTTPExternalAuthFilterSpec>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
@@ -387,6 +391,20 @@ pub struct HTTPBackendRefSpec {
     pub port_name: Option<String>,
     #[serde(default)]
     pub weight: Option<u32>,
+    #[serde(default)]
+    pub filters: Vec<HTTPRouteFilterSpec>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+pub struct HTTPRequestMirrorFilterSpec {
+    #[serde(rename = "backendRef")]
+    pub backend_ref: Option<HTTPBackendRefSpec>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+pub struct HTTPExternalAuthFilterSpec {
+    #[serde(rename = "backendRef")]
+    pub backend_ref: Option<HTTPBackendRefSpec>,
 }
 
 /// True when `backendRef` targets an `InferencePool` (`inference.networking.k8s.io/v1`).
@@ -469,6 +487,8 @@ pub struct GRPCRouteFilterSpec {
     pub request_header_modifier: Option<HTTPHeaderFilterSpec>,
     #[serde(rename = "responseHeaderModifier", default)]
     pub response_header_modifier: Option<HTTPHeaderFilterSpec>,
+    #[serde(rename = "requestMirror", default)]
+    pub request_mirror: Option<HTTPRequestMirrorFilterSpec>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
@@ -650,6 +670,8 @@ pub struct LocalObjectReferenceSpec {
     #[serde(default)]
     pub kind: Option<String>,
     pub name: String,
+    #[serde(default)]
+    pub namespace: Option<String>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
@@ -661,6 +683,8 @@ pub struct BackendTLSPolicyValidationSpec {
     pub hostname: String,
     #[serde(rename = "subjectAltNames", default)]
     pub subject_alt_names: Vec<SubjectAltNameSpec>,
+    #[serde(rename = "clientCertificateRefs", default)]
+    pub client_certificate_refs: Vec<LocalObjectReferenceSpec>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
@@ -679,7 +703,7 @@ pub struct BackendTLSPolicyStatus {
     pub ancestors: Vec<serde_json::Value>,
 }
 
-/// True if `BackendTLSPolicy` validation references this ConfigMap (same namespace as policy).
+/// True if `BackendTLSPolicy` validation references this ConfigMap (policy ns or explicit ref namespace).
 #[must_use]
 pub fn backend_tls_policy_spec_references_configmap(
     spec: &BackendTLSPolicySpec,
@@ -687,18 +711,58 @@ pub fn backend_tls_policy_spec_references_configmap(
     cm_namespace: &str,
     cm_name: &str,
 ) -> bool {
-    if policy_namespace != cm_namespace {
-        return false;
-    }
     for ca in &spec.validation.ca_certificate_refs {
         let k = ca.kind.as_deref().unwrap_or("");
         let g = ca.group.as_deref().unwrap_or("");
         let is_cm = k.eq_ignore_ascii_case("ConfigMap") && (g.is_empty() || g == "");
-        if is_cm && ca.name == cm_name {
+        if !is_cm || ca.name != cm_name {
+            continue;
+        }
+        let ref_ns = ca.namespace.as_deref().unwrap_or(policy_namespace);
+        if ref_ns == cm_namespace {
             return true;
         }
     }
     false
+}
+
+/// True if `BackendTLS` validation references this `Secret` (CA or client certificate material).
+#[must_use]
+pub fn backend_tls_policy_spec_references_secret(
+    spec: &BackendTLSPolicySpec,
+    policy_namespace: &str,
+    secret_namespace: &str,
+    secret_name: &str,
+) -> bool {
+    for ca in &spec.validation.ca_certificate_refs {
+        if local_object_secret_ref_matches(ca, policy_namespace, secret_namespace, secret_name) {
+            return true;
+        }
+    }
+    for cc in &spec.validation.client_certificate_refs {
+        if local_object_secret_ref_matches(cc, policy_namespace, secret_namespace, secret_name) {
+            return true;
+        }
+    }
+    false
+}
+
+fn local_object_secret_ref_matches(
+    r: &LocalObjectReferenceSpec,
+    policy_namespace: &str,
+    secret_namespace: &str,
+    secret_name: &str,
+) -> bool {
+    let k = r.kind.as_deref().unwrap_or("");
+    let g = r.group.as_deref().unwrap_or("");
+    if !k.eq_ignore_ascii_case("Secret") || !(g.is_empty() || g == "") {
+        return false;
+    }
+    if r.name != secret_name {
+        return false;
+    }
+    let ref_ns = r.namespace.as_deref().unwrap_or(policy_namespace);
+    ref_ns == secret_namespace
 }
 
 /// True if any target ref selects `Service` `svc_name` in `svc_namespace`.
@@ -721,4 +785,188 @@ pub fn backend_tls_policy_targets_service(
         }
     }
     false
+}
+
+/// True if any target ref selects `InferencePool` `pool_name` in `pool_namespace` (policy must live in that namespace).
+#[must_use]
+pub fn backend_tls_policy_targets_inference_pool(
+    spec: &BackendTLSPolicySpec,
+    policy_namespace: &str,
+    pool_namespace: &str,
+    pool_name: &str,
+) -> bool {
+    if policy_namespace != pool_namespace {
+        return false;
+    }
+    for t in &spec.target_refs {
+        let k = t.kind.as_deref().unwrap_or("");
+        let g = t.group.as_deref().unwrap_or("");
+        let is_pool = k.eq_ignore_ascii_case("InferencePool")
+            && (g.is_empty() || g.eq_ignore_ascii_case("inference.networking.k8s.io"));
+        if is_pool && t.name == pool_name {
+            return true;
+        }
+    }
+    false
+}
+
+fn push_core_service_backend_ref(
+    route_ns: &str,
+    br: &HTTPBackendRefSpec,
+    out: &mut Vec<(String, String)>,
+) {
+    if br.kind.as_deref().unwrap_or("Service") != "Service" {
+        return;
+    }
+    let g = br.group.as_deref().unwrap_or("");
+    if !g.is_empty() {
+        return;
+    }
+    let sns = br.namespace.as_deref().unwrap_or(route_ns).to_string();
+    out.push((sns, br.name.clone()));
+}
+
+fn collect_http_filter_service_refs(
+    route_ns: &str,
+    f: &HTTPRouteFilterSpec,
+    out: &mut Vec<(String, String)>,
+) {
+    match f.filter_type.as_str() {
+        "RequestMirror" => {
+            if let Some(ref m) = f.request_mirror {
+                if let Some(ref br) = m.backend_ref {
+                    collect_http_backend_ref_service_refs(route_ns, br, out);
+                }
+            }
+        }
+        "ExternalAuth" => {
+            if let Some(ref a) = f.external_auth {
+                if let Some(ref br) = a.backend_ref {
+                    collect_http_backend_ref_service_refs(route_ns, br, out);
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+fn collect_http_backend_ref_service_refs(
+    route_ns: &str,
+    br: &HTTPBackendRefSpec,
+    out: &mut Vec<(String, String)>,
+) {
+    push_core_service_backend_ref(route_ns, br, out);
+    for f in &br.filters {
+        collect_http_filter_service_refs(route_ns, f, out);
+    }
+}
+
+/// Service backends referenced from HTTP route rule `backendRefs`, filters, and nested backend filters.
+#[must_use]
+pub fn collect_http_route_rule_service_refs(
+    route_ns: &str,
+    rule: &HTTPRouteRuleSpec,
+) -> Vec<(String, String)> {
+    let mut out = Vec::new();
+    for br in &rule.backend_refs {
+        collect_http_backend_ref_service_refs(route_ns, br, &mut out);
+    }
+    for f in &rule.filters {
+        collect_http_filter_service_refs(route_ns, f, &mut out);
+    }
+    out
+}
+
+fn collect_grpc_filter_service_refs(
+    route_ns: &str,
+    f: &GRPCRouteFilterSpec,
+    out: &mut Vec<(String, String)>,
+) {
+    if f.filter_type == "RequestMirror" {
+        if let Some(ref m) = f.request_mirror {
+            if let Some(ref br) = m.backend_ref {
+                collect_http_backend_ref_service_refs(route_ns, br, out);
+            }
+        }
+    }
+}
+
+/// Service backends referenced from GRPC route rule `backendRefs` and `RequestMirror` filters.
+#[must_use]
+pub fn collect_grpc_route_rule_service_refs(
+    route_ns: &str,
+    rule: &GRPCRouteRuleSpec,
+) -> Vec<(String, String)> {
+    let mut out = Vec::new();
+    for br in &rule.backend_refs {
+        collect_http_backend_ref_service_refs(route_ns, br, &mut out);
+    }
+    for f in &rule.filters {
+        collect_grpc_filter_service_refs(route_ns, f, &mut out);
+    }
+    out
+}
+
+/// `InferencePool` backends referenced on this HTTP rule (for BackendTLS policy attachment).
+#[must_use]
+pub fn collect_http_route_rule_inference_pool_refs(
+    route_ns: &str,
+    rule: &HTTPRouteRuleSpec,
+) -> Vec<(String, String)> {
+    let mut out = Vec::new();
+    for br in &rule.backend_refs {
+        if !is_inference_pool_backend_ref(br) {
+            continue;
+        }
+        let pns = br.namespace.as_deref().unwrap_or(route_ns).to_string();
+        out.push((pns, br.name.clone()));
+    }
+    out
+}
+
+/// `InferencePool` backends referenced on this GRPC rule.
+#[must_use]
+pub fn collect_grpc_route_rule_inference_pool_refs(
+    route_ns: &str,
+    rule: &GRPCRouteRuleSpec,
+) -> Vec<(String, String)> {
+    let mut out = Vec::new();
+    for br in &rule.backend_refs {
+        if !is_inference_pool_backend_ref(br) {
+            continue;
+        }
+        let pns = br.namespace.as_deref().unwrap_or(route_ns).to_string();
+        out.push((pns, br.name.clone()));
+    }
+    out
+}
+
+/// `InferencePool` backends referenced only from `backendRefs` (no route-level filters).
+#[must_use]
+pub fn collect_backend_refs_inference_pool_refs(
+    route_ns: &str,
+    backend_refs: &[HTTPBackendRefSpec],
+) -> Vec<(String, String)> {
+    let mut out = Vec::new();
+    for br in backend_refs {
+        if !is_inference_pool_backend_ref(br) {
+            continue;
+        }
+        let pns = br.namespace.as_deref().unwrap_or(route_ns).to_string();
+        out.push((pns, br.name.clone()));
+    }
+    out
+}
+
+/// Service backends from `backendRefs` and nested backend filters only (no route-level filters).
+#[must_use]
+pub fn collect_backend_refs_service_refs(
+    route_ns: &str,
+    backend_refs: &[HTTPBackendRefSpec],
+) -> Vec<(String, String)> {
+    let mut out = Vec::new();
+    for br in backend_refs {
+        collect_http_backend_ref_service_refs(route_ns, br, &mut out);
+    }
+    out
 }

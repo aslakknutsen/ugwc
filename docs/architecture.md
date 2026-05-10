@@ -18,7 +18,15 @@ Target **Gateway API** bundle: **v1.5.x standard channel** (see [Gateway API rel
 
 **ReferenceGrant:** Cross-namespace references require grants in the **referenced resource namespace** — attachment of routes from namespace A to a `Gateway` or attached `ListenerSet` in namespace B, `Service` / `InferencePool` backends, and cross-namespace TLS `Secret` refs on listeners are enforced during snapshot load / compile. The `ReferenceGrant` watcher enqueues gateways in the grant’s namespace plus gateways referenced by routes living in each `spec.from[].namespace` (cluster-wide route listing remains the fallback when `from` is empty).
 
-**Backend TLS:** `BackendTLSPolicy` objects (same namespace as target `Service`) are listed for namespaces of backend Services needed by attached routes. Validation material (`ca.crt` on referenced `ConfigMap`s, or `wellKnownCACertificates: System`) is resolved at snapshot load time and attached per backend (`namespace/name:port`) on the compiled IR; `ugwc-gwxds` maps this to `Backend.tls`. Conflicting policies or bad CA refs surface on policy **ancestor** status toward each reconciled `Gateway` and as **`ResolvedRefs`** errors on affected routes when compilation fails closed.
+**Backend TLS:** `BackendTLSPolicy` objects are listed for namespaces of backend resources needed by attached routes (see below). Validation material is resolved at snapshot load time and attached on the compiled IR; **Service** backends use snapshot keys `namespace/name:servicePort`, **InferencePool** backends use `inferencepool/namespace/name:targetPort`. `ugwc-gwxds` maps this to `Backend.tls` (including optional client certificate material for backend mTLS). Conflicting policies or bad refs surface on policy **ancestor** status toward each reconciled `Gateway` and as **`ResolvedRefs`** errors on affected routes when compilation fails closed.
+
+**BackendTLSPolicy limitations (operator-facing):**
+
+1. **Targets:** Core path is **`Service`** `targetRefs` in the **same namespace** as the policy. **`InferencePool`** targets are also supported when those pools are referenced as backends on routes for this Gateway. Other `targetRef` kinds are ignored until explicitly implemented.
+2. **CA / trust:** **`caCertificateRefs`** — `ConfigMap` (`ca.crt`) and **`Secret`** (`ca.crt`, or `tls.crt` as a PEM certificate bundle) in the policy namespace, or **cross-namespace** when a **`ReferenceGrant`** in the CA resource namespace allows `from: kind BackendTLSPolicy, namespace: <policy ns>` to `to: kind ConfigMap|Secret` (name optional/wildcard per grant rules). **`wellKnownCACertificates: System`** is supported; other well-known values are rejected unless added explicitly.
+3. **Client certificate:** Optional **`clientCertificateRefs`** on the policy (`Secret` with `tls.crt` / `tls.key`, same-namespace or cross-namespace via **`ReferenceGrant`** with `to: Secret`) populate upstream mTLS identity in IR/xDS.
+4. **Route coverage:** Backend Services referenced only from **HTTPRoute**/**GRPCRoute** rule **`filters`** (**RequestMirror**, **ExternalAuth**) or nested **`backendRefs[].filters`** are included in snapshot loading and in **`BackendTLSPolicy` → Gateway reconcile** fan-out (same as rule-level `backendRefs`).
+5. **`spec.options`:** Not forwarded to the dataplane yet.
 
 ## Diagrams
 

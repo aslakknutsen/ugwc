@@ -489,6 +489,12 @@ pub struct BackendTlsPolicyOutcomeSnap {
     pub accepted: bool,
     #[serde(default)]
     pub message: Option<String>,
+    /// Gateway API reason for `Accepted` on `status.ancestors` (when set).
+    #[serde(rename = "acceptedConditionReason", default)]
+    pub accepted_condition_reason: Option<String>,
+    /// Gateway API reason for `ResolvedRefs` on `status.ancestors` (when set).
+    #[serde(rename = "resolvedRefsConditionReason", default)]
+    pub resolved_refs_condition_reason: Option<String>,
 }
 
 /// One listener row after merge — [`crate::listener_merge::merge_effective_listeners`].

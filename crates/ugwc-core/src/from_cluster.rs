@@ -23,8 +23,8 @@ use crate::policy::PolicyOverlayIr;
 use crate::snapshot::{
     ClusterSnapshot, EffectiveListenerSnap, GrpcRouteMatchSnap, GrpcRouteRuleSnap, GrpcRouteSnap,
     HttpBackendRefSnap, HttpRequestMatchSnap, HttpRouteRuleSnap, HttpRouteSnap, InferencePoolSnap,
-    ListenerParentSnap, ServiceSnap, TcpRouteRuleSnap, TcpRouteSnap, TlsRouteRuleSnap, TlsRouteSnap,
-    UdpRouteRuleSnap, UdpRouteSnap,
+    ListenerParentSnap, ServiceSnap, TcpRouteRuleSnap, TcpRouteSnap, TlsRouteRuleSnap,
+    TlsRouteSnap, UdpRouteRuleSnap, UdpRouteSnap,
 };
 
 #[derive(Clone, Eq, PartialEq)]
@@ -131,6 +131,49 @@ fn find_inference_pool<'a>(
         .find(|p| p.namespace == ns && p.name == name)
 }
 
+fn inference_pool_backend_tls_key(pool_ns: &str, pool_name: &str, port: u16) -> String {
+    format!("inferencepool/{pool_ns}/{pool_name}:{port}")
+}
+
+fn resolve_inference_pool_target_port(
+    pool: &InferencePoolSnap,
+    br: &HttpBackendRefSnap,
+    report: &mut CompileReport,
+    err: &impl Fn(String) -> ObjectRefErr,
+) -> Option<u16> {
+    if br.port_name.is_some() {
+        report.errors.push(err(
+            "UnsupportedValue: InferencePool backendRef.portName not supported".into(),
+        ));
+        return None;
+    }
+    if let Some(n) = br.port {
+        if pool.target_ports.iter().any(|tp| tp.number == n) {
+            return Some(n);
+        }
+        report.errors.push(err(format!(
+            "UnsupportedValue: InferencePool backendRef.port {n} not listed in pool targetPorts"
+        )));
+        return None;
+    }
+    match pool.target_ports.len() {
+        0 => {
+            report.errors.push(err(
+                "UnsupportedValue: InferencePool has no targetPorts".into()
+            ));
+            None
+        }
+        1 => Some(pool.target_ports[0].number),
+        _ => {
+            report.errors.push(err(
+                "UnsupportedValue: InferencePool backendRef.port required when multiple targetPorts exist"
+                    .into(),
+            ));
+            None
+        }
+    }
+}
+
 fn inference_epp_dns_host(svc_name: &str, svc_namespace: &str) -> String {
     format!("{svc_name}.{svc_namespace}.svc.cluster.local")
 }
@@ -205,6 +248,17 @@ fn resolve_inference_pool_backend(
         )));
         return None;
     }
+    let Some(target_port) = resolve_inference_pool_target_port(pool, br, report, &err) else {
+        return None;
+    };
+    let tls_key = inference_pool_backend_tls_key(pool_ns, pool_name, target_port);
+    let backend_tls = snapshot
+        .backend_tls_effective
+        .get(&tls_key)
+        .map(|e| e.tls.clone());
+    if backend_tls.as_ref().is_some_and(|t| t.invalid) {
+        report.errors.push(err("InvalidCACertificateRef".into()));
+    }
     let fail_open = ep
         .failure_mode
         .as_deref()
@@ -216,7 +270,7 @@ fn resolve_inference_pool_backend(
             service_name: String::new(),
             port_name: None,
             port_number: None,
-            backend_tls: None,
+            backend_tls,
             inference: Some(InferencePoolBackendIr {
                 pool_namespace: pool_ns.to_string(),
                 pool_name: pool_name.to_string(),
@@ -2385,6 +2439,8 @@ mod tests {
                     hostname: "svc.example.com".into(),
                     sans: vec!["alt.example.com".into()],
                     trust_system_ca: false,
+                    client_cert_pem: vec![],
+                    client_key_pem: vec![],
                     invalid: false,
                 },
             },
@@ -2419,6 +2475,8 @@ mod tests {
                     hostname: "svc.example.com".into(),
                     sans: vec![],
                     trust_system_ca: true,
+                    client_cert_pem: vec![],
+                    client_key_pem: vec![],
                     invalid: false,
                 },
             },
@@ -2445,6 +2503,8 @@ mod tests {
                     hostname: "svc.example.com".into(),
                     sans: vec![],
                     trust_system_ca: false,
+                    client_cert_pem: vec![],
+                    client_key_pem: vec![],
                     invalid: true,
                 },
             },
@@ -2479,6 +2539,8 @@ mod tests {
                     hostname: "secure.backend".into(),
                     sans: vec![],
                     trust_system_ca: false,
+                    client_cert_pem: vec![],
+                    client_key_pem: vec![],
                     invalid: false,
                 },
             },
@@ -3154,11 +3216,10 @@ mod tests {
             .expect("tcp listener");
         assert_eq!(ln.bind_port, 9000);
         assert_eq!(ln.gateway_protocol, "TCP");
-        assert!(
-            ln.allowed_route_group_kinds
-                .iter()
-                .any(|x| x.contains("TCPRoute"))
-        );
+        assert!(ln
+            .allowed_route_group_kinds
+            .iter()
+            .any(|x| x.contains("TCPRoute")));
         let r = ir
             .routes
             .iter()
@@ -3223,10 +3284,17 @@ mod tests {
         let snap = tcp_listener_cluster(vec![older, newer]);
         let (ir, rep) = ir_from_cluster(&snap);
         assert!(!rep.has_errors(), "{:?}", rep.errors);
-        assert!(ir.routes.iter().filter(|r| r.route_family == RouteFamily::Tcp).count() == 1);
-        assert!(rep.tcp_route_conflict_losers.iter().any(|l| {
-            l.route_kind == "TCPRoute" && l.route_name == "tcp-new"
-        }));
+        assert!(
+            ir.routes
+                .iter()
+                .filter(|r| r.route_family == RouteFamily::Tcp)
+                .count()
+                == 1
+        );
+        assert!(rep
+            .tcp_route_conflict_losers
+            .iter()
+            .any(|l| { l.route_kind == "TCPRoute" && l.route_name == "tcp-new" }));
     }
 
     fn udp_listener_cluster(routes: Vec<UdpRouteSnap>) -> ClusterSnapshot {
@@ -3322,11 +3390,10 @@ mod tests {
             .expect("udp listener");
         assert_eq!(ln.bind_port, 9500);
         assert_eq!(ln.gateway_protocol, "UDP");
-        assert!(
-            ln.allowed_route_group_kinds
-                .iter()
-                .any(|x| x.contains("UDPRoute"))
-        );
+        assert!(ln
+            .allowed_route_group_kinds
+            .iter()
+            .any(|x| x.contains("UDPRoute")));
         let r = ir
             .routes
             .iter()
@@ -3391,10 +3458,17 @@ mod tests {
         let snap = udp_listener_cluster(vec![older, newer]);
         let (ir, rep) = ir_from_cluster(&snap);
         assert!(!rep.has_errors(), "{:?}", rep.errors);
-        assert!(ir.routes.iter().filter(|r| r.route_family == RouteFamily::Udp).count() == 1);
-        assert!(rep.udp_route_conflict_losers.iter().any(|l| {
-            l.route_kind == "UDPRoute" && l.route_name == "udp-new"
-        }));
+        assert!(
+            ir.routes
+                .iter()
+                .filter(|r| r.route_family == RouteFamily::Udp)
+                .count()
+                == 1
+        );
+        assert!(rep
+            .udp_route_conflict_losers
+            .iter()
+            .any(|l| { l.route_kind == "UDPRoute" && l.route_name == "udp-new" }));
     }
 
     #[test]

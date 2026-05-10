@@ -203,6 +203,12 @@ pub struct BackendTlsIr {
     /// Set when `spec.validation.wellKnownCACertificates` was `System`.
     #[serde(default)]
     pub trust_system_ca: bool,
+    /// PEM client certificate for mutual TLS to the backend (`clientCertificateRefs`).
+    #[serde(default)]
+    pub client_cert_pem: Vec<u8>,
+    /// PEM client private key for mutual TLS to the backend.
+    #[serde(default)]
+    pub client_key_pem: Vec<u8>,
     /// CA resolution or validation config failed; dataplane must fail closed.
     #[serde(default)]
     pub invalid: bool,

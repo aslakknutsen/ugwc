@@ -2,7 +2,7 @@
 
 use std::collections::{BTreeMap, HashSet};
 
-use k8s_openapi::api::core::v1::{ConfigMap, Namespace, Secret, Service};
+use k8s_openapi::api::core::v1::{Namespace, Secret, Service};
 use k8s_openapi::api::discovery::v1::EndpointSlice;
 use k8s_openapi::apimachinery::pkg::util::intstr::IntOrString;
 use kube::api::ListParams;
@@ -10,26 +10,25 @@ use kube::{Api, Client, ResourceExt};
 use thiserror::Error;
 use tracing::warn;
 use ugwc_core::http_route_attachment::reference_grant_permits_gateway_secret_ref;
-use ugwc_core::ir::BackendTlsIr;
 use ugwc_core::listener_merge::merge_effective_listeners;
 use ugwc_core::snapshot::{
-    AllowedListenersSnap, AllowedRoutesNamespacesSnap, AllowedRoutesSnap, BackendTlsEffectiveSnap,
-    BackendTlsPolicyOutcomeSnap, ClusterSnapshot, EffectiveListenerSnap, EndpointPickerRefSnap,
-    EndpointPortSnap, EndpointSliceSnap, EndpointSnap, GatewayAddressSnap, GatewayClassSnap,
-    GatewayInfrastructureSnap, GatewayListenerSnap, GatewayListenerTlsSnap, GrpcHeaderMatchSnap,
-    GrpcMethodMatchSnap, GrpcRouteFilterSnap, GrpcRouteMatchSnap, GrpcRouteRuleSnap, GrpcRouteSnap,
-    HttpBackendRefSnap, HttpHeaderFilterSnap, HttpHeaderMatchSnap, HttpHeaderNameValueSnap,
-    HttpPathMatchSnap, HttpPathModifierSnap, HttpRequestMatchSnap, HttpRequestRedirectFilterSnap,
-    HttpRouteFilterSnap, HttpRouteRuleSnap, HttpRouteSnap, InferencePoolPortSnap,
-    InferencePoolSelectorSnap, InferencePoolSnap, ListenerNamespacesSnap, ListenerSetSnap,
-    ParentRefSnap, ReferenceGrantFromSnap, ReferenceGrantSnap, ReferenceGrantToSnap,
-    RouteGroupKindSnap, SecretObjectReferenceSnap, ServicePortSnap, ServiceSnap, TcpRouteRuleSnap,
-    TcpRouteSnap, TlsRouteRuleSnap, TlsRouteSnap, UdpRouteRuleSnap, UdpRouteSnap,
+    AllowedListenersSnap, AllowedRoutesNamespacesSnap, AllowedRoutesSnap, ClusterSnapshot,
+    EffectiveListenerSnap, EndpointPickerRefSnap, EndpointPortSnap, EndpointSliceSnap,
+    EndpointSnap, GatewayAddressSnap, GatewayClassSnap, GatewayInfrastructureSnap,
+    GatewayListenerSnap, GatewayListenerTlsSnap, GrpcHeaderMatchSnap, GrpcMethodMatchSnap,
+    GrpcRouteFilterSnap, GrpcRouteMatchSnap, GrpcRouteRuleSnap, GrpcRouteSnap, HttpBackendRefSnap,
+    HttpHeaderFilterSnap, HttpHeaderMatchSnap, HttpHeaderNameValueSnap, HttpPathMatchSnap,
+    HttpPathModifierSnap, HttpRequestMatchSnap, HttpRequestRedirectFilterSnap, HttpRouteFilterSnap,
+    HttpRouteRuleSnap, HttpRouteSnap, InferencePoolPortSnap, InferencePoolSelectorSnap,
+    InferencePoolSnap, ListenerNamespacesSnap, ListenerSetSnap, ParentRefSnap,
+    ReferenceGrantFromSnap, ReferenceGrantSnap, ReferenceGrantToSnap, RouteGroupKindSnap,
+    SecretObjectReferenceSnap, ServicePortSnap, ServiceSnap, TcpRouteRuleSnap, TcpRouteSnap,
+    TlsRouteRuleSnap, TlsRouteSnap, UdpRouteRuleSnap, UdpRouteSnap,
 };
 
 use crate::resources::{
-    BackendTLSPolicy, GRPCRoute, Gateway, GatewayClass, HTTPBackendRefSpec, HTTPRoute,
-    InferencePool, ListenerSet, ParentReferenceSpec, ReferenceGrant, TCPRoute, TLSRoute, UDPRoute,
+    GRPCRoute, Gateway, GatewayClass, HTTPRoute, InferencePool, ListenerSet, ParentReferenceSpec,
+    ReferenceGrant, TCPRoute, TLSRoute, UDPRoute,
 };
 
 #[derive(Debug, Error)]
@@ -37,6 +36,9 @@ pub enum LoaderError {
     #[error("kubernetes: {0}")]
     Kube(#[from] kube::Error),
 }
+
+#[path = "backend_tls.rs"]
+pub(crate) mod backend_tls;
 
 /// Convert spec parentRef to snapshot form (HTTPRoute status merge).
 #[must_use]
@@ -53,20 +55,6 @@ pub fn parent_reference_to_snap(p: &ParentReferenceSpec) -> ParentRefSnap {
 
 fn parent_to_snap(p: &ParentReferenceSpec) -> ParentRefSnap {
     parent_reference_to_snap(p)
-}
-
-fn collect_inference_pool_backend_ref(
-    br: &HTTPBackendRefSpec,
-    route_ns: &str,
-    needed_pools: &mut Vec<(String, String)>,
-    ns_for_labels: &mut HashSet<String>,
-) {
-    if !crate::resources::is_inference_pool_backend_ref(br) {
-        return;
-    }
-    let pns = br.namespace.clone().unwrap_or_else(|| route_ns.to_string());
-    ns_for_labels.insert(pns.clone());
-    needed_pools.push((pns, br.name.clone()));
 }
 
 fn inference_pool_to_snap(ip: InferencePool) -> InferencePoolSnap {
@@ -778,315 +766,6 @@ fn udp_route_to_snap(route: &UDPRoute) -> UdpRouteSnap {
     }
 }
 
-fn backend_tls_target_is_service(group: Option<&str>, kind: Option<&str>) -> bool {
-    let k = kind.unwrap_or("Service");
-    let g = group.unwrap_or("");
-    k.eq_ignore_ascii_case("Service") && (g.is_empty() || g.eq_ignore_ascii_case(""))
-}
-
-struct LoadedBackendTlsPolicy {
-    policy_ns: String,
-    policy_name: String,
-    created_rfc3339: String,
-    tls_ir: BackendTlsIr,
-    targets: Vec<(String, Option<String>)>,
-}
-
-fn backend_tls_section_applies(section: Option<&str>, service_port_name: &str) -> bool {
-    section.map_or(true, |sn| sn == service_port_name)
-}
-
-async fn backend_tls_ir_from_validation(
-    client: &Client,
-    policy_ns: &str,
-    v: &crate::resources::BackendTLSPolicyValidationSpec,
-) -> BackendTlsIr {
-    let hostname = v.hostname.clone();
-    let mut sans = Vec::new();
-    for san in &v.subject_alt_names {
-        match san.type_.as_str() {
-            "Hostname" => {
-                if let Some(ref h) = san.hostname {
-                    sans.push(h.clone());
-                }
-            }
-            "URI" => {
-                if let Some(ref u) = san.uri {
-                    sans.push(u.clone());
-                }
-            }
-            _ => {}
-        }
-    }
-
-    let has_ca = !v.ca_certificate_refs.is_empty();
-    let well = v
-        .well_known_ca_certificates
-        .as_deref()
-        .map(str::trim)
-        .filter(|s| !s.is_empty());
-
-    if has_ca && well.is_some() {
-        return BackendTlsIr {
-            ca_cert_pem: vec![],
-            hostname,
-            sans,
-            trust_system_ca: false,
-            invalid: true,
-        };
-    }
-
-    if let Some(w) = well {
-        if w == "System" {
-            return BackendTlsIr {
-                ca_cert_pem: vec![],
-                hostname,
-                sans,
-                trust_system_ca: true,
-                invalid: false,
-            };
-        }
-        return BackendTlsIr {
-            ca_cert_pem: vec![],
-            hostname,
-            sans,
-            trust_system_ca: false,
-            invalid: true,
-        };
-    }
-
-    if !has_ca {
-        return BackendTlsIr {
-            ca_cert_pem: vec![],
-            hostname,
-            sans,
-            trust_system_ca: false,
-            invalid: true,
-        };
-    }
-
-    let cm_api: Api<ConfigMap> = Api::namespaced(client.clone(), policy_ns);
-    let mut bundle = Vec::new();
-    for ca in &v.ca_certificate_refs {
-        let kind = ca.kind.as_deref().unwrap_or("ConfigMap");
-        let group = ca.group.as_deref().unwrap_or("");
-        if !kind.eq_ignore_ascii_case("ConfigMap")
-            || !(group.is_empty() || group.eq_ignore_ascii_case(""))
-        {
-            return BackendTlsIr {
-                ca_cert_pem: vec![],
-                hostname,
-                sans,
-                trust_system_ca: false,
-                invalid: true,
-            };
-        }
-        let Ok(cm) = cm_api.get(&ca.name).await else {
-            return BackendTlsIr {
-                ca_cert_pem: vec![],
-                hostname,
-                sans,
-                trust_system_ca: false,
-                invalid: true,
-            };
-        };
-        let Some(data) = cm.data.as_ref() else {
-            return BackendTlsIr {
-                ca_cert_pem: vec![],
-                hostname,
-                sans,
-                trust_system_ca: false,
-                invalid: true,
-            };
-        };
-        let Some(pem) = data.get("ca.crt") else {
-            return BackendTlsIr {
-                ca_cert_pem: vec![],
-                hostname,
-                sans,
-                trust_system_ca: false,
-                invalid: true,
-            };
-        };
-        if !bundle.is_empty() {
-            bundle.push(b'\n');
-        }
-        bundle.extend_from_slice(pem.as_bytes());
-    }
-
-    BackendTlsIr {
-        ca_cert_pem: bundle,
-        hostname,
-        sans,
-        trust_system_ca: false,
-        invalid: false,
-    }
-}
-
-async fn load_backend_tls_for_gateway(
-    client: &Client,
-    needed_services: &[(String, String)],
-    services: &[ServiceSnap],
-) -> Result<
-    (
-        BTreeMap<String, BackendTlsEffectiveSnap>,
-        Vec<BackendTlsPolicyOutcomeSnap>,
-    ),
-    LoaderError,
-> {
-    let mut effective: BTreeMap<String, BackendTlsEffectiveSnap> = BTreeMap::new();
-
-    let needed_set: HashSet<(String, String)> = needed_services.iter().cloned().collect();
-    let mut namespaces: Vec<String> = needed_services.iter().map(|(ns, _)| ns.clone()).collect();
-    namespaces.sort();
-    namespaces.dedup();
-
-    let mut loaded: Vec<LoadedBackendTlsPolicy> = Vec::new();
-
-    for ns in &namespaces {
-        let api: Api<BackendTLSPolicy> = Api::namespaced(client.clone(), ns);
-        let list = match api.list(&ListParams::default()).await {
-            Ok(l) => l.items,
-            Err(e) => {
-                warn!(
-                    error = %e,
-                    namespace = %ns,
-                    "BackendTLSPolicy list failed — clusters without CRD skip backend TLS policies"
-                );
-                continue;
-            }
-        };
-
-        for pol in list {
-            let policy_ns = pol.metadata.namespace.clone().unwrap_or_default();
-            let policy_name = pol.metadata.name.clone().unwrap_or_default();
-            let created_rfc3339 = pol
-                .metadata
-                .creation_timestamp
-                .as_ref()
-                .map(|t| t.0.to_rfc3339())
-                .unwrap_or_default();
-
-            let mut targets: Vec<(String, Option<String>)> = Vec::new();
-            for t in &pol.spec.target_refs {
-                if !backend_tls_target_is_service(t.group.as_deref(), t.kind.as_deref()) {
-                    continue;
-                }
-                if !needed_set.contains(&(policy_ns.clone(), t.name.clone())) {
-                    continue;
-                }
-                let section = t.section_name.clone().filter(|s| !s.trim().is_empty());
-                targets.push((t.name.clone(), section));
-            }
-
-            if targets.is_empty() {
-                continue;
-            }
-
-            let tls_ir =
-                backend_tls_ir_from_validation(client, &policy_ns, &pol.spec.validation).await;
-
-            loaded.push(LoadedBackendTlsPolicy {
-                policy_ns,
-                policy_name,
-                created_rfc3339,
-                tls_ir,
-                targets,
-            });
-        }
-    }
-
-    #[derive(Clone)]
-    struct Candidate {
-        created_rfc3339: String,
-        policy_ns: String,
-        policy_name: String,
-        tls_ir: BackendTlsIr,
-    }
-
-    let mut conflicted: HashSet<(String, String)> = HashSet::new();
-
-    for svc in services {
-        for sp in &svc.ports {
-            let backend_k = format!("{}/{}:{}", svc.namespace, svc.name, sp.port);
-
-            let mut candidates: Vec<Candidate> = Vec::new();
-
-            for lp in &loaded {
-                for (svc_name, section) in &lp.targets {
-                    if svc_name != &svc.name || lp.policy_ns != svc.namespace {
-                        continue;
-                    }
-                    let applies = backend_tls_section_applies(section.as_deref(), sp.name.as_str());
-                    if applies {
-                        candidates.push(Candidate {
-                            created_rfc3339: lp.created_rfc3339.clone(),
-                            policy_ns: lp.policy_ns.clone(),
-                            policy_name: lp.policy_name.clone(),
-                            tls_ir: lp.tls_ir.clone(),
-                        });
-                    }
-                }
-            }
-
-            let mut seen_pol = HashSet::<(String, String)>::new();
-            let mut uniq: Vec<Candidate> = Vec::new();
-            for c in candidates {
-                let pk = (c.policy_ns.clone(), c.policy_name.clone());
-                if seen_pol.insert(pk) {
-                    uniq.push(c);
-                }
-            }
-            let mut candidates = uniq;
-
-            candidates.sort_by(|a, b| {
-                a.created_rfc3339.cmp(&b.created_rfc3339).then_with(|| {
-                    (&a.policy_ns, &a.policy_name).cmp(&(&b.policy_ns, &b.policy_name))
-                })
-            });
-
-            if candidates.is_empty() {
-                continue;
-            }
-
-            let winner = candidates[0].clone();
-            if candidates.len() > 1 {
-                for c in candidates.iter().skip(1) {
-                    conflicted.insert((c.policy_ns.clone(), c.policy_name.clone()));
-                }
-            }
-
-            effective.insert(backend_k, BackendTlsEffectiveSnap { tls: winner.tls_ir });
-        }
-    }
-
-    let mut outcomes: Vec<BackendTlsPolicyOutcomeSnap> = Vec::new();
-    for lp in loaded {
-        let k = (lp.policy_ns.clone(), lp.policy_name.clone());
-        let is_conflicted = conflicted.contains(&k);
-        let resolved_ok = !lp.tls_ir.invalid;
-        outcomes.push(BackendTlsPolicyOutcomeSnap {
-            namespace: lp.policy_ns,
-            name: lp.policy_name,
-            conflicted: is_conflicted,
-            resolved_refs_ok: resolved_ok,
-            accepted: resolved_ok && !is_conflicted,
-            message: if is_conflicted {
-                Some("Conflicted".into())
-            } else if !resolved_ok {
-                Some("InvalidCACertificateRef".into())
-            } else {
-                None
-            },
-        });
-    }
-
-    outcomes.sort_by(|a, b| (&a.namespace, &a.name).cmp(&(&b.namespace, &b.name)));
-
-    Ok((effective, outcomes))
-}
-
-/// Build a [`ClusterSnapshot`] for `gateway_ns`/`gateway_name`.
 pub async fn load_cluster_snapshot(
     client: &Client,
     gateway_ns: &str,
@@ -1157,26 +836,15 @@ pub async fn load_cluster_snapshot(
 
         let snap = http_route_to_snap(&item);
         for rule in &item.spec.rules {
-            for br in &rule.backend_refs {
-                if crate::resources::is_inference_pool_backend_ref(br) {
-                    collect_inference_pool_backend_ref(
-                        br,
-                        &rns,
-                        &mut needed_pools,
-                        &mut ns_for_labels,
-                    );
-                    continue;
-                }
-                if br.kind.as_deref().unwrap_or("Service") != "Service" {
-                    continue;
-                }
-                let sns = br
-                    .namespace
-                    .clone()
-                    .or(item.metadata.namespace.clone())
-                    .unwrap_or_default();
+            for (sns, sname) in crate::resources::collect_http_route_rule_service_refs(&rns, rule) {
                 ns_for_labels.insert(sns.clone());
-                needed_services.push((sns, br.name.clone()));
+                needed_services.push((sns, sname));
+            }
+            for (pns, pname) in
+                crate::resources::collect_http_route_rule_inference_pool_refs(&rns, rule)
+            {
+                ns_for_labels.insert(pns.clone());
+                needed_pools.push((pns, pname));
             }
         }
         http_routes.push(snap);
@@ -1199,26 +867,17 @@ pub async fn load_cluster_snapshot(
 
                 let snap = grpc_route_to_snap(&item);
                 for rule in &item.spec.rules {
-                    for br in &rule.backend_refs {
-                        if crate::resources::is_inference_pool_backend_ref(br) {
-                            collect_inference_pool_backend_ref(
-                                br,
-                                &rns,
-                                &mut needed_pools,
-                                &mut ns_for_labels,
-                            );
-                            continue;
-                        }
-                        if br.kind.as_deref().unwrap_or("Service") != "Service" {
-                            continue;
-                        }
-                        let sns = br
-                            .namespace
-                            .clone()
-                            .or(item.metadata.namespace.clone())
-                            .unwrap_or_default();
+                    for (sns, sname) in
+                        crate::resources::collect_grpc_route_rule_service_refs(&rns, rule)
+                    {
                         ns_for_labels.insert(sns.clone());
-                        needed_services.push((sns, br.name.clone()));
+                        needed_services.push((sns, sname));
+                    }
+                    for (pns, pname) in
+                        crate::resources::collect_grpc_route_rule_inference_pool_refs(&rns, rule)
+                    {
+                        ns_for_labels.insert(pns.clone());
+                        needed_pools.push((pns, pname));
                     }
                 }
                 grpc_routes.push(snap);
@@ -1249,26 +908,19 @@ pub async fn load_cluster_snapshot(
 
                 let snap = tls_route_to_snap(&item);
                 for rule in &item.spec.rules {
-                    for br in &rule.backend_refs {
-                        if crate::resources::is_inference_pool_backend_ref(br) {
-                            collect_inference_pool_backend_ref(
-                                br,
-                                &rns,
-                                &mut needed_pools,
-                                &mut ns_for_labels,
-                            );
-                            continue;
-                        }
-                        if br.kind.as_deref().unwrap_or("Service") != "Service" {
-                            continue;
-                        }
-                        let sns = br
-                            .namespace
-                            .clone()
-                            .or(item.metadata.namespace.clone())
-                            .unwrap_or_default();
+                    for (sns, sname) in crate::resources::collect_backend_refs_service_refs(
+                        &rns,
+                        &rule.backend_refs,
+                    ) {
                         ns_for_labels.insert(sns.clone());
-                        needed_services.push((sns, br.name.clone()));
+                        needed_services.push((sns, sname));
+                    }
+                    for (pns, pname) in crate::resources::collect_backend_refs_inference_pool_refs(
+                        &rns,
+                        &rule.backend_refs,
+                    ) {
+                        ns_for_labels.insert(pns.clone());
+                        needed_pools.push((pns, pname));
                     }
                 }
                 tls_routes.push(snap);
@@ -1299,26 +951,19 @@ pub async fn load_cluster_snapshot(
 
                 let snap = tcp_route_to_snap(&item);
                 for rule in &item.spec.rules {
-                    for br in &rule.backend_refs {
-                        if crate::resources::is_inference_pool_backend_ref(br) {
-                            collect_inference_pool_backend_ref(
-                                br,
-                                &rns,
-                                &mut needed_pools,
-                                &mut ns_for_labels,
-                            );
-                            continue;
-                        }
-                        if br.kind.as_deref().unwrap_or("Service") != "Service" {
-                            continue;
-                        }
-                        let sns = br
-                            .namespace
-                            .clone()
-                            .or(item.metadata.namespace.clone())
-                            .unwrap_or_default();
+                    for (sns, sname) in crate::resources::collect_backend_refs_service_refs(
+                        &rns,
+                        &rule.backend_refs,
+                    ) {
                         ns_for_labels.insert(sns.clone());
-                        needed_services.push((sns, br.name.clone()));
+                        needed_services.push((sns, sname));
+                    }
+                    for (pns, pname) in crate::resources::collect_backend_refs_inference_pool_refs(
+                        &rns,
+                        &rule.backend_refs,
+                    ) {
+                        ns_for_labels.insert(pns.clone());
+                        needed_pools.push((pns, pname));
                     }
                 }
                 tcp_routes.push(snap);
@@ -1349,26 +994,19 @@ pub async fn load_cluster_snapshot(
 
                 let snap = udp_route_to_snap(&item);
                 for rule in &item.spec.rules {
-                    for br in &rule.backend_refs {
-                        if crate::resources::is_inference_pool_backend_ref(br) {
-                            collect_inference_pool_backend_ref(
-                                br,
-                                &rns,
-                                &mut needed_pools,
-                                &mut ns_for_labels,
-                            );
-                            continue;
-                        }
-                        if br.kind.as_deref().unwrap_or("Service") != "Service" {
-                            continue;
-                        }
-                        let sns = br
-                            .namespace
-                            .clone()
-                            .or(item.metadata.namespace.clone())
-                            .unwrap_or_default();
+                    for (sns, sname) in crate::resources::collect_backend_refs_service_refs(
+                        &rns,
+                        &rule.backend_refs,
+                    ) {
                         ns_for_labels.insert(sns.clone());
-                        needed_services.push((sns, br.name.clone()));
+                        needed_services.push((sns, sname));
+                    }
+                    for (pns, pname) in crate::resources::collect_backend_refs_inference_pool_refs(
+                        &rns,
+                        &rule.backend_refs,
+                    ) {
+                        ns_for_labels.insert(pns.clone());
+                        needed_pools.push((pns, pname));
                     }
                 }
                 udp_routes.push(snap);
@@ -1542,7 +1180,15 @@ pub async fn load_cluster_snapshot(
     };
 
     let (backend_tls_effective, backend_tls_policy_outcomes) =
-        load_backend_tls_for_gateway(client, &needed_services, &services).await?;
+        backend_tls::load_backend_tls_for_gateway(
+            client,
+            &needed_services,
+            &services,
+            &needed_pools,
+            &inference_pools,
+            &reference_grants,
+        )
+        .await?;
 
     Ok(ClusterSnapshot {
         gateway_namespace: gateway_ns.to_string(),
@@ -1586,7 +1232,7 @@ pub async fn load_cluster_snapshot(
 
 #[cfg(test)]
 mod backend_tls_loader_tests {
-    use super::backend_tls_section_applies;
+    use super::backend_tls::backend_tls_section_applies;
 
     #[test]
     fn section_none_applies_to_all_named_service_ports() {

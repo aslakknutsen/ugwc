@@ -11,8 +11,8 @@ use crate::http_ir::{build_http_ir_from_fixture, HttpCompileFixture};
 use crate::http_route_attachment::{
     attachment_keys_for_parent_ref, find_effective_for_key, grpc_attachment_keys_for_parent_ref,
     grpc_route_listener_hostname_ok, route_listener_hostname_ok,
-    route_parent_attachment_ref_not_permitted, tls_attachment_keys_for_parent_ref,
-    tls_route_listener_hostname_ok, tcp_attachment_keys_for_parent_ref, tcp_route_listener_ok,
+    route_parent_attachment_ref_not_permitted, tcp_attachment_keys_for_parent_ref,
+    tcp_route_listener_ok, tls_attachment_keys_for_parent_ref, tls_route_listener_hostname_ok,
     udp_attachment_keys_for_parent_ref, udp_route_listener_ok,
 };
 use crate::inference::InferenceIr;

@@ -26,6 +26,7 @@ pub use failure_policy::FailurePolicy;
 pub use from_cluster::ir_from_cluster;
 pub use http_ir::{build_http_ir_from_fixture, HttpCompileFixture};
 pub use http_route_attachment::{
+    reference_grant_permits_backend_tls_policy_resource_ref,
     reference_grant_permits_gateway_secret_ref, reference_grant_permits_service_ref,
     route_accepted_for_parent_ref,
 };
