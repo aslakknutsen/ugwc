@@ -94,12 +94,11 @@ API Server (multi-CRD watches)
 
 ## 6. Inference Extension (Gateway API+)
 
-IR must carry:
+**InferencePool** (`inference.networking.k8s.io/v1`) is the supported extension resource end-to-end in ugwc today: pod **`selector`** (same namespace), **`targetPorts`**, **`appProtocol`** (`http` vs `kubernetes.io/h2c`), and **`endpointPickerRef`** (typically a **`Service`** + port for the Endpoint Picker / EPP). Routes reference pools via **`backendRefs`**; IR and [`gwxds`](../crates/ugwc-gwxds/proto/gwxds.proto) carry pool identity, EPP dial parameters, and backend TLS material when policies apply.
 
-- **InferencePool** → cluster/upstream topology + **ext_proc / EPP** wiring  
-- **InferenceModel** → logical model names, weights, **criticality** metadata consumed by proxy + EPP  
+The **Endpoint Picker (EPP)** remains an out-of-band runtime service; ugwc configures how the dataplane reaches it (`failureMode` **FailOpen** / **FailClose** is part of pool spec), not EPP’s internal scheduling logic.
 
-EPP remains **out-of-band** gRPC service at runtime; controller configures **how** the proxy reaches it, not EPP’s internal scoring.
+**InferenceObjective** (`inference.networking.x-k8s.io`, alpha) and request header **`x-gateway-inference-objective`** are **not** implemented in ugwc yet — see [`todo-gateway-api-inference-parity.md`](todo-gateway-api-inference-parity.md) (*Remaining work*).
 
 ---
 

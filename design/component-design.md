@@ -78,7 +78,7 @@
 | Route resolver | HTTPRoutes, GRPCRoutes, … | Normalized route rules |
 | Policy engine | Policy CRDs (GEP-713) | Merged effective policy per attachment point |
 | Backend resolver | Services, EndpointSlices, InferencePool | Endpoint sets + pool metadata (neutral naming; **not** “EDS-only”) |
-| Inference | InferencePool, InferenceModel, … | EPP refs, model weights, criticality tags |
+| Inference | **InferencePool** (and route **backendRefs**) | EPP refs from `endpointPickerRef`, pool ports / `appProtocol`; **InferenceObjective** / body-based multi-model routing not in ugwc yet ([`todo-gateway-api-inference-parity.md`](todo-gateway-api-inference-parity.md)) |
 
 **Policy precedence:** Implement GEP-713 override/default, tie-breakers (timestamp, name). Document any deliberate deviations.
 

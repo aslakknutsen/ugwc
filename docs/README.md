@@ -9,4 +9,4 @@
 3. **Extensible distribution** — v1 emphasizes xDS; additional output backends follow the same “encode + distribute” seam.
 4. **Operable process** — admin/metrics, configurable xDS security, optional Kubernetes reconciliation behind flags.
 
-Full map of topics: **[main.md](main.md)**.
+Full map of topics: **[main.md](main.md)**. Cluster setup and env vars: **[operations.md](operations.md)**.

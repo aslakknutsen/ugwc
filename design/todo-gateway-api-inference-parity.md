@@ -103,8 +103,8 @@ Use this as the “done” ledger; keep **Remaining work** for gaps only.
 
 ### Documentation
 
-- [ ] **`docs/architecture.md`** — watcher diagram + full resource list matching `controller.rs` module comment.
-- [ ] **Operator guide** — CRD install order, required feature gates (if any), flags, minimal GatewayClass + Inference CRD prerequisites.
+- [x] **`docs/architecture.md`** — watcher diagram + resource list aligned with `controller.rs`; reconcile sequence lists route kinds + ListenerSet + BackendTLS + InferencePool status writers.
+- [x] **Operator guide** — [`docs/operations.md`](../docs/operations.md): CRD install order, controller prerequisites, essential env vars; compatibility pins cross-linked from [`docs/architecture.md`](../docs/architecture.md).
 
 ---
 

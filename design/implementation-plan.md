@@ -1,5 +1,7 @@
 # Implementation plan — Gateway API+ control plane
 
+**Status:** Large parts of this phased plan are **landed** in the Rust workspace (controller, multi-route compile, ListenerSet, BackendTLS, InferencePool, etc.). For **what the binary does today** and remaining gaps, prefer **[`todo-gateway-api-inference-parity.md`](todo-gateway-api-inference-parity.md)** (baseline table) and **[`docs/architecture.md`](../docs/architecture.md)** / **[`docs/operations.md`](../docs/operations.md)**. The sections below remain useful for historical ordering, merge points, and parallel-work discipline.
+
 **Parent index:** [`control-plane-design-index.md`](control-plane-design-index.md)  
 **Architecture:** [`controller-architecture.md`](controller-architecture.md), [`component-design.md`](component-design.md), [`output-distribution.md`](output-distribution.md)
 

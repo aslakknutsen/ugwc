@@ -6,7 +6,7 @@ This index tracks the **order of design work**, links each sub-document, and rec
 
 **Implementation:** [`implementation-plan.md`](implementation-plan.md) — phased plan from scaffolding to conformance, merge points, and parallel lanes.
 
-**Parity backlog (WIP):** [`todo-gateway-api-inference-parity.md`](todo-gateway-api-inference-parity.md) — extended Gateway API + Inference Extension: watches, snapshot, compile, status, tests.
+**Parity backlog (current behavior vs Gateway API + Inference Extension):** [`todo-gateway-api-inference-parity.md`](todo-gateway-api-inference-parity.md) — watches, snapshot, compile, status, tests. **Implementation status:** see the **Baseline — what the code does today** table there and user-facing summaries in [`docs/architecture.md`](../docs/architecture.md).
 
 ---
 

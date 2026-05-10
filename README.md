@@ -2,7 +2,7 @@
 
 Gateway API–oriented control plane in Rust: reconcile cluster objects into an internal **IR** snapshot, plan publishes, and serve data planes (notably **xDS**).
 
-**Documentation:** start at [docs/main.md](docs/main.md) (architecture, design, and links to deeper notes in [`design/`](design/)). Intro and goals: [docs/README.md](docs/README.md).
+**Documentation:** start at [docs/main.md](docs/main.md) (architecture, design, operations). Intro and goals: [docs/README.md](docs/README.md). CRD install and **`UGWC_*`** variables: [docs/operations.md](docs/operations.md).
 
 ## Repository layout
 

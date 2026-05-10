@@ -14,7 +14,14 @@ Rust workspace (`Cargo.toml` `[workspace]`) with these members:
 
 ## Gateway API compatibility
 
-Target **Gateway API** bundle: **v1.5.x standard channel** (see [Gateway API releases](https://github.com/kubernetes-sigs/gateway-api/releases)). Install e.g. `standard-install.yaml` for the pinned minor; extended-channel installs must also include **`BackendTLSPolicy` `gateway.networking.k8s.io/v1`** if you use upstream TLS to Services. **Inference Extension:** install [`inference.networking.k8s.io`](https://gateway-api-inference-extension.sigs.k8s.io/guides/) CRDs when using `InferencePool` backends. ugwc focuses on `Gateway` / `HTTPRoute` / `GRPCRoute` / `TLSRoute` / `ListenerSet` / `ReferenceGrant`, with HTTPS listeners terminating TLS using `listener.tls.certificateRefs` → `Secret` (`tls.crt` / `tls.key`), optional `Gateway.spec.addresses` validation, and `Gateway.spec.infrastructure.labels` merged into per-gateway Praxis workload labels.
+Target **Gateway API** bundle: **v1.5.x standard channel** for core v1 resources (see [Gateway API releases](https://github.com/kubernetes-sigs/gateway-api/releases)). Install e.g. `standard-install.yaml` for the pinned minor.
+
+- **Standard channel:** `Gateway`, `GatewayClass`, `HTTPRoute`, `GRPCRoute`, `TLSRoute`, `ListenerSet`, `ReferenceGrant`, and related v1 types ugwc reconciles (HTTPS listeners terminating TLS via `listener.tls.certificateRefs` → `Secret` with `tls.crt` / `tls.key`; optional `Gateway.spec.addresses`; `Gateway.spec.infrastructure.labels` merged into per-gateway Praxis workload labels).
+- **Experimental Gateway API CRDs:** **`TCPRoute`** and **`UDPRoute`** (`gateway.networking.k8s.io/v1alpha2`) require the **experimental** install bundle (`experimental-install.yaml` or equivalent). If those CRDs are missing, ugwc logs and skips listing those types.
+- **Backend TLS:** extended-channel installs must include **`BackendTLSPolicy`** **`gateway.networking.k8s.io/v1`** when using upstream TLS to Services / InferencePools per policy.
+- **Inference Extension:** install [`inference.networking.k8s.io`](https://gateway-api-inference-extension.sigs.k8s.io/guides/) CRDs when using **`InferencePool`** backends.
+
+Operator install order and env summaries: [operations.md](operations.md).
 
 **ReferenceGrant:** Cross-namespace references require grants in the **referenced resource namespace** — attachment of routes from namespace A to a `Gateway` or attached `ListenerSet` in namespace B, `Service` / `InferencePool` backends, and cross-namespace TLS `Secret` refs on listeners are enforced during snapshot load / compile. The `ReferenceGrant` watcher enqueues gateways in the grant’s namespace plus gateways referenced by routes living in each `spec.from[].namespace` (cluster-wide route listing remains the fallback when `from` is empty).
 
@@ -27,6 +34,17 @@ Target **Gateway API** bundle: **v1.5.x standard channel** (see [Gateway API rel
 3. **Client certificate:** Optional **`clientCertificateRefs`** on the policy (`Secret` with `tls.crt` / `tls.key`, same-namespace or cross-namespace via **`ReferenceGrant`** with `to: Secret`) populate upstream mTLS identity in IR/xDS.
 4. **Route coverage:** Backend Services referenced only from **HTTPRoute**/**GRPCRoute** rule **`filters`** (**RequestMirror**, **ExternalAuth**) or nested **`backendRefs[].filters`** are included in snapshot loading and in **`BackendTLSPolicy` → Gateway reconcile** fan-out (same as rule-level `backendRefs`).
 5. **`spec.options`:** Not forwarded to the dataplane yet.
+
+## Compatibility pins
+
+Best-effort reference for support expectations (CI and manual tests track Gateway API **v1.5.x** standard + experimental where coded). Exact pins should converge with release notes over time.
+
+| Axis | Pin / note |
+|------|------------|
+| **ugwc** | Workspace version (e.g. `0.1.0` in root `Cargo.toml`) or `main` at a given commit — treat as development until release tagging is formalized. |
+| **Gateway API** | Standard **v1.5.x** for ListenerSet and core v1 routes; **experimental** bundle for **TCPRoute** / **UDPRoute** (`v1alpha2`). |
+| **Inference Extension** | Release **`manifests.yaml`** from [gateway-api-inference-extension releases](https://github.com/kubernetes-sigs/gateway-api-inference-extension/releases) when using **InferencePool** — pin a tag in your fleet docs. |
+| **Dataplane** | Implementation-specific (e.g. Praxis / Envoy build that speaks `gwxds`); not pinned in-repo. |
 
 ## Diagrams
 
@@ -57,7 +75,7 @@ flowchart TB
     end
 
     subgraph k8s_crate["ugwc-k8s"]
-        Watch["Watchers:\nGateway, HTTPRoute, GRPCRoute, TLSRoute,\nListenerSet, ReferenceGrant,\nBackendTLSPolicy, ConfigMap (CA),\nInferencePool, EndpointSlice, GatewayClass"]
+        Watch["Watchers:\nGateway, HTTPRoute, GRPCRoute, TLSRoute,\nTCPRoute, UDPRoute, ListenerSet,\nReferenceGrant, BackendTLSPolicy,\nConfigMap + Secret (TLS/BackendTLS),\nInferencePool, EndpointSlice, GatewayClass"]
         Load["load_cluster_snapshot"]
         Status["apply_*_status"]
     end
@@ -135,8 +153,8 @@ Several parallel watchers enqueue the same reconcile key `(namespace, gateway_na
 flowchart LR
     subgraph watchers["Parallel watcher tasks"]
         W1["Gateway watcher\n→ (ns, name)"]
-        W2["HTTPRoute / GRPCRoute /\nTLSRoute → parent Gateway keys"]
-        W3["ListenerSet / ReferenceGrant /\nBackendTLSPolicy / ConfigMap /\nInferencePool\n→ affected gateways\n(ReferenceGrant: grant ns\n+ route namespaces\nfrom spec.from)"]
+        W2["HTTPRoute / GRPCRoute / TLSRoute /\nTCPRoute / UDPRoute\n→ parent Gateway keys"]
+        W3["ListenerSet / ReferenceGrant /\nBackendTLSPolicy / ConfigMap /\nSecret / InferencePool\n→ affected gateways\n(ReferenceGrant: grant ns\n+ route namespaces\nfrom spec.from)"]
         W4["EndpointSlice watcher\n→ debounce → list all Gateways\n→ enqueue each"]
         W5["GatewayClass watcher\n→ owned class → list Gateways\nof that class → enqueue"]
     end
@@ -180,8 +198,10 @@ sequenceDiagram
         Loop->>Plan: plan_publish(prev, next, policy)
         Plan-->>Loop: PublishPlan (action)
         Loop->>St: apply_gateway_reconciled_status
-        Loop->>St: apply_http_route_parent_status (per route)
+        Loop->>St: merged parent status (HTTP GRPC TLS TCP UDP routes)
+        Loop->>St: apply_listenerset_reconciled_status
         Loop->>St: apply_backend_tls_policies_for_gateway
+        Loop->>St: apply_inference_pools_for_gateway
         St->>API: PATCH status subresources
         alt PublishAction::FullReplace
             Loop->>Cache: store_scoped(new IrSnapshot)
@@ -245,4 +265,4 @@ Admin and Prometheus endpoints run alongside these services for health and obser
 
 ## Related material
 
-Design rationale and phased delivery: [design.md](design.md), and [`../design/`](../design/) for longer-form notes.
+Design rationale and phased delivery: [design.md](design.md), [operations.md](operations.md), and [`../design/`](../design/) for longer-form notes.
