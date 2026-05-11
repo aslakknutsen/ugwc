@@ -1,5 +1,9 @@
 //! Kubernetes watches, mappers, and status patches for Gateway API+.
 
+mod crd_supervisor;
+mod gateway_watchers;
+mod watch_helpers;
+
 pub mod controller;
 pub mod loader;
 pub mod mappers;
