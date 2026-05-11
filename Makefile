@@ -1,5 +1,13 @@
 # Local parity with CI — see design/implementation-plan.md Phase 0.4
-.PHONY: fmt fmt-check clippy test build release ci check deny docker-build conformance
+.PHONY: fmt fmt-check clippy test build release ci check deny docker-build conformance _ensure_protoc_tmp
+
+# prost-build runs protoc, which writes under $TMPDIR; a full /tmp breaks release builds.
+# Override with your own path: `make release TMPDIR=/var/tmp` (or export TMPDIR).
+TMPDIR ?= $(CURDIR)/.tmp
+export TMPDIR
+
+_ensure_protoc_tmp:
+	@mkdir -p "$(TMPDIR)"
 
 fmt:
 	cargo fmt --all
@@ -7,16 +15,16 @@ fmt:
 fmt-check:
 	cargo fmt --all --check
 
-clippy:
+clippy: _ensure_protoc_tmp
 	cargo clippy --workspace --all-targets -- -D warnings
 
-test:
+test: _ensure_protoc_tmp
 	UGWC_XDS_INSECURE=true UGWC_RUN_PROFILE=dev cargo test --workspace
 
-build:
+build: _ensure_protoc_tmp
 	cargo build --workspace
 
-release:
+release: _ensure_protoc_tmp
 	cargo build -p ugwc --release
 
 check: fmt-check clippy test
