@@ -1,0 +1,67 @@
+# ReferenceGrant objects live in the *target* namespace (see ugwc-core http_route_attachment).
+---
+apiVersion: gateway.networking.k8s.io/v1beta1
+kind: ReferenceGrant
+metadata:
+  name: gateway-to-listener-tls-secret
+  namespace: ugwc-sample-certs
+spec:
+  from:
+    - group: gateway.networking.k8s.io
+      kind: Gateway
+      namespace: ugwc-sample-gateway
+  to:
+    - group: ""
+      kind: Secret
+      name: listener-tls
+---
+apiVersion: gateway.networking.k8s.io/v1beta1
+kind: ReferenceGrant
+metadata:
+  name: backend-tls-policy-to-ca-configmap
+  namespace: ugwc-sample-certs
+spec:
+  from:
+    - group: gateway.networking.k8s.io
+      kind: BackendTLSPolicy
+      namespace: ugwc-sample-workloads
+  to:
+    - group: ""
+      kind: ConfigMap
+      name: backend-ca
+---
+apiVersion: gateway.networking.k8s.io/v1beta1
+kind: ReferenceGrant
+metadata:
+  name: routes-to-gateway
+  namespace: ugwc-sample-gateway
+spec:
+  from:
+    - group: gateway.networking.k8s.io
+      kind: HTTPRoute
+      namespace: ugwc-sample-routes
+    - group: gateway.networking.k8s.io
+      kind: GRPCRoute
+      namespace: ugwc-sample-routes
+  to:
+    - group: gateway.networking.k8s.io
+      kind: Gateway
+      name: demo-gateway
+---
+apiVersion: gateway.networking.k8s.io/v1beta1
+kind: ReferenceGrant
+metadata:
+  name: routes-to-demo-backend-service
+  namespace: ugwc-sample-workloads
+spec:
+  from:
+    - group: gateway.networking.k8s.io
+      kind: HTTPRoute
+      namespace: ugwc-sample-routes
+    - group: gateway.networking.k8s.io
+      kind: GRPCRoute
+      namespace: ugwc-sample-routes
+  to:
+    - group: ""
+      kind: Service
+      name: demo-backend

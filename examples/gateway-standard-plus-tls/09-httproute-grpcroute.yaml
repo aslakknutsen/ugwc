@@ -1,0 +1,54 @@
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: demo-http
+  namespace: ugwc-sample-routes
+spec:
+  hostnames:
+    - demo.example.com
+  parentRefs:
+    - group: gateway.networking.k8s.io
+      kind: Gateway
+      name: demo-gateway
+      namespace: ugwc-sample-gateway
+      sectionName: http
+      port: 80
+  rules:
+    - matches:
+        - path:
+            type: PathPrefix
+            value: /
+      backendRefs:
+        - group: ""
+          kind: Service
+          name: demo-backend
+          namespace: ugwc-sample-workloads
+          port: 8443
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: GRPCRoute
+metadata:
+  name: demo-grpc
+  namespace: ugwc-sample-routes
+spec:
+  hostnames:
+    - demo.example.com
+  parentRefs:
+    - group: gateway.networking.k8s.io
+      kind: Gateway
+      name: demo-gateway
+      namespace: ugwc-sample-gateway
+      sectionName: https
+      port: 443
+  rules:
+    - matches:
+        - method:
+            type: Exact
+            service: grpc.health.v1.Health
+            method: Check
+      backendRefs:
+        - group: ""
+          kind: Service
+          name: demo-backend
+          namespace: ugwc-sample-workloads
+          port: 8443

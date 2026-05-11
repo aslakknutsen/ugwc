@@ -1,0 +1,38 @@
+apiVersion: gateway.networking.k8s.io/v1
+kind: Gateway
+metadata:
+  name: demo-gateway
+  namespace: ugwc-sample-gateway
+spec:
+  gatewayClassName: ugwc-sample
+  addresses:
+    - type: IPAddress
+      value: 192.0.2.1
+  infrastructure:
+    labels:
+      ugwc.praxis-proxy.dev/sample-infra: "true"
+    annotations:
+      ugwc.praxis-proxy.dev/note: "sample-gateway"
+  allowedListeners:
+    namespaces:
+      from: All
+  listeners:
+    - name: http
+      protocol: HTTP
+      port: 80
+      allowedRoutes:
+        namespaces:
+          from: All
+    - name: https
+      protocol: HTTPS
+      port: 443
+      allowedRoutes:
+        namespaces:
+          from: All
+      tls:
+        mode: Terminate
+        certificateRefs:
+          - group: ""
+            kind: Secret
+            name: listener-tls
+            namespace: ugwc-sample-certs

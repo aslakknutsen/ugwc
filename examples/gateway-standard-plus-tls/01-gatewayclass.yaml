@@ -1,0 +1,7 @@
+# Replace controllerName with a value listed in UGWC_CONTROLLER_NAMES before reconciling.
+apiVersion: gateway.networking.k8s.io/v1
+kind: GatewayClass
+metadata:
+  name: ugwc-sample
+spec:
+  controllerName: example.com/ugwc-sample

@@ -1,0 +1,28 @@
+# CA bundle for BackendTLSPolicy (same PEM as listener cert for this sample).
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: backend-ca
+  namespace: ugwc-sample-certs
+data:
+  ca.crt: |
+    -----BEGIN CERTIFICATE-----
+    MIIDNDCCAhygAwIBAgIUV2gJqxCwIq5GeJnD8qA1/9pBnYowDQYJKoZIhvcNAQEL
+    BQAwGzEZMBcGA1UEAwwQZGVtby5leGFtcGxlLmNvbTAeFw0yNjA1MTExNTM4MjBa
+    Fw0zNjA1MDgxNTM4MjBaMBsxGTAXBgNVBAMMEGRlbW8uZXhhbXBsZS5jb20wggEi
+    MA0GCSqGSIb3DQEBAQUAA4IBDwAwggEKAoIBAQDC3QHf9SmgiD3QKQ/Fu6Lo12oA
+    NAZcl7bREQlpKwsAa561tWyISHU/gfeRT/BjAxONEC26yjWpF7VAx79uWhM4/i2W
+    QLqii4tKOK8XwFVYnHb5ChHN90L9TvkrnKHWmTlRY9f8XHwzOvLfjywdhufsyWx7
+    KKhvBZB2jIcIMOTopPy29jZcBbtkpP4frx+rULk9ycV+XXoovK9ZUavlOyrcDVCf
+    /mE/ndzq8m61wwY8Sqv4nyP5944+bWMFyLlVzYmdvQmml4PACQGMfQBqOSaysM5Z
+    e441oH2tWR42gdKBDtV0dA+LPSVWGOWq9+TDOrKR3MVXMt9mwmvcajLpjWpVAgMB
+    AAGjcDBuMB0GA1UdDgQWBBQ0AngqIGlo3GZeHcOsWAPWJgAdtjAfBgNVHSMEGDAW
+    gBQ0AngqIGlo3GZeHcOsWAPWJgAdtjAPBgNVHRMBAf8EBTADAQH/MBsGA1UdEQQU
+    MBKCEGRlbW8uZXhhbXBsZS5jb20wDQYJKoZIhvcNAQELBQADggEBADc6A7p0f6Sw
+    SHNkVpZ/VxzxO9Gi/QNgM2yNclbKx37EkhRffx8DM4qQPKF4c6b7VIH3NUEONnm3
+    TxPtLumG0BY715OvH7wSHV1rZnkwDqgexfMlJ1f5WduZ9t4K/W28aZHWfo7HaWJ9
+    mLmHyQ/TUrOlesVIzdTgLoKyM6xkm9YYPrIPlVuyT9EIqYzaWSzAl+BsLayVlh1q
+    kDedcUnJXS9YvkT+6BAtViE2tgmXy3UBS5l9+QR0EEQq6FXh5bPGqUTPtWay24+l
+    XsLZ2zkT+uMmyWlnqvCpmyL6ee5sO04hm/uLNGYiAWYM5C9HeyKA0M1u/K61mXEN
+    A18pULBnPrs=
+    -----END CERTIFICATE-----

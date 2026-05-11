@@ -2550,16 +2550,21 @@ dependencies = [
  "metrics",
  "metrics-exporter-prometheus",
  "once_cell",
+ "prost",
  "serde",
  "serde_json",
  "thiserror",
  "tokio",
+ "tokio-stream",
  "tokio-util",
+ "tonic",
  "tracing",
  "tracing-subscriber",
  "ugwc-core",
+ "ugwc-gwxds",
  "ugwc-k8s",
  "ugwc-xds",
+ "xds-api",
 ]
 
 [[package]]

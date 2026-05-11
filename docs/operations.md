@@ -38,6 +38,7 @@ cargo run -p ugwc -- --dump-config
 | `UGWC_XDS_LISTEN_ADDR` | gRPC xDS bind address, default `127.0.0.1:18000`. |
 | `UGWC_XDS_INSECURE` | TLS off for xDS (disallowed with `UGWC_RUN_PROFILE=prod`). |
 | `UGWC_XDS_WIRE` | `gwxds` (Praxis) or `envoy` wire encoding. |
+| `ugwc xds-dump` | Subcommand (no `UGWC_*` required): plaintext `http://` ADS client for debugging; add `--decode` with `--wire gwxds` to print decoded `istio.gwxds.Resource` (`Debug`). See [example-gateway-standard-plus-tls.md](example-gateway-standard-plus-tls.md). |
 | `UGWC_IMPLEMENTATION_PROFILES_PATH` | JSON file: map `controllerName` → dataplane strategy / subscription defaults / `proxy_image`. |
 | `UGWC_DATAPLANE_ENABLE` | Apply **PerGatewayPraxis** workloads when profile requests it; requires bootstrap addr when needed. |
 | `UGWC_CONTROL_PLANE_XDS_BOOTSTRAP_ADDR` | Host:port provisioned proxies use to dial xDS. |
@@ -50,7 +51,12 @@ Full schema and validation live in [`crates/ugwc/src/config.rs`](../crates/ugwc/
 
 See [architecture.md — Compatibility pins](architecture.md#compatibility-pins).
 
+## Example manifest (fat Gateway API surface)
+
+For a multi-namespace sample that covers `ListenerSet`, cross-namespace TLS listener certs, `ReferenceGrant`, `HTTPRoute` / `GRPCRoute`, and `BackendTLSPolicy` with a cross-namespace CA `ConfigMap`, see [example-gateway-standard-plus-tls.md](example-gateway-standard-plus-tls.md) and [`examples/gateway-standard-plus-tls/`](../examples/gateway-standard-plus-tls/).
+
 ## See also
 
 - [architecture.md](architecture.md) — Watch graph, reconcile flow, BackendTLS limitations.
 - [design.md](design.md) — IR and publish model.
+- [example-gateway-standard-plus-tls.md](example-gateway-standard-plus-tls.md) — Apply order, env vars, `ugwc xds-dump` debugging.

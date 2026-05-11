@@ -1,6 +1,6 @@
 //! Gateway API control plane binary — see `design/implementation-plan.md`.
 
-use clap::Parser;
+use clap::{Parser, Subcommand};
 
 mod admin;
 mod config;
@@ -9,13 +9,22 @@ mod leader;
 mod logging;
 mod metrics;
 mod run;
+mod xds_dump;
 
 #[derive(Parser, Debug)]
 #[command(name = "ugwc", version = version_string())]
 struct Cli {
+    #[command(subcommand)]
+    command: Option<Commands>,
     /// Dump effective configuration as JSON and exit.
     #[arg(long)]
     dump_config: bool,
+}
+
+#[derive(Subcommand, Debug)]
+enum Commands {
+    /// Open an ADS stream and print `DiscoveryResponse` summaries (debugging).
+    XdsDump(xds_dump::XdsDumpArgs),
 }
 
 const fn version_string() -> &'static str {
@@ -30,6 +39,10 @@ const fn version_string() -> &'static str {
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let cli = Cli::parse();
+    if let Some(Commands::XdsDump(args)) = cli.command {
+        return xds_dump::run(args).await;
+    }
+
     let cfg = config::Config::from_env()?;
     if cli.dump_config {
         println!("{}", serde_json::to_string_pretty(&cfg)?);

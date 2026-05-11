@@ -1,0 +1,15 @@
+# Apply with: kubectl apply -k examples/gateway-standard-plus-tls/
+# Requires Gateway API v1.5+ standard CRDs plus BackendTLSPolicy v1 (see docs/example-gateway-standard-plus-tls.md).
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - 00-namespaces.yaml
+  - 01-gatewayclass.yaml
+  - 02-listener-tls-secret.yaml
+  - 03-backend-ca-configmap.yaml
+  - 04-referencegrants.yaml
+  - 05-demo-service.yaml
+  - 06-gateway.yaml
+  - 07-listenerset.yaml
+  - 08-backend-tls-policy.yaml
+  - 09-httproute-grpcroute.yaml

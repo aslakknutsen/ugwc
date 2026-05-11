@@ -1,0 +1,32 @@
+# Backend Service + EndpointSlice (RFC5737 documentation addresses; control-plane debugging only).
+apiVersion: v1
+kind: Service
+metadata:
+  name: demo-backend
+  namespace: ugwc-sample-workloads
+spec:
+  selector:
+    app.kubernetes.io/name: demo-backend-nonexistent
+  ports:
+    - name: https
+      port: 8443
+      protocol: TCP
+      targetPort: 8443
+---
+apiVersion: discovery.k8s.io/v1
+kind: EndpointSlice
+metadata:
+  name: demo-backend-1
+  namespace: ugwc-sample-workloads
+  labels:
+    kubernetes.io/service-name: demo-backend
+addressType: IPv4
+endpoints:
+  - addresses:
+      - "203.0.113.10"
+    conditions:
+      ready: true
+ports:
+  - name: https
+    port: 8443
+    protocol: TCP

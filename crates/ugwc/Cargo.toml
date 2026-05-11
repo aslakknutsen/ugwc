@@ -14,7 +14,9 @@ path = "src/main.rs"
 [dependencies]
 ugwc-core = { path = "../ugwc-core" }
 ugwc-k8s = { path = "../ugwc-k8s" }
+ugwc-gwxds = { path = "../ugwc-gwxds" }
 ugwc-xds = { path = "../ugwc-xds" }
+prost.workspace = true
 tokio.workspace = true
 tokio-util.workspace = true
 tracing.workspace = true
@@ -32,3 +34,6 @@ http.workspace = true
 futures.workspace = true
 kube.workspace = true
 once_cell.workspace = true
+tonic.workspace = true
+tokio-stream.workspace = true
+xds-api.workspace = true

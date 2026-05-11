@@ -1,0 +1,31 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: ugwc-sample-gateway
+  labels:
+    kubernetes.io/metadata.name: ugwc-sample-gateway
+    ugwc.praxis-proxy.dev/sample: "gateway"
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: ugwc-sample-certs
+  labels:
+    kubernetes.io/metadata.name: ugwc-sample-certs
+    ugwc.praxis-proxy.dev/sample: "certs"
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: ugwc-sample-workloads
+  labels:
+    kubernetes.io/metadata.name: ugwc-sample-workloads
+    ugwc.praxis-proxy.dev/sample: "workloads"
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: ugwc-sample-routes
+  labels:
+    kubernetes.io/metadata.name: ugwc-sample-routes
+    ugwc.praxis-proxy.dev/sample: "routes"

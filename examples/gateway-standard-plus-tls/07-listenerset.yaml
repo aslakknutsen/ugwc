@@ -1,0 +1,18 @@
+apiVersion: gateway.networking.k8s.io/v1
+kind: ListenerSet
+metadata:
+  name: demo-extra-listeners
+  namespace: ugwc-sample-routes
+spec:
+  parentRefs:
+    - group: gateway.networking.k8s.io
+      kind: Gateway
+      name: demo-gateway
+      namespace: ugwc-sample-gateway
+  listeners:
+    - name: metrics
+      protocol: HTTP
+      port: 9090
+      allowedRoutes:
+        namespaces:
+          from: Same

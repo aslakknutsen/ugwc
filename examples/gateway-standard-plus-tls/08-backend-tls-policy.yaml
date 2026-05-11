@@ -1,0 +1,18 @@
+apiVersion: gateway.networking.k8s.io/v1
+kind: BackendTLSPolicy
+metadata:
+  name: demo-backend-tls
+  namespace: ugwc-sample-workloads
+spec:
+  targetRefs:
+    - group: ""
+      kind: Service
+      name: demo-backend
+      sectionName: https
+  validation:
+    hostname: demo-backend.ugwc-sample-workloads.svc.cluster.local
+    caCertificateRefs:
+      - group: ""
+        kind: ConfigMap
+        name: backend-ca
+        namespace: ugwc-sample-certs
