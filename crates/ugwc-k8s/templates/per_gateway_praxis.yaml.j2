@@ -95,7 +95,7 @@ spec:
           env:
             - name: ISTIOD_ADDR
               value: {{ xds_bootstrap_addr_json }}
-            - name: UGWC_XDS_NODE_ID
+            - name: XDS_NODE_ID
               value: {{ gateway_scope_json }}
             - name: UGWC_XDS_INSECURE
               value: {{ xds_insecure_json }}

@@ -1,0 +1,44 @@
+# Default values for ugwc — override for your cluster (controller names, image, TLS, etc.).
+
+replicaCount: 1
+
+nameOverride: ""
+fullnameOverride: ""
+
+image:
+  repository: ugwc
+  tag: dev
+  pullPolicy: IfNotPresent
+
+serviceAccount:
+  create: true
+  name: "ugwc"
+
+service:
+  type: ClusterIP
+  ports:
+    xds: 18000
+    admin: 8080
+
+# Core UGWC_* settings (see docs/operations.md).
+ugwc:
+  kubeEnable: true
+  controllerNames: "ugwc.io/default-controller"
+  runProfile: dev
+  xdsInsecure: true
+  logJson: false
+  xdsWire: gwxds
+  leaderElection: false
+  # When true: sets UGWC_DATAPLANE_ENABLE and adds ClusterRole rules for per-gateway Praxis
+  # (Deployments, Services, ServiceAccounts). Keep off unless you use that dataplane mode.
+  dataplaneEnable: true
+  endpointDebounceMs: 200
+  # If empty, the chart sets bootstrap to <fullname>.<namespace>.svc.cluster.local:<xds port>.
+  controlPlaneXdsBootstrapAddr: ""
+
+podAnnotations: {}
+
+resources: {}
+
+# Additional container env (literal names, e.g. UGWC_FOO).
+extraEnv: []

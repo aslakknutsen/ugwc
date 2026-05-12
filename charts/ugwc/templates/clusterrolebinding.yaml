@@ -1,0 +1,14 @@
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ include "ugwc.fullname" . }}
+  labels:
+    {{- include "ugwc.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ include "ugwc.fullname" . }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "ugwc.serviceAccountName" . }}
+    namespace: {{ .Release.Namespace }}

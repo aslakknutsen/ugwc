@@ -1,0 +1,77 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "ugwc.fullname" . }}
+  labels:
+    {{- include "ugwc.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "ugwc.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      {{- if .Values.podAnnotations }}
+      annotations:
+        {{- toYaml .Values.podAnnotations | nindent 8 }}
+      {{- end }}
+      labels:
+        {{- include "ugwc.selectorLabels" . | nindent 8 }}
+    spec:
+      serviceAccountName: {{ include "ugwc.serviceAccountName" . }}
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        fsGroup: 65532
+      containers:
+        - name: ugwc
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          ports:
+            - name: xds
+              containerPort: {{ .Values.service.ports.xds }}
+              protocol: TCP
+            - name: admin
+              containerPort: {{ .Values.service.ports.admin }}
+              protocol: TCP
+          env:
+            - name: UGWC_ADMIN_LISTEN_ADDR
+              value: "0.0.0.0:{{ .Values.service.ports.admin }}"
+            - name: UGWC_XDS_LISTEN_ADDR
+              value: "0.0.0.0:{{ .Values.service.ports.xds }}"
+            - name: UGWC_KUBE_ENABLE
+              value: {{ .Values.ugwc.kubeEnable | quote }}
+            - name: UGWC_CONTROLLER_NAMES
+              value: {{ .Values.ugwc.controllerNames | quote }}
+            - name: UGWC_RUN_PROFILE
+              value: {{ .Values.ugwc.runProfile | quote }}
+            - name: UGWC_XDS_INSECURE
+              value: {{ .Values.ugwc.xdsInsecure | quote }}
+            - name: UGWC_LOG_JSON
+              value: {{ .Values.ugwc.logJson | quote }}
+            - name: UGWC_XDS_WIRE
+              value: {{ .Values.ugwc.xdsWire | quote }}
+            - name: UGWC_LEADER_ELECTION
+              value: {{ .Values.ugwc.leaderElection | quote }}
+            - name: UGWC_DATAPLANE_ENABLE
+              value: {{ .Values.ugwc.dataplaneEnable | quote }}
+            - name: UGWC_ENDPOINT_DEBOUNCE_MS
+              value: {{ .Values.ugwc.endpointDebounceMs | quote }}
+            - name: UGWC_CONTROL_PLANE_XDS_BOOTSTRAP_ADDR
+              value: {{ include "ugwc.bootstrapAddr" . | quote }}
+            {{- with .Values.extraEnv }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: admin
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: admin
+          {{- with .Values.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}

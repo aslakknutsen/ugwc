@@ -4,4 +4,4 @@ kind: GatewayClass
 metadata:
   name: ugwc-sample
 spec:
-  controllerName: example.com/ugwc-sample
+  controllerName: ugwc.io/default-controller

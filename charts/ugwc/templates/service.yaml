@@ -1,0 +1,20 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "ugwc.fullname" . }}
+  labels:
+    {{- include "ugwc.labels" . | nindent 4 }}
+spec:
+  type: {{ .Values.service.type }}
+  selector:
+    {{- include "ugwc.selectorLabels" . | nindent 4 }}
+  ports:
+    - name: xds
+      port: {{ .Values.service.ports.xds }}
+      targetPort: xds
+      protocol: TCP
+      appProtocol: grpc
+    - name: admin
+      port: {{ .Values.service.ports.admin }}
+      targetPort: admin
+      protocol: TCP
