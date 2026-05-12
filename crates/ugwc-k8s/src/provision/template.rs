@@ -141,7 +141,8 @@ mod tests {
             deployment_name: "ugwc-dp-gw1",
             sa_name: "ugwc-dp-gw1-sa",
             proxy_image_json: serde_json::to_string("quay.io/example/praxis:latest").unwrap(),
-            xds_bootstrap_addr_json: serde_json::to_string("ugwc.ugwc-system.svc:18000").unwrap(),
+            xds_bootstrap_addr_json: serde_json::to_string("http://ugwc.ugwc-system.svc:18000")
+                .unwrap(),
             gateway_scope_json: serde_json::to_string("ns1/gw1").unwrap(),
             xds_insecure_json: serde_json::to_string("true").unwrap(),
             xds_wire_json: serde_json::to_string("gwxds").unwrap(),

@@ -63,7 +63,7 @@ pub struct Config {
     /// Apply `PerGatewayPraxis` workloads when reconciling (also requires profile + bootstrap addr).
     #[serde(default)]
     pub dataplane_enable: bool,
-    /// Host:port provisioned proxies use to dial xDS (e.g. `ugwc.ugwc-system.svc:18000`).
+    /// Bootstrap for Praxis `ISTIOD_ADDR`: `host:port` or full URI (`http://…` cleartext, `https://…` TLS).
     #[serde(default)]
     pub control_plane_xds_bootstrap_addr: Option<String>,
     /// Built-in profiles merged with [`implementation_profiles_path`](Self::implementation_profiles_path)

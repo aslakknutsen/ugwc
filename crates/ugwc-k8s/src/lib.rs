@@ -15,7 +15,7 @@ pub use controller::{run_gateway_controller, ReconcileFn};
 pub use loader::{load_cluster_snapshot, parent_reference_to_snap, LoaderError};
 pub use mappers::{mapped_gateway_key, GatewayKey, WatchEventCause};
 pub use provision::{
-    collect_effective_listener_ports, reconcile_per_gateway_praxis,
+    collect_effective_listener_ports, praxis_istiod_dial_url, reconcile_per_gateway_praxis,
     reconcile_shared_deployment_stub, warn_per_gateway_without_enable, PraxisProvisionArgs,
     ProvisionError,
 };

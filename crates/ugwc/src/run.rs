@@ -400,7 +400,10 @@ pub async fn run(cfg: Config) -> Result<(), Box<dyn std::error::Error + Send + S
                                 let scope = format!("{ns}/{name}");
                                 let args = ugwc_k8s::PraxisProvisionArgs {
                                     proxy_image: img.to_string(),
-                                    xds_bootstrap_addr: control_plane_xds.trim().to_string(),
+                                    xds_bootstrap_addr: ugwc_k8s::praxis_istiod_dial_url(
+                                        &control_plane_xds,
+                                        xds_insecure,
+                                    ),
                                     xds_insecure,
                                     xds_wire: xds_wire.clone(),
                                     gateway_scope: scope,

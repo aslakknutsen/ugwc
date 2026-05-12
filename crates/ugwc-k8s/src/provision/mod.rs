@@ -38,6 +38,24 @@ pub struct PraxisProvisionArgs {
     pub gateway_class_name: String,
 }
 
+/// Turn `host:port` into a URI tonic can dial. Praxis xDS uses `http::Uri` + `Channel::builder`;
+/// cleartext gRPC needs an `http://` scheme, TLS needs `https://`.
+#[must_use]
+pub fn praxis_istiod_dial_url(bootstrap: &str, xds_insecure: bool) -> String {
+    let t = bootstrap.trim();
+    if t.is_empty() {
+        return String::new();
+    }
+    if t.contains("://") {
+        return t.to_string();
+    }
+    if xds_insecure {
+        format!("http://{t}")
+    } else {
+        format!("https://{t}")
+    }
+}
+
 fn deployment_name(gateway_name: &str) -> String {
     let base = gateway_name
         .chars()
@@ -257,4 +275,34 @@ pub fn warn_per_gateway_without_enable(gateway_name: &str) {
         gateway = %gateway_name,
         "profile requests per_gateway_praxis but UGWC_DATAPLANE_ENABLE is false — skipping provision"
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::praxis_istiod_dial_url;
+
+    #[test]
+    fn praxis_istiod_dial_url_adds_scheme() {
+        assert_eq!(
+            praxis_istiod_dial_url("ugwc.ugwc-system.svc:18000", true),
+            "http://ugwc.ugwc-system.svc:18000"
+        );
+        assert_eq!(
+            praxis_istiod_dial_url("ugwc.ugwc-system.svc:18000", false),
+            "https://ugwc.ugwc-system.svc:18000"
+        );
+    }
+
+    #[test]
+    fn praxis_istiod_dial_url_preserves_explicit_uri() {
+        let u = "http://cp.example:18000";
+        assert_eq!(praxis_istiod_dial_url(u, false), u);
+        assert_eq!(praxis_istiod_dial_url(u, true), u);
+    }
+
+    #[test]
+    fn praxis_istiod_dial_url_empty() {
+        assert_eq!(praxis_istiod_dial_url("", true), "");
+        assert_eq!(praxis_istiod_dial_url("  ", true), "");
+    }
 }
