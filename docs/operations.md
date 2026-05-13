@@ -55,6 +55,50 @@ See [architecture.md — Compatibility pins](architecture.md#compatibility-pins)
 
 For a multi-namespace sample that covers `ListenerSet`, cross-namespace TLS listener certs, `ReferenceGrant`, `HTTPRoute` / `GRPCRoute`, and `BackendTLSPolicy` with a cross-namespace CA `ConfigMap`, see [example-gateway-standard-plus-tls.md](example-gateway-standard-plus-tls.md) and [`examples/gateway-standard-plus-tls/`](../examples/gateway-standard-plus-tls/).
 
+## Gateway API conformance (local kind)
+
+Scripts under [`hack/`](../hack/) provision a **kind** cluster with **MetalLB**, install **Gateway API** standard CRDs (pin from [`hack/conformance_defaults.sh`](../hack/conformance_defaults.sh)), optionally the **inference extension** CRDs, build and load the **ugwc** image, **`helm install`** the chart, and apply a **GatewayClass** whose name matches what the conformance runner passes to upstream `go test ./conformance`.
+
+**Flow**
+
+1. `make hack-setup` or `./hack/setup.sh` (add `--skip-build` to skip `docker`/`podman` build; image must already exist as `IMAGE_REPO:IMAGE_TAG`).
+2. `make conformance` or `./hack/conformance.sh` (shallow-clones `kubernetes-sigs/gateway-api` into a cache dir unless `GATEWAY_API_SRC` is set).
+
+**Shared defaults** ([`hack/conformance_defaults.sh`](../hack/conformance_defaults.sh))
+
+| Variable | Purpose |
+|----------|---------|
+| `UGWC_CONFORMANCE_GATEWAY_CLASS` | `GatewayClass.metadata.name` applied by setup and passed as `--gateway-class` |
+| `UGWC_GATEWAY_CONTROLLER_NAME` | `GatewayClass.spec.controllerName` (must match chart `ugwc.controllerNames`) |
+| `GATEWAY_API_REF` | Gateway API git tag for CRDs and test checkout |
+
+**`hack/setup.sh` overrides**
+
+| Variable | Default | Purpose |
+|----------|---------|---------|
+| `CLUSTER_NAME` | `ugwc-dev` | kind cluster name |
+| `CONTAINER_ENGINE` | `docker` | Image build / `network inspect` for MetalLB pool |
+| `IMAGE_REPO` / `IMAGE_TAG` | `ugwc` / `dev` | Image and Helm values |
+| `HELM_RELEASE` / `HELM_NAMESPACE` | `ugwc` / `ugwc-system` | Helm install target |
+| `METALLB_VERSION` | `v0.14.9` | MetalLB install manifest tag |
+| `KIND_DOCKER_NETWORK` | `kind` | Container network for subnet auto-detection |
+| `METALLB_IP_POOL` | (auto) | Optional `start-end` IP range for L2 pool |
+| `INSTALL_INFERENCE_CRDS` | `1` | Set `0` to skip inference extension CRD apply |
+| `INFERENCE_VERSION` | `v1.4.0` | When inference CRDs are installed |
+
+**`hack/conformance.sh` overrides**
+
+| Variable | Default | Purpose |
+|----------|---------|---------|
+| `CLUSTER_NAME` | `ugwc-dev` | Selects kubectl context `kind-$CLUSTER_NAME` |
+| `GATEWAY_CLASS` | `$UGWC_CONFORMANCE_GATEWAY_CLASS` | `--gateway-class` |
+| `GATEWAY_API_CACHE` | `~/.cache/ugwc-gateway-api-conformance` | Parent dir for clone |
+| `CONFORMANCE_SUPPORTED_FEATURES` | `Gateway,HTTPRoute` | `--supported-features` |
+| `GO_TEST_FLAGS` | `-timeout=3h -count=1 -v` | Extra `go test` flags |
+| `CONFORMANCE_SINGLE_TEST` | — | Short name; or use `./hack/conformance.sh --single-test NAME` |
+
+**Dataplane:** the chart defaults `ugwc.dataplaneEnable: true`, so conformance that exercises provisioned proxies may pull the built-in Praxis image (`quay.io/aslakknutsen/praxis:latest` per code). Clusters need registry access, or override the image / disable dataplane via Helm for your environment.
+
 ## See also
 
 - [architecture.md](architecture.md) — Watch graph, reconcile flow, BackendTLS limitations.

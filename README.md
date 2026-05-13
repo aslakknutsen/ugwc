@@ -7,6 +7,7 @@ Gateway API–oriented control plane in Rust: reconcile cluster objects into an 
 ## Repository layout
 
 - `crates/` — workspace members: `ugwc` (binary), `ugwc-core`, `ugwc-k8s`, `ugwc-xds`, `ugwc-gwxds`
+- `hack/` — local kind cluster setup and Gateway API conformance runner
 - `design/` — detailed design and implementation plan drafts
 - `docs/` — short stable-facing docs
 
@@ -54,6 +55,17 @@ helm upgrade --install ugwc ./charts/ugwc --namespace ugwc-system --create-names
 ```
 
 `values.yaml` documents further `UGWC_*`-related toggles (e.g. `ugwc.xdsInsecure`, `ugwc.dataplaneEnable`).
+
+## Gateway API conformance (local kind)
+
+Prerequisites: `kind`, `kubectl`, `helm`, `go`, `git`, `python3`, and Docker or Podman (`CONTAINER_ENGINE`). Then:
+
+```bash
+make hack-setup    # or: ./hack/setup.sh
+make conformance   # or: ./hack/conformance.sh
+```
+
+Details, environment variables, and dataplane image notes: [docs/operations.md](docs/operations.md#gateway-api-conformance-local-kind).
 
 ## License
 

@@ -8,7 +8,7 @@ use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 
-/// `GatewayClass.spec.controllerName` for the built-in per-gateway profile (`sample-k8s/resources.yaml`).
+/// `GatewayClass.spec.controllerName` for the built-in per-gateway profile (see `hack/setup.sh` / `hack/conformance_defaults.sh`).
 pub const BUILTIN_DEFAULT_CONTROLLER_NAME: &str = "ugwc.io/default-controller";
 
 /// Default Praxis image for the built-in per-gateway profile (matches Istio `gwxds.yaml`).

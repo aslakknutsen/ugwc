@@ -1,6 +1,6 @@
 # Local parity with CI — see design/implementation-plan.md Phase 0.4
 .PHONY: fmt fmt-check clippy test build release ci check deny docker-build image-build container-build \
-	helm-lint helm-template helm-install helm-upgrade helm-uninstall _ensure_protoc_tmp
+	helm-lint helm-template helm-install helm-upgrade helm-uninstall hack-setup conformance _ensure_protoc_tmp
 
 # prost-build runs protoc, which writes under $TMPDIR; a full /tmp breaks release builds.
 # Override with your own path: `make release TMPDIR=/var/tmp` (or export TMPDIR).
@@ -64,6 +64,10 @@ helm-upgrade: helm-install
 helm-uninstall:
 	helm uninstall "$(HELM_RELEASE)" --namespace "$(HELM_NAMESPACE)"
 
-# Requires GATEWAY_API_ROOT, Go, and a conforming cluster — see hack/conformance.sh
+# kind + MetalLB + CRDs + ugwc + GatewayClass — see docs/operations.md
+hack-setup:
+	./hack/setup.sh
+
+# Requires Go, git, kubectl; cluster from hack/setup.sh — see hack/conformance.sh
 conformance:
 	./hack/conformance.sh
