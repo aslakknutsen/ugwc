@@ -153,7 +153,11 @@ pub fn reference_grant_permits_inference_pool_ref(
     false
 }
 
-/// Cross-namespace route parentRef to a `Gateway` requires a [`ReferenceGrant`] in the Gateway namespace.
+/// Whether an explicit [`ReferenceGrant`] in the `Gateway` namespace allows `from` (route ns/kind) to reference that `Gateway`.
+///
+/// Gateway API: cross-namespace **Gateway ↔ route attachment** is governed by the Gateway listener's
+/// `allowedRoutes` (and related policy), **not** by `ReferenceGrant` (see spec: ReferenceGrant
+/// exceptions). This helper remains for callers that want to model optional explicit grants.
 #[must_use]
 pub fn reference_grant_permits_route_to_gateway_parent(
     grants: &[ReferenceGrantSnap],
@@ -252,6 +256,10 @@ pub fn reference_grant_permits_route_to_listener_set_parent(
 }
 
 /// True when a route is denied attachment to this reconcile scope solely because of a missing cross-namespace [`ReferenceGrant`] on the parent ref.
+///
+/// Note: `ReferenceGrant` does **not** apply to cross-namespace attachment of routes to a `Gateway`
+/// parent (listener `allowedRoutes` / hostname rules decide); it **does** apply to `ListenerSet`
+/// parents and to other cross-namespace object refs (e.g. backends, Secrets).
 #[must_use]
 pub fn route_parent_attachment_ref_not_permitted(
     snapshot: &ClusterSnapshot,
@@ -274,15 +282,7 @@ pub fn route_parent_attachment_ref_not_permitted(
             if pns != snapshot.gateway_namespace || parent.name != snapshot.gateway_name {
                 return false;
             }
-            route_namespace != snapshot.gateway_namespace.as_str()
-                && gateway_inline_any_listener_accepts_route(snapshot, route_namespace, route_kind)
-                && !reference_grant_permits_route_to_gateway_parent(
-                    &snapshot.reference_grants,
-                    route_namespace,
-                    route_kind,
-                    &snapshot.gateway_namespace,
-                    &snapshot.gateway_name,
-                )
+            false
         }
         "ListenerSet" => {
             let ls_ns = parent_namespace(parent, route_namespace);
@@ -697,15 +697,6 @@ pub(crate) fn attachment_keys_for_parent_ref_ns(
             if !gateway_inline_any_listener_accepts_route(snapshot, route_ns, route_kind) {
                 return keys;
             }
-            if !reference_grant_permits_route_to_gateway_parent(
-                &snapshot.reference_grants,
-                route_ns,
-                route_kind,
-                &snapshot.gateway_namespace,
-                &snapshot.gateway_name,
-            ) {
-                return keys;
-            }
         }
         for e in &snapshot.effective_listeners {
             if !matches!(e.parent, ListenerParentSnap::InlineGateway) {
@@ -1099,7 +1090,7 @@ pub fn udp_route_accepted_for_parent_ref(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::snapshot::ReferenceGrantSnap;
+    use crate::snapshot::{ParentRefSnap, ReferenceGrantSnap};
 
     #[test]
     fn gateway_secret_grant_same_namespace_implicit() {
@@ -1349,6 +1340,32 @@ mod tests {
             "secrets",
             "ConfigMap",
             "ca-bundle",
+        ));
+    }
+
+    #[test]
+    fn gateway_cross_namespace_parent_never_ref_not_permitted_without_grant() {
+        use std::collections::HashSet;
+
+        let mut snap = ClusterSnapshot::default();
+        snap.gateway_namespace = "infra".into();
+        snap.gateway_name = "gw".into();
+        snap.reference_grants = vec![];
+        let parent = ParentRefSnap {
+            group: Some("gateway.networking.k8s.io".into()),
+            kind: Some("Gateway".into()),
+            namespace: Some("infra".into()),
+            name: "gw".into(),
+            section_name: None,
+            port: None,
+        };
+        let attached_ls = HashSet::new();
+        assert!(!route_parent_attachment_ref_not_permitted(
+            &snap,
+            "other-ns",
+            "HTTPRoute",
+            &parent,
+            &attached_ls,
         ));
     }
 

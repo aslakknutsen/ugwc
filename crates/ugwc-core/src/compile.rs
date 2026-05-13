@@ -1051,7 +1051,8 @@ pub fn udp_route_resolved_refs_row(
 
 fn route_ref_error_reason(reason: &str) -> &'static str {
     match reason {
-        "UnsupportedBackendKind" => "UnsupportedBackendKind",
+        "InvalidKind" => "InvalidKind",
+        "UnsupportedBackendKind" => "InvalidKind",
         "BackendNotFound" => "BackendNotFound",
         "NoReadyEndpoints" => "NoReadyEndpoints",
         "RefNotPermitted" => "RefNotPermitted",
@@ -1304,7 +1305,7 @@ mod tests {
     }
 
     #[test]
-    fn http_route_accepted_cross_namespace_parent_requires_grant() {
+    fn http_route_accepted_cross_namespace_gateway_without_reference_grant_when_listener_allows() {
         let listeners = vec![GatewayListenerSnap {
             name: "http".into(),
             port: 80,
@@ -1362,33 +1363,8 @@ mod tests {
         let parent = &route.parent_refs[0];
         let (st, reason, _) =
             http_route_accepted_condition_for_parent(&route, parent, &snap, &attached_ls, &report);
-        assert_eq!(st, "False");
-        assert_eq!(reason, "RefNotPermitted");
-
-        let mut snap_ok = snap.clone();
-        snap_ok.reference_grants.push(ReferenceGrantSnap {
-            namespace: "infra".into(),
-            name: "rg".into(),
-            from: vec![ReferenceGrantFromSnap {
-                group: Some("gateway.networking.k8s.io".into()),
-                kind: "HTTPRoute".into(),
-                namespace: "team-a".into(),
-            }],
-            to: vec![ReferenceGrantToSnap {
-                group: Some("gateway.networking.k8s.io".into()),
-                kind: "Gateway".into(),
-                name: Some("gw".into()),
-            }],
-        });
-        let (st2, reason2, _) = http_route_accepted_condition_for_parent(
-            &route,
-            parent,
-            &snap_ok,
-            &attached_ls,
-            &report,
-        );
-        assert_eq!(st2, "True");
-        assert_eq!(reason2, "Accepted");
+        assert_eq!(st, "True");
+        assert_eq!(reason, "Accepted");
     }
 
     #[test]

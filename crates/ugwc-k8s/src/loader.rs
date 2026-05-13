@@ -556,7 +556,7 @@ fn udp_route_relevant_to_gateway(
 }
 
 fn http_route_to_snap(route: &HTTPRoute) -> HttpRouteSnap {
-    let gen = route.metadata.generation.unwrap_or(0);
+    let gen = route.metadata.generation.filter(|&g| g > 0).unwrap_or(1);
     let creation_timestamp_rfc3339 = route
         .metadata
         .creation_timestamp
@@ -615,7 +615,7 @@ fn http_route_to_snap(route: &HTTPRoute) -> HttpRouteSnap {
 }
 
 fn grpc_route_to_snap(route: &GRPCRoute) -> GrpcRouteSnap {
-    let gen = route.metadata.generation.unwrap_or(0);
+    let gen = route.metadata.generation.filter(|&g| g > 0).unwrap_or(1);
     let creation_timestamp_rfc3339 = route
         .metadata
         .creation_timestamp
@@ -675,7 +675,7 @@ fn grpc_route_to_snap(route: &GRPCRoute) -> GrpcRouteSnap {
 }
 
 fn tls_route_to_snap(route: &TLSRoute) -> TlsRouteSnap {
-    let gen = route.metadata.generation.unwrap_or(0);
+    let gen = route.metadata.generation.filter(|&g| g > 0).unwrap_or(1);
     let creation_timestamp_rfc3339 = route
         .metadata
         .creation_timestamp
@@ -714,7 +714,7 @@ fn tls_route_to_snap(route: &TLSRoute) -> TlsRouteSnap {
 }
 
 fn tcp_route_to_snap(route: &TCPRoute) -> TcpRouteSnap {
-    let gen = route.metadata.generation.unwrap_or(0);
+    let gen = route.metadata.generation.filter(|&g| g > 0).unwrap_or(1);
     let creation_timestamp_rfc3339 = route
         .metadata
         .creation_timestamp
@@ -752,7 +752,7 @@ fn tcp_route_to_snap(route: &TCPRoute) -> TcpRouteSnap {
 }
 
 fn udp_route_to_snap(route: &UDPRoute) -> UdpRouteSnap {
-    let gen = route.metadata.generation.unwrap_or(0);
+    let gen = route.metadata.generation.filter(|&g| g > 0).unwrap_or(1);
     let creation_timestamp_rfc3339 = route
         .metadata
         .creation_timestamp
@@ -1217,7 +1217,7 @@ pub async fn load_cluster_snapshot(
         gateway_namespace: gateway_ns.to_string(),
         gateway_name: gateway_name.to_string(),
         gateway_class_name: gw.spec.gateway_class_name.clone(),
-        gateway_generation: gw.metadata.generation.unwrap_or(0),
+        gateway_generation: gw.metadata.generation.filter(|&g| g > 0).unwrap_or(1),
         gateway_addresses: gw
             .spec
             .addresses

@@ -39,6 +39,7 @@ pub use ir::{
 };
 pub use listener_merge::merge_effective_listeners;
 pub use listener_route_kinds::{
+    allowed_route_kinds_invalid_for_gateway_protocol,
     effective_listener_has_invalid_allowed_route_kinds,
     effective_listener_supported_route_kinds_for_status,
 };

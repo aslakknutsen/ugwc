@@ -5,14 +5,19 @@ use std::collections::{BTreeMap, HashSet};
 
 use uuid::Uuid;
 
-use crate::compile::{CompileReport, HttpGrpcConflictLoser, ObjectRefErr};
+use crate::compile::{
+    CompileReport, HttpGrpcConflictLoser, ObjectRefErr, grpc_route_accepted_condition_for_parent,
+    http_route_accepted_condition_for_parent, tcp_route_accepted_condition_for_parent,
+    tls_route_accepted_condition_for_parent, udp_route_accepted_condition_for_parent,
+};
 use crate::http_route_attachment::{
-    find_effective_for_key, grpc_route_attachment_keys, grpc_route_listener_hostname_ok,
-    intersect_route_listener_hosts, listener_attachment_count_key,
-    reference_grant_permits_inference_pool_ref, reference_grant_permits_service_ref,
-    route_attachment_keys, route_listener_hostname_ok, tcp_route_attachment_keys,
-    tcp_route_listener_ok, tls_route_attachment_keys, tls_route_listener_hostname_ok,
-    udp_route_attachment_keys, udp_route_listener_ok,
+    attachment_keys_for_parent_ref, find_effective_for_key, grpc_attachment_keys_for_parent_ref,
+    grpc_route_attachment_keys, grpc_route_listener_hostname_ok, intersect_route_listener_hosts,
+    listener_attachment_count_key, reference_grant_permits_inference_pool_ref,
+    reference_grant_permits_service_ref, route_attachment_keys, route_listener_hostname_ok,
+    tcp_attachment_keys_for_parent_ref, tcp_route_attachment_keys, tcp_route_listener_ok,
+    tls_attachment_keys_for_parent_ref, tls_route_attachment_keys, tls_route_listener_hostname_ok,
+    udp_attachment_keys_for_parent_ref, udp_route_attachment_keys, udp_route_listener_ok,
 };
 use crate::inference::InferenceIr;
 use crate::ir::{
@@ -823,7 +828,7 @@ fn resolve_http_route_backends(
                 kind: "HTTPRoute".into(),
                 namespace: route.namespace.clone(),
                 name: route.name.clone(),
-                reason: "UnsupportedBackendKind".into(),
+                reason: "InvalidKind".into(),
             });
             continue;
         }
@@ -921,7 +926,7 @@ fn resolve_grpc_route_backends(
                 kind: "GRPCRoute".into(),
                 namespace: route.namespace.clone(),
                 name: route.name.clone(),
-                reason: "UnsupportedBackendKind".into(),
+                reason: "InvalidKind".into(),
             });
             continue;
         }
@@ -1019,7 +1024,7 @@ fn resolve_tls_route_backends(
                 kind: "TLSRoute".into(),
                 namespace: route.namespace.clone(),
                 name: route.name.clone(),
-                reason: "UnsupportedBackendKind".into(),
+                reason: "InvalidKind".into(),
             });
             continue;
         }
@@ -1117,7 +1122,7 @@ fn resolve_tcp_route_backends(
                 kind: "TCPRoute".into(),
                 namespace: route.namespace.clone(),
                 name: route.name.clone(),
-                reason: "UnsupportedBackendKind".into(),
+                reason: "InvalidKind".into(),
             });
             continue;
         }
@@ -1215,7 +1220,7 @@ fn resolve_udp_route_backends(
                 kind: "UDPRoute".into(),
                 namespace: route.namespace.clone(),
                 name: route.name.clone(),
-                reason: "UnsupportedBackendKind".into(),
+                reason: "InvalidKind".into(),
             });
             continue;
         }
@@ -1817,6 +1822,116 @@ fn bump_listener_route_count(counts: &mut BTreeMap<String, u32>, lk: &crate::ir:
         .or_insert(0) += 1;
 }
 
+fn http_route_attachment_accepted_for_listener(
+    route: &HttpRouteSnap,
+    lk: &crate::ir::ListenerAttachmentIr,
+    snapshot: &ClusterSnapshot,
+    attached_ls: &HashSet<(String, String)>,
+    report: &CompileReport,
+) -> bool {
+    for parent in &route.parent_refs {
+        let keys = attachment_keys_for_parent_ref(route, parent, snapshot, attached_ls);
+        if !keys.iter().any(|k| k == lk) {
+            continue;
+        }
+        let (st, _, _) = http_route_accepted_condition_for_parent(
+            route, parent, snapshot, attached_ls, report,
+        );
+        if st == "True" {
+            return true;
+        }
+    }
+    false
+}
+
+fn grpc_route_attachment_accepted_for_listener(
+    route: &GrpcRouteSnap,
+    lk: &crate::ir::ListenerAttachmentIr,
+    snapshot: &ClusterSnapshot,
+    attached_ls: &HashSet<(String, String)>,
+    report: &CompileReport,
+) -> bool {
+    for parent in &route.parent_refs {
+        let keys = grpc_attachment_keys_for_parent_ref(route, parent, snapshot, attached_ls);
+        if !keys.iter().any(|k| k == lk) {
+            continue;
+        }
+        let (st, _, _) = grpc_route_accepted_condition_for_parent(
+            route, parent, snapshot, attached_ls, report,
+        );
+        if st == "True" {
+            return true;
+        }
+    }
+    false
+}
+
+fn tls_route_attachment_accepted_for_listener(
+    route: &TlsRouteSnap,
+    lk: &crate::ir::ListenerAttachmentIr,
+    snapshot: &ClusterSnapshot,
+    attached_ls: &HashSet<(String, String)>,
+    report: &CompileReport,
+) -> bool {
+    for parent in &route.parent_refs {
+        let keys = tls_attachment_keys_for_parent_ref(route, parent, snapshot, attached_ls);
+        if !keys.iter().any(|k| k == lk) {
+            continue;
+        }
+        let (st, _, _) = tls_route_accepted_condition_for_parent(
+            route, parent, snapshot, attached_ls, report,
+        );
+        if st == "True" {
+            return true;
+        }
+    }
+    false
+}
+
+fn tcp_route_attachment_accepted_for_listener(
+    route: &TcpRouteSnap,
+    lk: &crate::ir::ListenerAttachmentIr,
+    snapshot: &ClusterSnapshot,
+    attached_ls: &HashSet<(String, String)>,
+    report: &CompileReport,
+) -> bool {
+    for parent in &route.parent_refs {
+        let keys = tcp_attachment_keys_for_parent_ref(route, parent, snapshot, attached_ls);
+        if !keys.iter().any(|k| k == lk) {
+            continue;
+        }
+        let (st, _, _) = tcp_route_accepted_condition_for_parent(
+            route, parent, snapshot, attached_ls, report,
+        );
+        if st == "True" {
+            return true;
+        }
+    }
+    false
+}
+
+fn udp_route_attachment_accepted_for_listener(
+    route: &UdpRouteSnap,
+    lk: &crate::ir::ListenerAttachmentIr,
+    snapshot: &ClusterSnapshot,
+    attached_ls: &HashSet<(String, String)>,
+    report: &CompileReport,
+) -> bool {
+    for parent in &route.parent_refs {
+        let keys = udp_attachment_keys_for_parent_ref(route, parent, snapshot, attached_ls);
+        if !keys.iter().any(|k| k == lk) {
+            continue;
+        }
+        let (st, _, _) = udp_route_accepted_condition_for_parent(
+            route, parent, snapshot, attached_ls, report,
+        );
+        if st == "True" {
+            return true;
+        }
+    }
+    false
+}
+
 /// Gateway API `attachedRoutes`: count each route resource once per listener only when it would be
 /// **Accepted** there (hostname intersection + HTTP/GRPC/TLS/TCP/UDP precedence), not merely policy-attached.
 fn compute_listener_route_attachment_counts(
@@ -1840,6 +1955,10 @@ fn compute_listener_route_attachment_counts(
             if report.http_grpc_conflict_loser_at("HTTPRoute", &route.namespace, &route.name, &lk) {
                 continue;
             }
+            if !http_route_attachment_accepted_for_listener(route, &lk, snapshot, attached_ls, report)
+            {
+                continue;
+            }
             bump_listener_route_count(&mut counts, &lk);
         }
     }
@@ -1855,6 +1974,10 @@ fn compute_listener_route_attachment_counts(
                 continue;
             }
             if report.http_grpc_conflict_loser_at("GRPCRoute", &route.namespace, &route.name, &lk) {
+                continue;
+            }
+            if !grpc_route_attachment_accepted_for_listener(route, &lk, snapshot, attached_ls, report)
+            {
                 continue;
             }
             bump_listener_route_count(&mut counts, &lk);
@@ -1874,6 +1997,10 @@ fn compute_listener_route_attachment_counts(
             if report.tls_route_conflict_loser_at("TLSRoute", &route.namespace, &route.name, &lk) {
                 continue;
             }
+            if !tls_route_attachment_accepted_for_listener(route, &lk, snapshot, attached_ls, report)
+            {
+                continue;
+            }
             bump_listener_route_count(&mut counts, &lk);
         }
     }
@@ -1888,6 +2015,10 @@ fn compute_listener_route_attachment_counts(
             if report.tcp_route_conflict_loser_at("TCPRoute", &route.namespace, &route.name, &lk) {
                 continue;
             }
+            if !tcp_route_attachment_accepted_for_listener(route, &lk, snapshot, attached_ls, report)
+            {
+                continue;
+            }
             bump_listener_route_count(&mut counts, &lk);
         }
     }
@@ -1900,6 +2031,10 @@ fn compute_listener_route_attachment_counts(
                 continue;
             }
             if report.udp_route_conflict_loser_at("UDPRoute", &route.namespace, &route.name, &lk) {
+                continue;
+            }
+            if !udp_route_attachment_accepted_for_listener(route, &lk, snapshot, attached_ls, report)
+            {
                 continue;
             }
             bump_listener_route_count(&mut counts, &lk);
@@ -2950,7 +3085,7 @@ mod tests {
     }
 
     #[test]
-    fn cross_namespace_route_parent_requires_reference_grant() {
+    fn cross_namespace_route_parent_attaches_without_reference_grant_when_listener_allows() {
         let mut c = minimal_cluster();
         c.gateway_namespace = "infra".into();
         c.gateway_name = "gw".into();
@@ -2968,10 +3103,11 @@ mod tests {
         c.services[0].namespace = "team-a".into();
         c.endpoint_slices[0].namespace = "team-a".into();
 
-        let (ir, _rep) = ir_from_cluster(&c);
+        let (ir, rep) = ir_from_cluster(&c);
         assert!(
-            ir.routes.is_empty(),
-            "cross-namespace parent without ReferenceGrant must not attach"
+            !ir.routes.is_empty(),
+            "expected cross-namespace Gateway parent attachment without ReferenceGrant: {:?}",
+            rep.errors
         );
 
         c.reference_grants.push(ReferenceGrantSnap {
@@ -2991,7 +3127,7 @@ mod tests {
         let (ir2, rep2) = ir_from_cluster(&c);
         assert!(
             !ir2.routes.is_empty(),
-            "expected routes with grant: {:?}",
+            "expected routes with optional explicit grant: {:?}",
             rep2.errors
         );
     }

@@ -23,6 +23,19 @@ pub fn route_group_kind_valid_for_listener_protocol(
 
 /// True when `spec.allowedRoutes.kinds` is non-empty and lists at least one kind not permitted
 /// for this listener's protocol (Gateway API `InvalidRouteKinds`).
+/// True when `kinds` is non-empty and lists at least one route kind not permitted for `protocol`
+/// (Gateway API `InvalidRouteKinds`).
+#[must_use]
+pub fn allowed_route_kinds_invalid_for_gateway_protocol(
+    protocol: &str,
+    kinds: &[RouteGroupKindSnap],
+) -> bool {
+    !kinds.is_empty()
+        && kinds
+            .iter()
+            .any(|k| !route_group_kind_valid_for_listener_protocol(protocol, k))
+}
+
 #[must_use]
 pub fn effective_listener_has_invalid_allowed_route_kinds(e: &EffectiveListenerSnap) -> bool {
     let kinds = e
@@ -30,12 +43,7 @@ pub fn effective_listener_has_invalid_allowed_route_kinds(e: &EffectiveListenerS
         .as_ref()
         .map(|a| &a.kinds[..])
         .unwrap_or(&[]);
-    if kinds.is_empty() {
-        return false;
-    }
-    kinds
-        .iter()
-        .any(|k| !route_group_kind_valid_for_listener_protocol(&e.protocol, k))
+    allowed_route_kinds_invalid_for_gateway_protocol(&e.protocol, kinds)
 }
 
 fn gw_route_group_kind(kind: &str) -> RouteGroupKindSnap {

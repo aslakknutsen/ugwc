@@ -112,6 +112,13 @@ fn gateway_ip_address_json(ip: &str) -> serde_json::Value {
     })
 }
 
+fn gateway_hostname_address_json(host: &str) -> serde_json::Value {
+    serde_json::json!({
+        "type": "Hostname",
+        "value": host,
+    })
+}
+
 fn gateway_status_addresses_from_service(svc: &Service) -> Vec<serde_json::Value> {
     if let Some(st) = svc.status.as_ref() {
         if let Some(lb) = st.load_balancer.as_ref() {
@@ -120,6 +127,13 @@ fn gateway_status_addresses_from_service(svc: &Service) -> Vec<serde_json::Value
                     if let Some(ip) = ing.ip.as_deref() {
                         if !ip.is_empty() {
                             return vec![gateway_ip_address_json(ip)];
+                        }
+                    }
+                }
+                for ing in ingress {
+                    if let Some(h) = ing.hostname.as_deref() {
+                        if !h.is_empty() {
+                            return vec![gateway_hostname_address_json(h)];
                         }
                     }
                 }
@@ -145,6 +159,39 @@ fn gateway_status_addresses_from_service(svc: &Service) -> Vec<serde_json::Value
         }
     }
     Vec::new()
+}
+
+fn gateway_listener_spec_route_kinds_broken(spec_listener: &crate::resources::GatewayListenerSpec) -> bool {
+    let kinds: Vec<ugwc_core::snapshot::RouteGroupKindSnap> = spec_listener
+        .allowed_routes
+        .as_ref()
+        .map(|a| {
+            a.kinds
+                .iter()
+                .map(|k| ugwc_core::snapshot::RouteGroupKindSnap {
+                    group: k.group.clone(),
+                    kind: k.kind.clone(),
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    ugwc_core::allowed_route_kinds_invalid_for_gateway_protocol(
+        spec_listener.protocol.as_str(),
+        &kinds,
+    )
+}
+
+fn listener_route_kinds_broken_for_status(
+    eff: Option<&ugwc_core::snapshot::EffectiveListenerSnap>,
+    spec_listener: Option<&crate::resources::GatewayListenerSpec>,
+) -> bool {
+    let eff_broken = eff
+        .map(ugwc_core::effective_listener_has_invalid_allowed_route_kinds)
+        .unwrap_or(false);
+    let spec_broken = spec_listener
+        .map(gateway_listener_spec_route_kinds_broken)
+        .unwrap_or(false);
+    eff_broken || spec_broken
 }
 
 async fn fetch_gateway_status_addresses_json(
@@ -345,9 +392,7 @@ pub async fn apply_gateway_reconciled_status(
             {
                 cert_broken = true;
             }
-            let route_kinds_broken = eff
-                .map(ugwc_core::effective_listener_has_invalid_allowed_route_kinds)
-                .unwrap_or(false);
+            let route_kinds_broken = listener_route_kinds_broken_for_status(eff, spec_row);
             let (res_status, res_reason, res_msg) = if cert_broken {
                 (
                     "False",
@@ -1431,7 +1476,11 @@ pub async fn apply_listenerset_reconciled_status(
     if name.is_empty() || ns.is_empty() {
         return Ok(());
     }
-    let gen = ls.metadata.generation.unwrap_or(0);
+    let gen = ls
+        .metadata
+        .generation
+        .filter(|&g| g > 0)
+        .unwrap_or(1);
     let ls_ns_name = (ns.to_string(), name.to_string());
     let ls_specific_err =
         outcome.report.errors.iter().any(|e| {
@@ -1474,9 +1523,7 @@ pub async fn apply_listenerset_reconciled_status(
                             || e.tls_key_pem.is_empty())
                 })
                 .unwrap_or(false);
-            let route_kinds_broken = eff
-                .map(ugwc_core::effective_listener_has_invalid_allowed_route_kinds)
-                .unwrap_or(false);
+            let route_kinds_broken = listener_route_kinds_broken_for_status(eff, Some(l));
             let lk = ugwc_core::ListenerAttachmentIr {
                 parent_kind: "ListenerSet".into(),
                 parent_namespace: ls_ns_name.0.clone(),
