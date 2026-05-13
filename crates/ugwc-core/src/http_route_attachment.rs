@@ -275,6 +275,7 @@ pub fn route_parent_attachment_ref_not_permitted(
                 return false;
             }
             route_namespace != snapshot.gateway_namespace.as_str()
+                && gateway_inline_any_listener_accepts_route(snapshot, route_namespace, route_kind)
                 && !reference_grant_permits_route_to_gateway_parent(
                     &snapshot.reference_grants,
                     route_namespace,
@@ -289,6 +290,13 @@ pub fn route_parent_attachment_ref_not_permitted(
                 return false;
             }
             route_namespace != ls_ns.as_str()
+                && listener_set_any_listener_accepts_route(
+                    snapshot,
+                    &ls_ns,
+                    &parent.name,
+                    route_namespace,
+                    route_kind,
+                )
                 && !reference_grant_permits_route_to_listener_set_parent(
                     &snapshot.reference_grants,
                     route_namespace,
@@ -493,16 +501,113 @@ pub fn listener_accepts_http_route(
     )
 }
 
-pub(crate) fn hosts_match_route_listener(route_host: &str, listener_host: &str) -> bool {
-    if route_host == listener_host {
-        return true;
-    }
-    let Some(suffix) = listener_host.strip_prefix("*.") else {
+/// `pattern` is a concrete hostname or a leading-`*.` DNS wildcard from Gateway API.
+#[must_use]
+pub(crate) fn hostname_literal_or_wildcard_matches(pattern: &str, host: &str) -> bool {
+    let p = pattern.trim();
+    let h = host.trim();
+    if p.is_empty() || h.is_empty() {
         return false;
-    };
-    let rh = route_host.to_ascii_lowercase();
-    let suf = suffix.to_ascii_lowercase();
-    rh == suf || rh.ends_with(&format!(".{suf}"))
+    }
+    if let Some(suffix) = p.strip_prefix("*.") {
+        let suf = suffix.to_ascii_lowercase();
+        let hh = h.to_ascii_lowercase();
+        hh == suf || hh.ends_with(&format!(".{suf}"))
+    } else {
+        p.eq_ignore_ascii_case(h)
+    }
+}
+
+/// Symmetric hostname intersection (route vs listener hostnames may each be concrete or `*.`).
+#[must_use]
+pub(crate) fn hostnames_intersect(a: &str, b: &str) -> bool {
+    hostname_literal_or_wildcard_matches(a, b) || hostname_literal_or_wildcard_matches(b, a)
+}
+
+pub(crate) fn hosts_match_route_listener(route_host: &str, listener_host: &str) -> bool {
+    hostnames_intersect(route_host, listener_host)
+}
+
+/// True if any non-conflicted inline Gateway listener admits this route namespace + kind.
+#[must_use]
+pub(crate) fn gateway_inline_any_listener_accepts_route(
+    snapshot: &ClusterSnapshot,
+    route_namespace: &str,
+    route_kind: &str,
+) -> bool {
+    snapshot.effective_listeners.iter().any(|e| {
+        matches!(e.parent, ListenerParentSnap::InlineGateway)
+            && !e.conflicted
+            && listener_accepts_route_kind(
+                route_kind,
+                route_namespace,
+                &snapshot.gateway_namespace,
+                &e.protocol,
+                e.allowed_routes.as_ref(),
+                &snapshot.namespace_labels,
+            )
+    })
+}
+
+/// True if any non-conflicted listener on this ListenerSet admits this route namespace + kind.
+#[must_use]
+pub(crate) fn listener_set_any_listener_accepts_route(
+    snapshot: &ClusterSnapshot,
+    listener_set_namespace: &str,
+    listener_set_name: &str,
+    route_namespace: &str,
+    route_kind: &str,
+) -> bool {
+    snapshot.effective_listeners.iter().any(|e| {
+        if let ListenerParentSnap::ListenerSet { namespace, name } = &e.parent {
+            namespace == listener_set_namespace
+                && name == listener_set_name
+                && !e.conflicted
+                && listener_accepts_route_kind(
+                    route_kind,
+                    route_namespace,
+                    &snapshot.gateway_namespace,
+                    &e.protocol,
+                    e.allowed_routes.as_ref(),
+                    &snapshot.namespace_labels,
+                )
+        } else {
+            false
+        }
+    })
+}
+
+/// For a Gateway `parentRef` targeting this reconcile scope: if ignoring `sectionName`/`port`
+/// still yields at least one listener that admits the route kind + namespace, the strict empty
+/// key set is a parentRef shape mismatch ([`RouteReasonNoMatchingParent`]).
+#[must_use]
+pub(crate) fn gateway_parent_ref_has_relaxed_keys_non_empty(
+    route_ns: &str,
+    route_kind: &str,
+    p: &ParentRefSnap,
+    snapshot: &ClusterSnapshot,
+) -> bool {
+    let g = p.group.as_deref().unwrap_or("gateway.networking.k8s.io");
+    let k = p.kind.as_deref().unwrap_or("Gateway");
+    if !gateway_api_group(&Some(g.to_string())) || k != "Gateway" {
+        return false;
+    }
+    let pns = parent_namespace(p, route_ns);
+    if pns != snapshot.gateway_namespace || p.name != snapshot.gateway_name {
+        return false;
+    }
+    snapshot.effective_listeners.iter().any(|e| {
+        matches!(e.parent, ListenerParentSnap::InlineGateway)
+            && !e.conflicted
+            && listener_accepts_route_kind(
+                route_kind,
+                route_ns,
+                &snapshot.gateway_namespace,
+                &e.protocol,
+                e.allowed_routes.as_ref(),
+                &snapshot.namespace_labels,
+            )
+    })
 }
 
 /// Hostnames after intersecting route `spec.hostnames` with listener hostname.
@@ -532,7 +637,7 @@ pub(crate) fn intersect_route_listener_hosts(
         if r.is_empty() {
             continue;
         }
-        if hosts_match_route_listener(r, lh) {
+        if hostnames_intersect(r, lh) {
             out.push(r.to_string());
         }
     }
@@ -588,16 +693,19 @@ pub(crate) fn attachment_keys_for_parent_ref_ns(
         if pns != snapshot.gateway_namespace || p.name != snapshot.gateway_name {
             return keys;
         }
-        if route_ns != snapshot.gateway_namespace.as_str()
-            && !reference_grant_permits_route_to_gateway_parent(
+        if route_ns != snapshot.gateway_namespace.as_str() {
+            if !gateway_inline_any_listener_accepts_route(snapshot, route_ns, route_kind) {
+                return keys;
+            }
+            if !reference_grant_permits_route_to_gateway_parent(
                 &snapshot.reference_grants,
                 route_ns,
                 route_kind,
                 &snapshot.gateway_namespace,
                 &snapshot.gateway_name,
-            )
-        {
-            return keys;
+            ) {
+                return keys;
+            }
         }
         for e in &snapshot.effective_listeners {
             if !matches!(e.parent, ListenerParentSnap::InlineGateway) {
@@ -642,16 +750,25 @@ pub(crate) fn attachment_keys_for_parent_ref_ns(
         if !attached_ls.contains(&(ls_ns.clone(), p.name.clone())) {
             return keys;
         }
-        if route_ns != ls_ns.as_str()
-            && !reference_grant_permits_route_to_listener_set_parent(
+        if route_ns != ls_ns.as_str() {
+            if !listener_set_any_listener_accepts_route(
+                snapshot,
+                &ls_ns,
+                &p.name,
+                route_ns,
+                route_kind,
+            ) {
+                return keys;
+            }
+            if !reference_grant_permits_route_to_listener_set_parent(
                 &snapshot.reference_grants,
                 route_ns,
                 route_kind,
                 &ls_ns,
                 &p.name,
-            )
-        {
-            return keys;
+            ) {
+                return keys;
+            }
         }
         for e in &snapshot.effective_listeners {
             let ListenerParentSnap::ListenerSet {
@@ -846,53 +963,6 @@ pub(crate) fn listener_attachment_count_key(lk: &crate::ir::ListenerAttachmentIr
         "{}|{}|{}|{}|{}",
         lk.parent_kind, lk.parent_namespace, lk.parent_name, lk.section_name, lk.port
     )
-}
-
-/// Per-listener **route resource** counts for Gateway API `status.listeners[].attachedRoutes`.
-///
-/// Mirrors Istio `buildAttachedRoutesMapAllowed` in `pilot/pkg/config/kube/gatewaycommon/route_status_collection.go`:
-/// each HTTPRoute/GRPCRoute/TLSRoute/TCPRoute/UDPRoute increments every listener key returned by
-/// the attachment-key helpers (policy, grants, section/port) **without** requiring hostname
-/// intersection or successful per-rule IR staging.
-#[must_use]
-pub(crate) fn gateway_listener_attached_routes_counts(
-    snapshot: &ClusterSnapshot,
-    attached_ls: &HashSet<(String, String)>,
-) -> BTreeMap<String, u32> {
-    let mut counts: BTreeMap<String, u32> = BTreeMap::new();
-
-    let bump = |counts: &mut BTreeMap<String, u32>, lk: &crate::ir::ListenerAttachmentIr| {
-        *counts
-            .entry(listener_attachment_count_key(lk))
-            .or_insert(0) += 1;
-    };
-
-    for route in &snapshot.http_routes {
-        for lk in route_attachment_keys(route, snapshot, attached_ls) {
-            bump(&mut counts, &lk);
-        }
-    }
-    for route in &snapshot.grpc_routes {
-        for lk in grpc_route_attachment_keys(route, snapshot, attached_ls) {
-            bump(&mut counts, &lk);
-        }
-    }
-    for route in &snapshot.tls_routes {
-        for lk in tls_route_attachment_keys(route, snapshot, attached_ls) {
-            bump(&mut counts, &lk);
-        }
-    }
-    for route in &snapshot.tcp_routes {
-        for lk in tcp_route_attachment_keys(route, snapshot, attached_ls) {
-            bump(&mut counts, &lk);
-        }
-    }
-    for route in &snapshot.udp_routes {
-        for lk in udp_route_attachment_keys(route, snapshot, attached_ls) {
-            bump(&mut counts, &lk);
-        }
-    }
-    counts
 }
 
 /// Whether this parentRef would accept the route (listener policy + hostname intersection).
@@ -1280,5 +1350,20 @@ mod tests {
             "ConfigMap",
             "ca-bundle",
         ));
+    }
+
+    #[test]
+    fn hostnames_intersect_route_wildcard_covers_listener_literal() {
+        assert!(hostnames_intersect("*.specific.com", "very.specific.com"));
+    }
+
+    #[test]
+    fn hostnames_intersect_listener_wildcard_covers_route_literal() {
+        assert!(hostnames_intersect("foo.wildcard.io", "*.wildcard.io"));
+    }
+
+    #[test]
+    fn hostnames_intersect_rejects_non_overlapping() {
+        assert!(!hostnames_intersect("specific.but.wrong.com", "very.specific.com"));
     }
 }

@@ -9,8 +9,10 @@ use crate::failure_policy::FailurePolicy;
 use crate::from_cluster::ir_from_cluster;
 use crate::http_ir::{build_http_ir_from_fixture, HttpCompileFixture};
 use crate::http_route_attachment::{
-    attachment_keys_for_parent_ref, find_effective_for_key, grpc_attachment_keys_for_parent_ref,
-    grpc_route_listener_hostname_ok, listener_attachment_count_key,
+    attachment_keys_for_parent_ref, find_effective_for_key, gateway_api_group,
+    gateway_inline_any_listener_accepts_route, gateway_parent_ref_has_relaxed_keys_non_empty,
+    grpc_attachment_keys_for_parent_ref, grpc_route_listener_hostname_ok,
+    listener_attachment_count_key, listener_set_any_listener_accepts_route, parent_namespace,
     route_listener_hostname_ok, route_parent_attachment_ref_not_permitted,
     tcp_attachment_keys_for_parent_ref, tcp_route_listener_ok, tls_attachment_keys_for_parent_ref,
     tls_route_listener_hostname_ok, udp_attachment_keys_for_parent_ref, udp_route_listener_ok,
@@ -78,13 +80,23 @@ impl CompileReport {
     /// `ResolvedRefs` helpers can surface `ResolvedRefs=False`, but it must **not** suppress IR
     /// publication: empty EndpointSlices are normal during rollouts, while Gateway summary
     /// `Programmed` can still read `True` (see `ugwc_k8s::status::apply_gateway_reconciled_status`).
+    ///
+    /// HTTPRoute/GRPCRoute-scoped compile errors (backend refs, unsupported kinds, etc.) affect
+    /// route status and traffic handling but must **not** flip Gateway listener `Programmed=False`
+    /// when the Gateway itself is otherwise valid (Gateway API conformance: invalid backend refs).
     #[must_use]
     pub fn has_blocking_errors(&self) -> bool {
         self.errors.iter().any(|e| {
-            !matches!(
+            if matches!(
                 (e.kind.as_str(), e.reason.as_str()),
                 ("Endpoints", "NoReadyEndpoints")
-            )
+            ) {
+                return false;
+            }
+            if matches!(e.kind.as_str(), "HTTPRoute" | "GRPCRoute") {
+                return false;
+            }
+            true
         })
     }
 
@@ -176,6 +188,42 @@ pub fn http_route_accepted_condition_for_parent(
     attached_ls: &HashSet<(String, String)>,
     report: &CompileReport,
 ) -> (&'static str, &'static str, &'static str) {
+    let g = parent.group.as_deref().unwrap_or("gateway.networking.k8s.io");
+    let k = parent.kind.as_deref().unwrap_or("Gateway");
+    if gateway_api_group(&Some(g.to_string())) && k == "Gateway" {
+        let pns = parent_namespace(parent, &route.namespace);
+        if pns == snapshot.gateway_namespace && parent.name == snapshot.gateway_name {
+            if route.namespace != snapshot.gateway_namespace
+                && !gateway_inline_any_listener_accepts_route(snapshot, &route.namespace, "HTTPRoute")
+            {
+                return (
+                    "False",
+                    "NotAllowedByListeners",
+                    "route namespace is not accepted by any Gateway listener allowedRoutes",
+                );
+            }
+        }
+    }
+    if gateway_api_group(&Some(g.to_string())) && k == "ListenerSet" {
+        let ls_ns = parent_namespace(parent, &route.namespace);
+        if attached_ls.contains(&(ls_ns.clone(), parent.name.clone())) {
+            if route.namespace != ls_ns.as_str()
+                && !listener_set_any_listener_accepts_route(
+                    snapshot,
+                    &ls_ns,
+                    &parent.name,
+                    &route.namespace,
+                    "HTTPRoute",
+                )
+            {
+                return (
+                    "False",
+                    "NotAllowedByListeners",
+                    "route namespace is not accepted by any ListenerSet listener allowedRoutes",
+                );
+            }
+        }
+    }
     if route_parent_attachment_ref_not_permitted(
         snapshot,
         &route.namespace,
@@ -191,6 +239,18 @@ pub fn http_route_accepted_condition_for_parent(
     }
     let keys = attachment_keys_for_parent_ref(route, parent, snapshot, attached_ls);
     if keys.is_empty() {
+        if gateway_parent_ref_has_relaxed_keys_non_empty(
+            &route.namespace,
+            "HTTPRoute",
+            parent,
+            snapshot,
+        ) {
+            return (
+                "False",
+                "NoMatchingParent",
+                "parentRef does not match any listener sectionName or port on the Gateway",
+            );
+        }
         return (
             "False",
             "NotAcceptedByListeners",
@@ -227,8 +287,8 @@ pub fn http_route_accepted_condition_for_parent(
     } else {
         (
             "False",
-            "NotAcceptedByListeners",
-            "route not accepted by listener hostname intersection or allowedRoutes policy",
+            "NoMatchingListenerHostname",
+            "no intersecting hostnames between HTTPRoute and Gateway listener",
         )
     }
 }
@@ -242,6 +302,42 @@ pub fn grpc_route_accepted_condition_for_parent(
     attached_ls: &HashSet<(String, String)>,
     report: &CompileReport,
 ) -> (&'static str, &'static str, &'static str) {
+    let g = parent.group.as_deref().unwrap_or("gateway.networking.k8s.io");
+    let k = parent.kind.as_deref().unwrap_or("Gateway");
+    if gateway_api_group(&Some(g.to_string())) && k == "Gateway" {
+        let pns = parent_namespace(parent, &route.namespace);
+        if pns == snapshot.gateway_namespace && parent.name == snapshot.gateway_name {
+            if route.namespace != snapshot.gateway_namespace
+                && !gateway_inline_any_listener_accepts_route(snapshot, &route.namespace, "GRPCRoute")
+            {
+                return (
+                    "False",
+                    "NotAllowedByListeners",
+                    "route namespace is not accepted by any Gateway listener allowedRoutes",
+                );
+            }
+        }
+    }
+    if gateway_api_group(&Some(g.to_string())) && k == "ListenerSet" {
+        let ls_ns = parent_namespace(parent, &route.namespace);
+        if attached_ls.contains(&(ls_ns.clone(), parent.name.clone())) {
+            if route.namespace != ls_ns.as_str()
+                && !listener_set_any_listener_accepts_route(
+                    snapshot,
+                    &ls_ns,
+                    &parent.name,
+                    &route.namespace,
+                    "GRPCRoute",
+                )
+            {
+                return (
+                    "False",
+                    "NotAllowedByListeners",
+                    "route namespace is not accepted by any ListenerSet listener allowedRoutes",
+                );
+            }
+        }
+    }
     if route_parent_attachment_ref_not_permitted(
         snapshot,
         &route.namespace,
@@ -257,6 +353,18 @@ pub fn grpc_route_accepted_condition_for_parent(
     }
     let keys = grpc_attachment_keys_for_parent_ref(route, parent, snapshot, attached_ls);
     if keys.is_empty() {
+        if gateway_parent_ref_has_relaxed_keys_non_empty(
+            &route.namespace,
+            "GRPCRoute",
+            parent,
+            snapshot,
+        ) {
+            return (
+                "False",
+                "NoMatchingParent",
+                "parentRef does not match any listener sectionName or port on the Gateway",
+            );
+        }
         return (
             "False",
             "NotAcceptedByListeners",
@@ -293,8 +401,8 @@ pub fn grpc_route_accepted_condition_for_parent(
     } else {
         (
             "False",
-            "NotAcceptedByListeners",
-            "route not accepted by listener hostname intersection or allowedRoutes policy",
+            "NoMatchingListenerHostname",
+            "no intersecting hostnames between GRPCRoute and Gateway listener",
         )
     }
 }
@@ -308,6 +416,42 @@ pub fn tls_route_accepted_condition_for_parent(
     attached_ls: &HashSet<(String, String)>,
     report: &CompileReport,
 ) -> (&'static str, &'static str, &'static str) {
+    let g = parent.group.as_deref().unwrap_or("gateway.networking.k8s.io");
+    let k = parent.kind.as_deref().unwrap_or("Gateway");
+    if gateway_api_group(&Some(g.to_string())) && k == "Gateway" {
+        let pns = parent_namespace(parent, &route.namespace);
+        if pns == snapshot.gateway_namespace && parent.name == snapshot.gateway_name {
+            if route.namespace != snapshot.gateway_namespace
+                && !gateway_inline_any_listener_accepts_route(snapshot, &route.namespace, "TLSRoute")
+            {
+                return (
+                    "False",
+                    "NotAllowedByListeners",
+                    "route namespace is not accepted by any Gateway listener allowedRoutes",
+                );
+            }
+        }
+    }
+    if gateway_api_group(&Some(g.to_string())) && k == "ListenerSet" {
+        let ls_ns = parent_namespace(parent, &route.namespace);
+        if attached_ls.contains(&(ls_ns.clone(), parent.name.clone())) {
+            if route.namespace != ls_ns.as_str()
+                && !listener_set_any_listener_accepts_route(
+                    snapshot,
+                    &ls_ns,
+                    &parent.name,
+                    &route.namespace,
+                    "TLSRoute",
+                )
+            {
+                return (
+                    "False",
+                    "NotAllowedByListeners",
+                    "route namespace is not accepted by any ListenerSet listener allowedRoutes",
+                );
+            }
+        }
+    }
     if route_parent_attachment_ref_not_permitted(
         snapshot,
         &route.namespace,
@@ -323,6 +467,18 @@ pub fn tls_route_accepted_condition_for_parent(
     }
     let keys = tls_attachment_keys_for_parent_ref(route, parent, snapshot, attached_ls);
     if keys.is_empty() {
+        if gateway_parent_ref_has_relaxed_keys_non_empty(
+            &route.namespace,
+            "TLSRoute",
+            parent,
+            snapshot,
+        ) {
+            return (
+                "False",
+                "NoMatchingParent",
+                "parentRef does not match any listener sectionName or port on the Gateway",
+            );
+        }
         return (
             "False",
             "NotAcceptedByListeners",
@@ -359,8 +515,8 @@ pub fn tls_route_accepted_condition_for_parent(
     } else {
         (
             "False",
-            "NotAcceptedByListeners",
-            "route not accepted by listener hostname intersection or allowedRoutes policy",
+            "NoMatchingListenerHostname",
+            "no intersecting hostnames between TLSRoute and Gateway listener",
         )
     }
 }
@@ -374,6 +530,42 @@ pub fn tcp_route_accepted_condition_for_parent(
     attached_ls: &HashSet<(String, String)>,
     report: &CompileReport,
 ) -> (&'static str, &'static str, &'static str) {
+    let g = parent.group.as_deref().unwrap_or("gateway.networking.k8s.io");
+    let k = parent.kind.as_deref().unwrap_or("Gateway");
+    if gateway_api_group(&Some(g.to_string())) && k == "Gateway" {
+        let pns = parent_namespace(parent, &route.namespace);
+        if pns == snapshot.gateway_namespace && parent.name == snapshot.gateway_name {
+            if route.namespace != snapshot.gateway_namespace
+                && !gateway_inline_any_listener_accepts_route(snapshot, &route.namespace, "TCPRoute")
+            {
+                return (
+                    "False",
+                    "NotAllowedByListeners",
+                    "route namespace is not accepted by any Gateway listener allowedRoutes",
+                );
+            }
+        }
+    }
+    if gateway_api_group(&Some(g.to_string())) && k == "ListenerSet" {
+        let ls_ns = parent_namespace(parent, &route.namespace);
+        if attached_ls.contains(&(ls_ns.clone(), parent.name.clone())) {
+            if route.namespace != ls_ns.as_str()
+                && !listener_set_any_listener_accepts_route(
+                    snapshot,
+                    &ls_ns,
+                    &parent.name,
+                    &route.namespace,
+                    "TCPRoute",
+                )
+            {
+                return (
+                    "False",
+                    "NotAllowedByListeners",
+                    "route namespace is not accepted by any ListenerSet listener allowedRoutes",
+                );
+            }
+        }
+    }
     if route_parent_attachment_ref_not_permitted(
         snapshot,
         &route.namespace,
@@ -389,6 +581,18 @@ pub fn tcp_route_accepted_condition_for_parent(
     }
     let keys = tcp_attachment_keys_for_parent_ref(route, parent, snapshot, attached_ls);
     if keys.is_empty() {
+        if gateway_parent_ref_has_relaxed_keys_non_empty(
+            &route.namespace,
+            "TCPRoute",
+            parent,
+            snapshot,
+        ) {
+            return (
+                "False",
+                "NoMatchingParent",
+                "parentRef does not match any listener sectionName or port on the Gateway",
+            );
+        }
         return (
             "False",
             "NotAcceptedByListeners",
@@ -440,6 +644,42 @@ pub fn udp_route_accepted_condition_for_parent(
     attached_ls: &HashSet<(String, String)>,
     report: &CompileReport,
 ) -> (&'static str, &'static str, &'static str) {
+    let g = parent.group.as_deref().unwrap_or("gateway.networking.k8s.io");
+    let k = parent.kind.as_deref().unwrap_or("Gateway");
+    if gateway_api_group(&Some(g.to_string())) && k == "Gateway" {
+        let pns = parent_namespace(parent, &route.namespace);
+        if pns == snapshot.gateway_namespace && parent.name == snapshot.gateway_name {
+            if route.namespace != snapshot.gateway_namespace
+                && !gateway_inline_any_listener_accepts_route(snapshot, &route.namespace, "UDPRoute")
+            {
+                return (
+                    "False",
+                    "NotAllowedByListeners",
+                    "route namespace is not accepted by any Gateway listener allowedRoutes",
+                );
+            }
+        }
+    }
+    if gateway_api_group(&Some(g.to_string())) && k == "ListenerSet" {
+        let ls_ns = parent_namespace(parent, &route.namespace);
+        if attached_ls.contains(&(ls_ns.clone(), parent.name.clone())) {
+            if route.namespace != ls_ns.as_str()
+                && !listener_set_any_listener_accepts_route(
+                    snapshot,
+                    &ls_ns,
+                    &parent.name,
+                    &route.namespace,
+                    "UDPRoute",
+                )
+            {
+                return (
+                    "False",
+                    "NotAllowedByListeners",
+                    "route namespace is not accepted by any ListenerSet listener allowedRoutes",
+                );
+            }
+        }
+    }
     if route_parent_attachment_ref_not_permitted(
         snapshot,
         &route.namespace,
@@ -455,6 +695,18 @@ pub fn udp_route_accepted_condition_for_parent(
     }
     let keys = udp_attachment_keys_for_parent_ref(route, parent, snapshot, attached_ls);
     if keys.is_empty() {
+        if gateway_parent_ref_has_relaxed_keys_non_empty(
+            &route.namespace,
+            "UDPRoute",
+            parent,
+            snapshot,
+        ) {
+            return (
+                "False",
+                "NoMatchingParent",
+                "parentRef does not match any listener sectionName or port on the Gateway",
+            );
+        }
         return (
             "False",
             "NotAcceptedByListeners",
@@ -1140,6 +1392,134 @@ mod tests {
     }
 
     #[test]
+    fn http_route_accepted_cross_namespace_not_allowed_by_listener_same_ns_policy() {
+        let listeners = vec![GatewayListenerSnap {
+            name: "http".into(),
+            port: 80,
+            protocol: "HTTP".into(),
+            hostname: None,
+            allowed_routes: Some(AllowedRoutesSnap {
+                namespaces: Some(AllowedRoutesNamespacesSnap {
+                    from: Some("Same".into()),
+                    selector_match_labels: Default::default(),
+                }),
+                kinds: vec![],
+            }),
+            tls: None,
+        }];
+        let snap = ClusterSnapshot {
+            gateway_namespace: "infra".into(),
+            gateway_name: "gw".into(),
+            gateway_class_name: "gc".into(),
+            gateway_generation: 1,
+            gateway_addresses: vec![],
+            gateway_infrastructure: None,
+            listeners: listeners.clone(),
+            effective_listeners: merge_effective_listeners(&listeners, &[]),
+            listener_sets: vec![],
+            allowed_listeners: None,
+            http_routes: vec![],
+            grpc_routes: vec![],
+            tls_routes: vec![],
+            tcp_routes: vec![],
+            udp_routes: vec![],
+            services: vec![],
+            endpoint_slices: vec![],
+            gateway_class: None,
+            reference_grants: vec![],
+            backend_tls_effective: Default::default(),
+            backend_tls_policy_outcomes: vec![],
+            namespace_labels: Default::default(),
+            inference_pools: vec![],
+        };
+        let route = HttpRouteSnap {
+            namespace: "other".into(),
+            name: "r".into(),
+            generation: 1,
+            parent_refs: vec![ParentRefSnap {
+                group: Some("gateway.networking.k8s.io".into()),
+                kind: Some("Gateway".into()),
+                namespace: Some("infra".into()),
+                name: "gw".into(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let attached_ls = HashSet::new();
+        let report = CompileReport::default();
+        let parent = &route.parent_refs[0];
+        let (st, reason, _) =
+            http_route_accepted_condition_for_parent(&route, parent, &snap, &attached_ls, &report);
+        assert_eq!(st, "False");
+        assert_eq!(reason, "NotAllowedByListeners");
+    }
+
+    #[test]
+    fn http_route_accepted_no_matching_parent_bad_section_name() {
+        let listeners = vec![GatewayListenerSnap {
+            name: "http".into(),
+            port: 80,
+            protocol: "HTTP".into(),
+            hostname: None,
+            allowed_routes: Some(AllowedRoutesSnap {
+                namespaces: Some(AllowedRoutesNamespacesSnap {
+                    from: Some("Same".into()),
+                    selector_match_labels: Default::default(),
+                }),
+                kinds: vec![],
+            }),
+            tls: None,
+        }];
+        let snap = ClusterSnapshot {
+            gateway_namespace: "infra".into(),
+            gateway_name: "gw".into(),
+            gateway_class_name: "gc".into(),
+            gateway_generation: 1,
+            gateway_addresses: vec![],
+            gateway_infrastructure: None,
+            listeners: listeners.clone(),
+            effective_listeners: merge_effective_listeners(&listeners, &[]),
+            listener_sets: vec![],
+            allowed_listeners: None,
+            http_routes: vec![],
+            grpc_routes: vec![],
+            tls_routes: vec![],
+            tcp_routes: vec![],
+            udp_routes: vec![],
+            services: vec![],
+            endpoint_slices: vec![],
+            gateway_class: None,
+            reference_grants: vec![],
+            backend_tls_effective: Default::default(),
+            backend_tls_policy_outcomes: vec![],
+            namespace_labels: Default::default(),
+            inference_pools: vec![],
+        };
+        let route = HttpRouteSnap {
+            namespace: "infra".into(),
+            name: "r".into(),
+            generation: 1,
+            parent_refs: vec![ParentRefSnap {
+                group: Some("gateway.networking.k8s.io".into()),
+                kind: Some("Gateway".into()),
+                namespace: Some("infra".into()),
+                name: "gw".into(),
+                section_name: Some("missing".into()),
+                port: Some(80),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let attached_ls = HashSet::new();
+        let report = CompileReport::default();
+        let parent = &route.parent_refs[0];
+        let (st, reason, _) =
+            http_route_accepted_condition_for_parent(&route, parent, &snap, &attached_ls, &report);
+        assert_eq!(st, "False");
+        assert_eq!(reason, "NoMatchingParent");
+    }
+
+    #[test]
     fn no_ready_endpoints_is_not_blocking() {
         let mut report = CompileReport::default();
         report.errors.push(ObjectRefErr {
@@ -1149,6 +1529,21 @@ mod tests {
             namespace: "ns".into(),
             name: "svc".into(),
             reason: "NoReadyEndpoints".into(),
+        });
+        assert!(report.has_errors());
+        assert!(!report.has_blocking_errors());
+    }
+
+    #[test]
+    fn httproute_report_errors_do_not_block_snapshot_publish() {
+        let mut report = CompileReport::default();
+        report.errors.push(ObjectRefErr {
+            group: "gateway.networking.k8s.io".into(),
+            version: "v1".into(),
+            kind: "HTTPRoute".into(),
+            namespace: "ns".into(),
+            name: "r".into(),
+            reason: "UnsupportedBackendKind".into(),
         });
         assert!(report.has_errors());
         assert!(!report.has_blocking_errors());
@@ -1171,10 +1566,10 @@ mod tests {
             invalid_refs: vec![ObjectRefErr {
                 group: "gateway.networking.k8s.io".into(),
                 version: "v1".into(),
-                kind: "HTTPRoute".into(),
+                kind: "Gateway".into(),
                 namespace: "ns".into(),
                 name: "bad".into(),
-                reason: "RefNotPermitted".into(),
+                reason: "InvalidListener".into(),
             }],
             ..Default::default()
         };

@@ -7,8 +7,8 @@ use uuid::Uuid;
 
 use crate::compile::{CompileReport, HttpGrpcConflictLoser, ObjectRefErr};
 use crate::http_route_attachment::{
-    find_effective_for_key, gateway_listener_attached_routes_counts, grpc_route_attachment_keys,
-    grpc_route_listener_hostname_ok, intersect_route_listener_hosts,
+    find_effective_for_key, grpc_route_attachment_keys, grpc_route_listener_hostname_ok,
+    intersect_route_listener_hosts, listener_attachment_count_key,
     reference_grant_permits_inference_pool_ref, reference_grant_permits_service_ref,
     route_attachment_keys, route_listener_hostname_ok, tcp_route_attachment_keys,
     tcp_route_listener_ok, tls_route_attachment_keys, tls_route_listener_hostname_ok,
@@ -588,6 +588,12 @@ fn collect_endpoints(sn: &ClusterSnapshot, svc_ns: &str, svc_name: &str) -> Vec<
     out.sort();
     out.dedup();
     out
+}
+
+fn service_has_any_endpointslice(snapshot: &ClusterSnapshot, svc_ns: &str, svc_name: &str) -> bool {
+    snapshot.endpoint_slices.iter().any(|sl| {
+        sl.namespace == svc_ns && sl.service_name.as_deref() == Some(svc_name)
+    })
 }
 
 fn record_listener_conflicts(snapshot: &ClusterSnapshot, report: &mut CompileReport) {
@@ -1805,6 +1811,103 @@ fn hosts_for_route_on_listener(route: &HttpRouteSnap, eff: &EffectiveListenerSna
     }
 }
 
+fn bump_listener_route_count(counts: &mut BTreeMap<String, u32>, lk: &crate::ir::ListenerAttachmentIr) {
+    *counts
+        .entry(listener_attachment_count_key(lk))
+        .or_insert(0) += 1;
+}
+
+/// Gateway API `attachedRoutes`: count each route resource once per listener only when it would be
+/// **Accepted** there (hostname intersection + HTTP/GRPC/TLS/TCP/UDP precedence), not merely policy-attached.
+fn compute_listener_route_attachment_counts(
+    snapshot: &ClusterSnapshot,
+    attached_ls: &HashSet<(String, String)>,
+    report: &CompileReport,
+) -> BTreeMap<String, u32> {
+    let mut counts: BTreeMap<String, u32> = BTreeMap::new();
+
+    for route in &snapshot.http_routes {
+        for lk in route_attachment_keys(route, snapshot, attached_ls) {
+            let Some(eff) = find_effective_for_key(snapshot, &lk) else {
+                continue;
+            };
+            if eff.conflicted {
+                continue;
+            }
+            if !route_listener_hostname_ok(route, eff) {
+                continue;
+            }
+            if report.http_grpc_conflict_loser_at("HTTPRoute", &route.namespace, &route.name, &lk) {
+                continue;
+            }
+            bump_listener_route_count(&mut counts, &lk);
+        }
+    }
+    for route in &snapshot.grpc_routes {
+        for lk in grpc_route_attachment_keys(route, snapshot, attached_ls) {
+            let Some(eff) = find_effective_for_key(snapshot, &lk) else {
+                continue;
+            };
+            if eff.conflicted {
+                continue;
+            }
+            if !grpc_route_listener_hostname_ok(route, eff) {
+                continue;
+            }
+            if report.http_grpc_conflict_loser_at("GRPCRoute", &route.namespace, &route.name, &lk) {
+                continue;
+            }
+            bump_listener_route_count(&mut counts, &lk);
+        }
+    }
+    for route in &snapshot.tls_routes {
+        for lk in tls_route_attachment_keys(route, snapshot, attached_ls) {
+            let Some(eff) = find_effective_for_key(snapshot, &lk) else {
+                continue;
+            };
+            if eff.conflicted {
+                continue;
+            }
+            if !tls_route_listener_hostname_ok(route, eff) {
+                continue;
+            }
+            if report.tls_route_conflict_loser_at("TLSRoute", &route.namespace, &route.name, &lk) {
+                continue;
+            }
+            bump_listener_route_count(&mut counts, &lk);
+        }
+    }
+    for route in &snapshot.tcp_routes {
+        for lk in tcp_route_attachment_keys(route, snapshot, attached_ls) {
+            let Some(eff) = find_effective_for_key(snapshot, &lk) else {
+                continue;
+            };
+            if eff.conflicted || !tcp_route_listener_ok(route, eff) {
+                continue;
+            }
+            if report.tcp_route_conflict_loser_at("TCPRoute", &route.namespace, &route.name, &lk) {
+                continue;
+            }
+            bump_listener_route_count(&mut counts, &lk);
+        }
+    }
+    for route in &snapshot.udp_routes {
+        for lk in udp_route_attachment_keys(route, snapshot, attached_ls) {
+            let Some(eff) = find_effective_for_key(snapshot, &lk) else {
+                continue;
+            };
+            if eff.conflicted || !udp_route_listener_ok(route, eff) {
+                continue;
+            }
+            if report.udp_route_conflict_loser_at("UDPRoute", &route.namespace, &route.name, &lk) {
+                continue;
+            }
+            bump_listener_route_count(&mut counts, &lk);
+        }
+    }
+    counts
+}
+
 /// Build IR + report from cluster snapshot (pure).
 #[must_use]
 pub fn ir_from_cluster(snapshot: &ClusterSnapshot) -> (IrSnapshot, CompileReport) {
@@ -2243,7 +2346,7 @@ pub fn ir_from_cluster(snapshot: &ClusterSnapshot) -> (IrSnapshot, CompileReport
     }
 
     report.listener_route_attachment_counts =
-        gateway_listener_attached_routes_counts(snapshot, &attached_ls);
+        compute_listener_route_attachment_counts(snapshot, &attached_ls, &report);
 
     staged.sort_by(|a, b| a.0.cmp(&b.0));
     let routes: Vec<RouteRuleIr> = staged.into_iter().map(|(_, r)| r).collect();
@@ -2281,7 +2384,13 @@ pub fn ir_from_cluster(snapshot: &ClusterSnapshot) -> (IrSnapshot, CompileReport
                     e.port = tp;
                 }
             }
-            if eps.is_empty() {
+            if eps.is_empty()
+                && !service_has_any_endpointslice(
+                    snapshot,
+                    &wb.backend.service_namespace,
+                    &wb.backend.service_name,
+                )
+            {
                 report.errors.push(ObjectRefErr {
                     group: "".into(),
                     version: "v1".into(),
