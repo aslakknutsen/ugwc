@@ -7,11 +7,12 @@ use uuid::Uuid;
 
 use crate::compile::{CompileReport, HttpGrpcConflictLoser, ObjectRefErr};
 use crate::http_route_attachment::{
-    find_effective_for_key, grpc_route_attachment_keys, grpc_route_listener_hostname_ok,
-    intersect_route_listener_hosts, reference_grant_permits_inference_pool_ref,
-    reference_grant_permits_service_ref, route_attachment_keys, route_listener_hostname_ok,
-    tcp_route_attachment_keys, tcp_route_listener_ok, tls_route_attachment_keys,
-    tls_route_listener_hostname_ok, udp_route_attachment_keys, udp_route_listener_ok,
+    find_effective_for_key, gateway_listener_attached_routes_counts, grpc_route_attachment_keys,
+    grpc_route_listener_hostname_ok, intersect_route_listener_hosts,
+    reference_grant_permits_inference_pool_ref, reference_grant_permits_service_ref,
+    route_attachment_keys, route_listener_hostname_ok, tcp_route_attachment_keys,
+    tcp_route_listener_ok, tls_route_attachment_keys, tls_route_listener_hostname_ok,
+    udp_route_attachment_keys, udp_route_listener_ok,
 };
 use crate::inference::InferenceIr;
 use crate::ir::{
@@ -1948,7 +1949,6 @@ pub fn ir_from_cluster(snapshot: &ClusterSnapshot) -> (IrSnapshot, CompileReport
                         listener: Some(lk.clone()),
                     },
                 ));
-                report.record_listener_route_attachment(lk);
                 seq += 1;
             }
         }
@@ -2032,7 +2032,6 @@ pub fn ir_from_cluster(snapshot: &ClusterSnapshot) -> (IrSnapshot, CompileReport
                         listener: Some(lk.clone()),
                     },
                 ));
-                report.record_listener_route_attachment(lk);
                 seq += 1;
             }
         }
@@ -2103,7 +2102,6 @@ pub fn ir_from_cluster(snapshot: &ClusterSnapshot) -> (IrSnapshot, CompileReport
                     listener: Some(lk.clone()),
                 },
             ));
-            report.record_listener_route_attachment(lk);
             seq += 1;
         }
     }
@@ -2172,7 +2170,6 @@ pub fn ir_from_cluster(snapshot: &ClusterSnapshot) -> (IrSnapshot, CompileReport
                     listener: Some(lk.clone()),
                 },
             ));
-            report.record_listener_route_attachment(lk);
             seq += 1;
         }
     }
@@ -2241,10 +2238,12 @@ pub fn ir_from_cluster(snapshot: &ClusterSnapshot) -> (IrSnapshot, CompileReport
                     listener: Some(lk.clone()),
                 },
             ));
-            report.record_listener_route_attachment(lk);
             seq += 1;
         }
     }
+
+    report.listener_route_attachment_counts =
+        gateway_listener_attached_routes_counts(snapshot, &attached_ls);
 
     staged.sort_by(|a, b| a.0.cmp(&b.0));
     let routes: Vec<RouteRuleIr> = staged.into_iter().map(|(_, r)| r).collect();

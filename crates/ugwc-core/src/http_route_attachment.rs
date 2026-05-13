@@ -840,6 +840,61 @@ pub(crate) fn udp_route_attachment_keys(
     keys
 }
 
+#[must_use]
+pub(crate) fn listener_attachment_count_key(lk: &crate::ir::ListenerAttachmentIr) -> String {
+    format!(
+        "{}|{}|{}|{}|{}",
+        lk.parent_kind, lk.parent_namespace, lk.parent_name, lk.section_name, lk.port
+    )
+}
+
+/// Per-listener **route resource** counts for Gateway API `status.listeners[].attachedRoutes`.
+///
+/// Mirrors Istio `buildAttachedRoutesMapAllowed` in `pilot/pkg/config/kube/gatewaycommon/route_status_collection.go`:
+/// each HTTPRoute/GRPCRoute/TLSRoute/TCPRoute/UDPRoute increments every listener key returned by
+/// the attachment-key helpers (policy, grants, section/port) **without** requiring hostname
+/// intersection or successful per-rule IR staging.
+#[must_use]
+pub(crate) fn gateway_listener_attached_routes_counts(
+    snapshot: &ClusterSnapshot,
+    attached_ls: &HashSet<(String, String)>,
+) -> BTreeMap<String, u32> {
+    let mut counts: BTreeMap<String, u32> = BTreeMap::new();
+
+    let bump = |counts: &mut BTreeMap<String, u32>, lk: &crate::ir::ListenerAttachmentIr| {
+        *counts
+            .entry(listener_attachment_count_key(lk))
+            .or_insert(0) += 1;
+    };
+
+    for route in &snapshot.http_routes {
+        for lk in route_attachment_keys(route, snapshot, attached_ls) {
+            bump(&mut counts, &lk);
+        }
+    }
+    for route in &snapshot.grpc_routes {
+        for lk in grpc_route_attachment_keys(route, snapshot, attached_ls) {
+            bump(&mut counts, &lk);
+        }
+    }
+    for route in &snapshot.tls_routes {
+        for lk in tls_route_attachment_keys(route, snapshot, attached_ls) {
+            bump(&mut counts, &lk);
+        }
+    }
+    for route in &snapshot.tcp_routes {
+        for lk in tcp_route_attachment_keys(route, snapshot, attached_ls) {
+            bump(&mut counts, &lk);
+        }
+    }
+    for route in &snapshot.udp_routes {
+        for lk in udp_route_attachment_keys(route, snapshot, attached_ls) {
+            bump(&mut counts, &lk);
+        }
+    }
+    counts
+}
+
 /// Whether this parentRef would accept the route (listener policy + hostname intersection).
 #[must_use]
 pub fn route_accepted_for_parent_ref(

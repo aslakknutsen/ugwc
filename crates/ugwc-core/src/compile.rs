@@ -10,10 +10,10 @@ use crate::from_cluster::ir_from_cluster;
 use crate::http_ir::{build_http_ir_from_fixture, HttpCompileFixture};
 use crate::http_route_attachment::{
     attachment_keys_for_parent_ref, find_effective_for_key, grpc_attachment_keys_for_parent_ref,
-    grpc_route_listener_hostname_ok, route_listener_hostname_ok,
-    route_parent_attachment_ref_not_permitted, tcp_attachment_keys_for_parent_ref,
-    tcp_route_listener_ok, tls_attachment_keys_for_parent_ref, tls_route_listener_hostname_ok,
-    udp_attachment_keys_for_parent_ref, udp_route_listener_ok,
+    grpc_route_listener_hostname_ok, listener_attachment_count_key,
+    route_listener_hostname_ok, route_parent_attachment_ref_not_permitted,
+    tcp_attachment_keys_for_parent_ref, tcp_route_listener_ok, tls_attachment_keys_for_parent_ref,
+    tls_route_listener_hostname_ok, udp_attachment_keys_for_parent_ref, udp_route_listener_ok,
 };
 use crate::inference::InferenceIr;
 use crate::ir::{IrRevision, IrSnapshot, SnapshotMeta, IR_VERSION};
@@ -53,7 +53,8 @@ pub struct HttpGrpcConflictLoser {
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct CompileReport {
     pub errors: Vec<ObjectRefErr>,
-    /// Count of compiled route rules attached per listener (`parent_kind|parent_ns|parent_name|section|port`).
+    /// Count of **route resources** attached per listener (`parent_kind|parent_ns|parent_name|section|port`)
+    /// for Gateway API `attachedRoutes` (Istio-style: allowed parent refs, not IR rule staging).
     pub listener_route_attachment_counts: BTreeMap<String, u32>,
     /// Routes rejected because another route kind won HTTP-vs-gRPC hostname conflict on the same listener.
     pub http_grpc_conflict_losers: Vec<HttpGrpcConflictLoser>,
@@ -152,19 +153,13 @@ impl CompileReport {
     }
 
     pub fn record_listener_route_attachment(&mut self, lk: &crate::ir::ListenerAttachmentIr) {
-        let k = format!(
-            "{}|{}|{}|{}|{}",
-            lk.parent_kind, lk.parent_namespace, lk.parent_name, lk.section_name, lk.port
-        );
+        let k = listener_attachment_count_key(lk);
         *self.listener_route_attachment_counts.entry(k).or_insert(0) += 1;
     }
 
     #[must_use]
     pub fn attachment_count_for_listener_key(&self, lk: &crate::ir::ListenerAttachmentIr) -> i32 {
-        let k = format!(
-            "{}|{}|{}|{}|{}",
-            lk.parent_kind, lk.parent_namespace, lk.parent_name, lk.section_name, lk.port
-        );
+        let k = listener_attachment_count_key(lk);
         self.listener_route_attachment_counts
             .get(&k)
             .copied()
