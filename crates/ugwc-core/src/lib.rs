@@ -10,6 +10,7 @@ pub mod http_route_attachment;
 pub mod inference;
 pub mod ir;
 pub mod listener_merge;
+pub mod listener_route_kinds;
 pub mod policy;
 pub mod publish;
 pub mod snapshot;
@@ -37,5 +38,9 @@ pub use ir::{
     IR_VERSION,
 };
 pub use listener_merge::merge_effective_listeners;
+pub use listener_route_kinds::{
+    effective_listener_has_invalid_allowed_route_kinds,
+    effective_listener_supported_route_kinds_for_status,
+};
 pub use publish::{plan_publish, PublishAction, PublishPlan};
 pub use snapshot::ClusterSnapshot;

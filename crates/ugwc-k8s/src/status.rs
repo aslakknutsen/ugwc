@@ -34,77 +34,13 @@ fn supported_kinds_json(
     let Some(e) = eff else {
         return default_http_grpc();
     };
-    let proto = e.protocol.trim().to_ascii_uppercase();
-    if proto == "TLS" {
-        let kinds = e
-            .allowed_routes
-            .as_ref()
-            .map(|a| &a.kinds[..])
-            .unwrap_or(&[]);
-        if kinds.is_empty() {
-            return vec![
-                serde_json::json!({"group": "gateway.networking.k8s.io", "kind": "TLSRoute"}),
-            ];
-        }
-        return kinds
-            .iter()
-            .map(|k| {
-                serde_json::json!({"group": k.group.as_deref().unwrap_or("gateway.networking.k8s.io"), "kind": &k.kind})
-            })
-            .collect();
-    }
-    if proto == "TCP" {
-        let kinds = e
-            .allowed_routes
-            .as_ref()
-            .map(|a| &a.kinds[..])
-            .unwrap_or(&[]);
-        if kinds.is_empty() {
-            return vec![
-                serde_json::json!({"group": "gateway.networking.k8s.io", "kind": "TCPRoute"}),
-            ];
-        }
-        return kinds
-            .iter()
-            .map(|k| {
-                serde_json::json!({"group": k.group.as_deref().unwrap_or("gateway.networking.k8s.io"), "kind": &k.kind})
-            })
-            .collect();
-    }
-    if proto == "UDP" {
-        let kinds = e
-            .allowed_routes
-            .as_ref()
-            .map(|a| &a.kinds[..])
-            .unwrap_or(&[]);
-        if kinds.is_empty() {
-            return vec![
-                serde_json::json!({"group": "gateway.networking.k8s.io", "kind": "UDPRoute"}),
-            ];
-        }
-        return kinds
-            .iter()
-            .map(|k| {
-                serde_json::json!({"group": k.group.as_deref().unwrap_or("gateway.networking.k8s.io"), "kind": &k.kind})
-            })
-            .collect();
-    }
-    let http_like = proto == "HTTP" || proto == "HTTPS";
-    if !http_like {
-        return vec![];
-    }
-    let kinds = e
-        .allowed_routes
-        .as_ref()
-        .map(|a| &a.kinds[..])
-        .unwrap_or(&[]);
-    if kinds.is_empty() {
-        return default_http_grpc();
-    }
-    kinds
-        .iter()
+    ugwc_core::effective_listener_supported_route_kinds_for_status(e)
+        .into_iter()
         .map(|k| {
-            serde_json::json!({"group": k.group.as_deref().unwrap_or("gateway.networking.k8s.io"), "kind": &k.kind})
+            serde_json::json!({
+                "group": k.group.as_deref().unwrap_or("gateway.networking.k8s.io"),
+                "kind": &k.kind
+            })
         })
         .collect()
 }
@@ -409,11 +345,20 @@ pub async fn apply_gateway_reconciled_status(
             {
                 cert_broken = true;
             }
+            let route_kinds_broken = eff
+                .map(ugwc_core::effective_listener_has_invalid_allowed_route_kinds)
+                .unwrap_or(false);
             let (res_status, res_reason, res_msg) = if cert_broken {
                 (
                     "False",
                     "InvalidCertificateRef",
                     "TLS certificate could not be resolved for this listener",
+                )
+            } else if route_kinds_broken {
+                (
+                    "False",
+                    "InvalidRouteKinds",
+                    "allowedRoutes lists route kind(s) not supported for this listener protocol",
                 )
             } else {
                 ("True", "ResolvedRefs", "listener certificate refs resolved")
@@ -1529,6 +1474,9 @@ pub async fn apply_listenerset_reconciled_status(
                             || e.tls_key_pem.is_empty())
                 })
                 .unwrap_or(false);
+            let route_kinds_broken = eff
+                .map(ugwc_core::effective_listener_has_invalid_allowed_route_kinds)
+                .unwrap_or(false);
             let lk = ugwc_core::ListenerAttachmentIr {
                 parent_kind: "ListenerSet".into(),
                 parent_namespace: ls_ns_name.0.clone(),
@@ -1557,6 +1505,12 @@ pub async fn apply_listenerset_reconciled_status(
                     "False",
                     "InvalidCertificateRef",
                     "TLS certificate could not be resolved for this listener",
+                )
+            } else if route_kinds_broken {
+                (
+                    "False",
+                    "InvalidRouteKinds",
+                    "allowedRoutes lists route kind(s) not supported for this listener protocol",
                 )
             } else {
                 ("True", "ResolvedRefs", "listener certificate refs resolved")
