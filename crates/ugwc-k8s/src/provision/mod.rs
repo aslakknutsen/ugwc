@@ -56,7 +56,11 @@ pub fn praxis_istiod_dial_url(bootstrap: &str, xds_insecure: bool) -> String {
     }
 }
 
-fn deployment_name(gateway_name: &str) -> String {
+/// Deployment/Service name for the per-gateway Praxis dataplane (`ugwc-dp-…`).
+///
+/// Must stay aligned with `templates/per_gateway_praxis.yaml.j2` (`deployment_name` / Service `metadata.name`).
+#[must_use]
+pub fn per_gateway_dataplane_name(gateway_name: &str) -> String {
     let base = gateway_name
         .chars()
         .map(|c| {
@@ -208,7 +212,7 @@ pub async fn reconcile_per_gateway_praxis(
         .as_deref()
         .ok_or_else(|| ProvisionError::Msg("gateway missing uid for ownerReference".into()))?;
 
-    let dep_name = deployment_name(gw_name);
+    let dep_name = per_gateway_dataplane_name(gw_name);
     let sa_name = service_account_name(&dep_name);
     let gw_class = gateway_class_label(&args.gateway_class_name);
 

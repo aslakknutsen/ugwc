@@ -4,11 +4,13 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
+use k8s_openapi::api::core::v1::Service;
 use kube::api::{Patch, PatchParams};
 use kube::{Api, Client};
 use tracing::warn;
 
 use crate::loader::parent_reference_to_snap;
+use crate::provision::per_gateway_dataplane_name;
 use crate::resources::{
     BackendTLSPolicy, GRPCRoute, Gateway, GatewayClass, HTTPRoute, InferencePool, ListenerSet,
     TCPRoute, TLSRoute, UDPRoute,
@@ -128,12 +130,93 @@ fn gateway_listener_https_cert_unresolved(
     eff.tls_resolve_error.is_some() || eff.tls_cert_pem.is_empty() || eff.tls_key_pem.is_empty()
 }
 
+fn gateway_ip_address_json(ip: &str) -> serde_json::Value {
+    serde_json::json!({
+        "type": "IPAddress",
+        "value": ip,
+    })
+}
+
+fn gateway_status_addresses_from_service(svc: &Service) -> Vec<serde_json::Value> {
+    if let Some(st) = svc.status.as_ref() {
+        if let Some(lb) = st.load_balancer.as_ref() {
+            if let Some(ingress) = lb.ingress.as_ref() {
+                for ing in ingress {
+                    if let Some(ip) = ing.ip.as_deref() {
+                        if !ip.is_empty() {
+                            return vec![gateway_ip_address_json(ip)];
+                        }
+                    }
+                }
+            }
+        }
+    }
+    if let Some(spec) = svc.spec.as_ref() {
+        if let Some(ip) = spec.cluster_ip.as_deref() {
+            if !ip.is_empty() && ip != "None" {
+                return vec![gateway_ip_address_json(ip)];
+            }
+        }
+    }
+    Vec::new()
+}
+
+async fn fetch_gateway_status_addresses_json(
+    client: &Client,
+    gateway_ns: &str,
+    gateway_name: &str,
+) -> Vec<serde_json::Value> {
+    let svc_name = per_gateway_dataplane_name(gateway_name);
+    let api: Api<Service> = Api::namespaced(client.clone(), gateway_ns);
+    match api.get(&svc_name).await {
+        Ok(svc) => gateway_status_addresses_from_service(&svc),
+        Err(e) => {
+            let not_found = matches!(
+                &e,
+                kube::Error::Api(err) if err.code == 404
+            );
+            if !not_found {
+                warn!(
+                    error = %e,
+                    %gateway_ns,
+                    service = %svc_name,
+                    "could not read dataplane Service for Gateway status.addresses"
+                );
+            }
+            Vec::new()
+        }
+    }
+}
+
+/// Resolve `metadata.generation` for status `observedGeneration` (refetch if missing on `gateway`).
+async fn gateway_generation_for_status(
+    api: &kube::Api<Gateway>,
+    name: &str,
+    gateway_ns: &str,
+    gateway: &Gateway,
+) -> Result<i64, kube::Error> {
+    let mut gen = gateway.metadata.generation;
+    if gen.is_none() {
+        let refreshed = api.get(name).await?;
+        gen = refreshed.metadata.generation;
+        if gen.is_none() {
+            warn!(
+                gateway = %name,
+                namespace = %gateway_ns,
+                "Gateway metadata.generation unset after refetch; using 1 for observedGeneration"
+            );
+        }
+    }
+    Ok(gen.filter(|&g| g > 0).unwrap_or(1))
+}
+
 /// Apply Gateway + listener status after a compile/reconcile pass.
 ///
 /// Conformance helpers require every condition to carry `observedGeneration`
 /// matching `metadata.generation`, and per-listener `Accepted` / `ResolvedRefs` /
 /// `Programmed` rows for each listener in spec.
 pub async fn apply_gateway_reconciled_status(
+    client: &Client,
     api: &kube::Api<Gateway>,
     gateway: &Gateway,
     outcome: &ugwc_core::CompileOutcome,
@@ -145,8 +228,9 @@ pub async fn apply_gateway_reconciled_status(
         return Ok(());
     }
 
-    let gen = gateway.metadata.generation.unwrap_or(0);
     let gw_ns = gateway.metadata.namespace.as_deref().unwrap_or("");
+    let gen = gateway_generation_for_status(api, name, gw_ns, gateway).await?;
+    let addresses = fetch_gateway_status_addresses_json(client, gw_ns, name).await;
     let programmed_ok = !outcome.report.has_errors() && !outcome.snapshot.meta.has_errors;
     let reason = if programmed_ok {
         "Programmed"
@@ -341,7 +425,8 @@ pub async fn apply_gateway_reconciled_status(
                 }
             ],
             "listeners": listener_status,
-            "attachedListenerSets": attached_ls
+            "attachedListenerSets": attached_ls,
+            "addresses": addresses
         }
     });
 
@@ -1956,6 +2041,12 @@ pub async fn patch_gateway_programmed_false(
     name: &str,
     reason: &str,
 ) -> Result<(), kube::Error> {
+    let gw = api.get(name).await?;
+    let gen = gw
+        .metadata
+        .generation
+        .filter(|&g| g > 0)
+        .unwrap_or(1);
     let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
     let status = serde_json::json!({
         "status": {
@@ -1965,7 +2056,7 @@ pub async fn patch_gateway_programmed_false(
                 "reason": reason,
                 "message": "compile failed — see ugwc logs",
                 "lastTransitionTime": now,
-                "observedGeneration": 1
+                "observedGeneration": gen
             }]
         }
     });

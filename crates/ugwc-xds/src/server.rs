@@ -6,7 +6,7 @@ use std::sync::Arc;
 
 use futures::Stream;
 use prost::Message;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, watch};
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::transport::Server;
 use tonic::{Request, Response, Status, Streaming};
@@ -45,6 +45,8 @@ struct AdsService {
     cache: Arc<dyn XdsSnapshotSource>,
     allow_delta: bool,
     xds_wire: String,
+    /// When set, ADS streams subscribe for pushes after `store_scoped` bumps the watch.
+    revision_tx: Option<watch::Sender<u64>>,
 }
 
 #[tonic::async_trait]
@@ -66,30 +68,104 @@ impl AggregatedDiscoveryService for AdsService {
 
         let cache = self.cache.clone();
         let wire = self.xds_wire.clone();
+        let revision_tx = self.revision_tx.clone();
         let (tx, rx) = mpsc::channel(8);
 
         tokio::spawn(async move {
-            loop {
-                match inbound.message().await {
-                    Ok(Some(req)) => {
-                        let node_id = req
-                            .node
-                            .as_ref()
-                            .map(|n| n.id.as_str())
-                            .filter(|s| !s.is_empty());
-                        let snap = cache.resolve_for_discovery(node_id);
-                        let resp = discovery_response(&snap, &wire, req.type_url.as_str());
-                        if tx.send(Ok(resp)).await.is_err() {
+            let mut snapshot_rx = revision_tx.map(|t| t.subscribe());
+            let mut node_id_key: Option<String> = None;
+            let mut last_type_url = String::new();
+
+            if let Some(ref mut snap_rx) = snapshot_rx {
+                let mut last_sent_revision: Option<String> = None;
+                loop {
+                    tokio::select! {
+                        msg = inbound.message() => {
+                            match msg {
+                                Ok(Some(req)) => {
+                                    if let Some(n) = node_id_from_request(&req) {
+                                        node_id_key = Some(n.to_string());
+                                    }
+                                    let node_key = node_id_key.as_deref();
+                                    let snap = cache.resolve_for_discovery(node_key);
+                                    if discovery_is_ack(&req, snap.as_ref()) {
+                                        continue;
+                                    }
+                                    if !req.type_url.is_empty() {
+                                        last_type_url.clone_from(&req.type_url);
+                                    }
+                                    let type_url = last_type_url.as_str();
+                                    if send_discovery_response(snap.as_ref(), &wire, type_url, &tx)
+                                        .await
+                                        .is_err()
+                                    {
+                                        break;
+                                    }
+                                    last_sent_revision = Some(snap.revision_token());
+                                }
+                                Ok(None) => break,
+                                Err(e) => {
+                                    warn!(error = %e, "ads request stream");
+                                    break;
+                                }
+                            }
+                        }
+                        ch = snap_rx.changed() => {
+                            if ch.is_err() {
+                                break;
+                            }
+                            snap_rx.borrow_and_update();
+                            let Some(ref nk) = node_id_key else {
+                                continue;
+                            };
+                            if send_snapshot_if_revision_changed(
+                                &cache,
+                                &wire,
+                                last_type_url.as_str(),
+                                Some(nk.as_str()),
+                                &mut last_sent_revision,
+                                &tx,
+                            )
+                            .await
+                            .is_err()
+                            {
+                                break;
+                            }
+                        }
+                    }
+                }
+            } else {
+                loop {
+                    match inbound.message().await {
+                        Ok(Some(req)) => {
+                            if let Some(n) = node_id_from_request(&req) {
+                                node_id_key = Some(n.to_string());
+                            }
+                            let node_key = node_id_key.as_deref();
+                            let snap = cache.resolve_for_discovery(node_key);
+                            if discovery_is_ack(&req, snap.as_ref()) {
+                                continue;
+                            }
+                            if !req.type_url.is_empty() {
+                                last_type_url.clone_from(&req.type_url);
+                            }
+                            let type_url = last_type_url.as_str();
+                            if send_discovery_response(snap.as_ref(), &wire, type_url, &tx)
+                                .await
+                                .is_err()
+                            {
+                                break;
+                            }
+                        }
+                        Ok(None) => break,
+                        Err(e) => {
+                            warn!(error = %e, "ads request stream");
                             break;
                         }
                     }
-                    Ok(None) => break,
-                    Err(e) => {
-                        warn!(error = %e, "ads request stream");
-                        break;
-                    }
                 }
             }
+
             info!(
                 ads.method = "StreamAggregatedResources",
                 "xds stream closed"
@@ -118,6 +194,51 @@ impl AggregatedDiscoveryService for AdsService {
             Box::pin(out) as Self::DeltaAggregatedResourcesStream
         ))
     }
+}
+
+fn node_id_from_request(req: &DiscoveryRequest) -> Option<&str> {
+    req.node
+        .as_ref()
+        .map(|n| n.id.as_str())
+        .filter(|s| !s.is_empty())
+}
+
+fn discovery_is_ack(req: &DiscoveryRequest, snap: &IrSnapshot) -> bool {
+    req.error_detail.is_none()
+        && !req.version_info.is_empty()
+        && req.version_info == snap.revision_token()
+}
+
+async fn send_discovery_response(
+    snap: &IrSnapshot,
+    wire: &str,
+    type_url: &str,
+    tx: &mpsc::Sender<Result<DiscoveryResponse, Status>>,
+) -> Result<(), ()> {
+    let resp = discovery_response(snap, wire, type_url);
+    if tx.send(Ok(resp)).await.is_err() {
+        Err(())
+    } else {
+        Ok(())
+    }
+}
+
+async fn send_snapshot_if_revision_changed(
+    cache: &Arc<dyn XdsSnapshotSource>,
+    wire: &str,
+    type_url: &str,
+    node_key: Option<&str>,
+    last_sent_revision: &mut Option<String>,
+    tx: &mpsc::Sender<Result<DiscoveryResponse, Status>>,
+) -> Result<(), ()> {
+    let snap = cache.resolve_for_discovery(node_key);
+    let rev = snap.revision_token();
+    if last_sent_revision.as_deref() == Some(rev.as_str()) {
+        return Ok(());
+    }
+    send_discovery_response(snap.as_ref(), wire, type_url, tx).await?;
+    *last_sent_revision = Some(rev);
+    Ok(())
 }
 
 fn discovery_response(ir: &IrSnapshot, xds_wire: &str, req_type_url: &str) -> DiscoveryResponse {
@@ -159,6 +280,7 @@ fn discovery_response(ir: &IrSnapshot, xds_wire: &str, req_type_url: &str) -> Di
 pub async fn serve(
     cfg: XdsServerConfig,
     cache: Arc<dyn XdsSnapshotSource>,
+    revision_tx: Option<watch::Sender<u64>>,
     shutdown: tokio_util::sync::CancellationToken,
 ) -> Result<(), tonic::transport::Error> {
     if cfg.security.allow_insecure {
@@ -185,6 +307,7 @@ pub async fn serve(
         cache,
         allow_delta: cfg.allow_delta,
         xds_wire: cfg.xds_wire.clone(),
+        revision_tx,
     };
 
     let ads = AggregatedDiscoveryServiceServer::new(svc);

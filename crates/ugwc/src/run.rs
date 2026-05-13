@@ -65,8 +65,9 @@ pub async fn run(cfg: Config) -> Result<(), Box<dyn std::error::Error + Send + S
     };
 
     let cache_xds: Arc<dyn XdsSnapshotSource> = cache.clone();
+    let revision_tx = Some(cache.revision_sender());
     let xds_task = tokio::spawn(async move {
-        if let Err(e) = serve_xds(xds_cfg, cache_xds, xds_sd).await {
+        if let Err(e) = serve_xds(xds_cfg, cache_xds, revision_tx, xds_sd).await {
             tracing::error!(error = %e, "xds server exited");
         }
     });
@@ -157,6 +158,7 @@ pub async fn run(cfg: Config) -> Result<(), Box<dyn std::error::Error + Send + S
                     let plan = plan_publish(prev.as_deref(), &co.snapshot, &fp_k);
 
                     if let Err(e) = ugwc_k8s::apply_gateway_reconciled_status(
+                        &client_inner,
                         &api,
                         &latest,
                         &co,

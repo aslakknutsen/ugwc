@@ -6,6 +6,7 @@ use std::sync::Arc;
 use arc_swap::ArcSwap;
 use metrics::counter;
 use parking_lot::RwLock;
+use tokio::sync::watch;
 use ugwc_core::ir::{IrScopeId, IrSnapshot};
 
 /// Read-mostly snapshot storage (legacy single-global view).
@@ -67,15 +68,25 @@ impl XdsSnapshotSource for SharedSnapshot {
 pub struct MultiScopeSnapshot {
     global: ArcSwap<IrSnapshot>,
     by_scope: RwLock<HashMap<String, Arc<IrSnapshot>>>,
+    /// Bumps on every [`Self::store_scoped`] so ADS streams can push when IR changes.
+    rev_tx: watch::Sender<u64>,
 }
 
 impl MultiScopeSnapshot {
     #[must_use]
     pub fn new(global_initial: IrSnapshot) -> Self {
+        let (rev_tx, _rev_rx) = watch::channel(0u64);
         Self {
             global: ArcSwap::from_pointee(global_initial),
             by_scope: RwLock::new(HashMap::new()),
+            rev_tx,
         }
+    }
+
+    /// Clone of the revision sender: each open ADS stream should call [`watch::Sender::subscribe`].
+    #[must_use]
+    pub fn revision_sender(&self) -> watch::Sender<u64> {
+        self.rev_tx.clone()
     }
 }
 
@@ -105,6 +116,8 @@ impl XdsSnapshotSource for MultiScopeSnapshot {
         let key = snap.scope.0.clone();
         let arc = Arc::new(snap);
         self.by_scope.write().insert(key, arc);
+        let cur = *self.rev_tx.borrow();
+        let _ = self.rev_tx.send(cur.saturating_add(1));
     }
 }
 
@@ -135,5 +148,24 @@ mod tests {
         m.store_scoped(IrSnapshot::empty_for_scope(IrScopeId::new("ns", "gw")));
         let r = m.resolve_for_discovery(Some("ns/gw"));
         assert_eq!(r.scope.0, "ns/gw");
+    }
+
+    #[tokio::test]
+    async fn store_scoped_notifies_all_revision_watchers() {
+        let initial = IrSnapshot::empty_for_scope(IrScopeId::new("default", "a"));
+        let m = std::sync::Arc::new(MultiScopeSnapshot::new(initial));
+        let mut rx1 = m.revision_sender().subscribe();
+        let mut rx2 = m.revision_sender().subscribe();
+        let h1 = tokio::spawn(async move {
+            rx1.changed().await.expect("watch rx1");
+            rx1.borrow_and_update();
+        });
+        let h2 = tokio::spawn(async move {
+            rx2.changed().await.expect("watch rx2");
+            rx2.borrow_and_update();
+        });
+        m.store_scoped(IrSnapshot::empty_for_scope(IrScopeId::new("ns", "gw")));
+        h1.await.expect("watch task 1");
+        h2.await.expect("watch task 2");
     }
 }

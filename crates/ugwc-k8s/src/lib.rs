@@ -15,9 +15,9 @@ pub use controller::{run_gateway_controller, ReconcileFn};
 pub use loader::{load_cluster_snapshot, parent_reference_to_snap, LoaderError};
 pub use mappers::{mapped_gateway_key, GatewayKey, WatchEventCause};
 pub use provision::{
-    collect_effective_listener_ports, praxis_istiod_dial_url, reconcile_per_gateway_praxis,
-    reconcile_shared_deployment_stub, warn_per_gateway_without_enable, PraxisProvisionArgs,
-    ProvisionError,
+    collect_effective_listener_ports, per_gateway_dataplane_name, praxis_istiod_dial_url,
+    reconcile_per_gateway_praxis, reconcile_shared_deployment_stub, warn_per_gateway_without_enable,
+    PraxisProvisionArgs, ProvisionError,
 };
 pub use status::{
     apply_backend_tls_policies_for_gateway, apply_gateway_class_accepted_stub,
