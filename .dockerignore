@@ -1,0 +1,15 @@
+# Build cache / VCS
+target/
+.git/
+
+# Not needed to compile the binary
+charts/
+hack/
+design/
+**/*.md
+conformance.log
+
+# Editor / OS noise
+.idea/
+.vscode/
+.DS_Store
