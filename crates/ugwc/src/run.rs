@@ -26,7 +26,7 @@ pub async fn run(cfg: Config) -> Result<(), Box<dyn std::error::Error + Send + S
     let prom = metrics::install()?.clone();
 
     let leader = if cfg.leader_election {
-        warn!("leader_election=true but Lease wiring not complete — acting as follower stub");
+        warn!("leader_election=true but Lease wiring not complete — acting as follower stub (Kubernetes status still updates; xDS publish skipped on followers)");
         metrics::set_leader_active(false);
         LeaderState::follower_stub()
     } else {
@@ -147,15 +147,8 @@ pub async fn run(cfg: Config) -> Result<(), Box<dyn std::error::Error + Send + S
                         metrics::record_compile_error();
                     }
 
-                    if !leader_k.is_leader() {
-                        metrics::record_publish_skipped();
-                        return Ok(());
-                    }
-
-                    let programmed_ok = !co.report.has_errors() && !co.snapshot.meta.has_errors;
-
-                    let prev = cache_k.previous_for_scope(&co.snapshot.scope);
-                    let plan = plan_publish(prev.as_deref(), &co.snapshot, &fp_k);
+                    let programmed_ok =
+                        !co.report.has_blocking_errors() && !co.snapshot.meta.has_errors;
 
                     if let Err(e) = ugwc_k8s::apply_gateway_reconciled_status(
                         &client_inner,
@@ -359,6 +352,14 @@ pub async fn run(cfg: Config) -> Result<(), Box<dyn std::error::Error + Send + S
                             warn!(error = %e, "inferencepool status patch");
                         }
                     }
+
+                    if !leader_k.is_leader() {
+                        metrics::record_publish_skipped();
+                        return Ok(());
+                    }
+
+                    let prev = cache_k.previous_for_scope(&co.snapshot.scope);
+                    let plan = plan_publish(prev.as_deref(), &co.snapshot, &fp_k);
 
                     match plan.action {
                         PublishAction::Skip => metrics::record_publish_skipped(),

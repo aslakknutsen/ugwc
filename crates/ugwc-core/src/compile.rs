@@ -71,6 +71,22 @@ impl CompileReport {
         !self.errors.is_empty()
     }
 
+    /// Errors that must block xDS publish and trigger the default [`crate::failure_policy::OnPartialCompile::Reject`] snapshot clear.
+    ///
+    /// `Endpoints` / `NoReadyEndpoints` is still recorded in [`Self::errors`] so HTTP/GRPC route
+    /// `ResolvedRefs` helpers can surface `ResolvedRefs=False`, but it must **not** suppress IR
+    /// publication: empty EndpointSlices are normal during rollouts, while Gateway summary
+    /// `Programmed` can still read `True` (see `ugwc_k8s::status::apply_gateway_reconciled_status`).
+    #[must_use]
+    pub fn has_blocking_errors(&self) -> bool {
+        self.errors.iter().any(|e| {
+            !matches!(
+                (e.kind.as_str(), e.reason.as_str()),
+                ("Endpoints", "NoReadyEndpoints")
+            )
+        })
+    }
+
     #[must_use]
     pub fn http_grpc_conflict_loser_at(
         &self,
@@ -867,9 +883,9 @@ pub fn compile(policy: &FailurePolicy, input: &CompileInput) -> Result<CompileOu
     };
 
     snapshot.meta.correlation_id = correlation_id;
-    snapshot.meta.has_errors = report.has_errors();
+    snapshot.meta.has_errors = report.has_blocking_errors();
 
-    if report.has_errors() {
+    if report.has_blocking_errors() {
         if matches!(
             policy.on_partial_compile,
             crate::failure_policy::OnPartialCompile::Reject
@@ -1126,6 +1142,21 @@ mod tests {
         );
         assert_eq!(st2, "True");
         assert_eq!(reason2, "Accepted");
+    }
+
+    #[test]
+    fn no_ready_endpoints_is_not_blocking() {
+        let mut report = CompileReport::default();
+        report.errors.push(ObjectRefErr {
+            group: "".into(),
+            version: "v1".into(),
+            kind: "Endpoints".into(),
+            namespace: "ns".into(),
+            name: "svc".into(),
+            reason: "NoReadyEndpoints".into(),
+        });
+        assert!(report.has_errors());
+        assert!(!report.has_blocking_errors());
     }
 
     #[test]

@@ -170,11 +170,14 @@ pub fn encode_ir(ir: &IrSnapshot) -> Vec<Resource> {
                 TlsMode::Plaintext => Protocol::Http as i32,
             }
         };
+        // Empty string matches Istio `OriginalHostname` when unset; Praxis treats empty listener
+        // hostname + empty route hostnames as match-any (see `effective_route_hostnames`). Do not
+        // send `"*"` — Praxis would match only a literal Host header `*`.
         let hostname = ln
             .hostname
             .clone()
             .filter(|h| !h.trim().is_empty())
-            .unwrap_or_else(|| "*".into());
+            .unwrap_or_default();
         let tls = if matches!(ln.tls, TlsMode::Terminate)
             && !ln.tls_cert_pem.is_empty()
             && !ln.tls_key_pem.is_empty()
@@ -226,8 +229,10 @@ pub fn encode_ir(ir: &IrSnapshot) -> Vec<Resource> {
                 continue;
             }
             let route_key = format!("{}/{}/{}", gw_ns, r.name, idx);
+            // Empty = all hostnames (Istio leaves `Hostnames` unset); Praxis intersects with the
+            // listener. Sending `*` would become `host: Some("*")` and never match a real Host.
             let hostnames: Vec<String> = if r.hosts.is_empty() {
-                vec!["*".into()]
+                vec![]
             } else {
                 r.hosts.clone()
             };
@@ -257,21 +262,14 @@ pub fn encode_ir(ir: &IrSnapshot) -> Vec<Resource> {
                                 },
                             }),
                             tls: None,
-                            dial_port: picker_port,
+                            dial_port: 0,
                         });
                         continue;
                     }
-                    let key = format!(
-                        "{}/{}/{}",
-                        wb.backend.service_namespace,
-                        wb.backend.service_name,
-                        wb.backend.port_number.unwrap_or(80)
-                    );
-                    let eps = ir.backends.get(&key).cloned().unwrap_or_default();
+                    // `host` is a Service DNS name; dial its declared `port` (kube-proxy maps targetPort).
                     let host =
                         qualify_host(&wb.backend.service_namespace, &wb.backend.service_name);
                     let port = wb.backend.port_number.unwrap_or(80) as u32;
-                    let dial_port = eps.first().map(|e| u32::from(e.port)).unwrap_or(port);
                     let tls = wb.backend.backend_tls.as_ref().map(backend_tls_proto);
                     backends_pb.push(Backend {
                         host,
@@ -279,7 +277,7 @@ pub fn encode_ir(ir: &IrSnapshot) -> Vec<Resource> {
                         weight: wb.weight,
                         inference_pool: None,
                         tls,
-                        dial_port,
+                        dial_port: 0,
                     });
                 }
                 if backends_pb.is_empty() {
@@ -330,7 +328,7 @@ pub fn encode_ir(ir: &IrSnapshot) -> Vec<Resource> {
             key: listener_key.clone(),
             listener: Some(Listener {
                 key: listener_key,
-                hostname: "*".into(),
+                hostname: String::new(),
                 port: 80,
                 protocol: Protocol::Http as i32,
                 tls: None,
@@ -357,6 +355,8 @@ mod tests {
         let rt = &r[0].routes[0];
         assert_eq!(rt.backends.len(), 1);
         assert_eq!(rt.backends[0].weight, 1);
+        assert_eq!(rt.backends[0].port, 80);
+        assert_eq!(rt.backends[0].dial_port, 0);
         assert!(rt.matches.iter().any(|m| !m.path_prefix.is_empty()));
         let ln = r[0].listener.as_ref().expect("listener");
         assert!(ln.allowed_routes.iter().any(|x| x.contains("GRPCRoute")));
@@ -902,7 +902,7 @@ mod tests {
         let b = &enc[0].routes[0].backends[0];
         assert_eq!(b.host, picker_host);
         assert_eq!(b.port, 9000);
-        assert_eq!(b.dial_port, 9000);
+        assert_eq!(b.dial_port, 0);
         let ip = b.inference_pool.as_ref().expect("inference_pool");
         let ep = ip.endpoint_picker.as_ref().expect("endpoint_picker");
         assert_eq!(ep.host, picker_host);

@@ -234,6 +234,20 @@ fn extract_tls_pem_from_secret(sec: &Secret) -> Result<(Vec<u8>, Vec<u8>), Strin
     Ok((crt, key))
 }
 
+/// Reject obviously invalid `kubernetes.io/tls` material before xDS reaches the dataplane.
+///
+/// [`extract_tls_pem_from_secret`] only checks keys exist. Junk or cert-only blobs in `tls.key`
+/// would still be forwarded and fail in the proxy (e.g. Pingora: "no private key found in PEM file").
+fn tls_k8s_secret_pem_looks_valid(cert_pem: &[u8], key_pem: &[u8]) -> bool {
+    fn has_token(pem: &[u8], tok: &[u8]) -> bool {
+        if tok.is_empty() {
+            return false;
+        }
+        pem.windows(tok.len()).any(|w| w == tok)
+    }
+    has_token(key_pem, b"PRIVATE KEY") && has_token(cert_pem, b"CERTIFICATE")
+}
+
 /// Resolve `certificateRefs` into PEM material on HTTPS listeners (same-namespace or via ReferenceGrant).
 async fn resolve_gateway_listener_tls(
     client: &Client,
@@ -271,7 +285,9 @@ async fn resolve_gateway_listener_tls(
         let r = &refs[0];
         let kind = r.kind.as_deref().unwrap_or("Secret");
         let group = r.group.as_deref().unwrap_or("");
-        if kind != "Secret" || (!group.is_empty() && group != "") {
+        // Core `Secret` refs use an empty group (or, rarely, "core"); anything else is invalid.
+        let secret_group_ok = group.is_empty() || group.eq_ignore_ascii_case("core");
+        if !kind.eq_ignore_ascii_case("Secret") || !secret_group_ok {
             e.tls_resolve_error = Some(format!(
                 "InvalidCertificateRef: unsupported certificate ref {group}/{kind}"
             ));
@@ -286,6 +302,13 @@ async fn resolve_gateway_listener_tls(
         match api.get(&r.name).await {
             Ok(sec) => match extract_tls_pem_from_secret(&sec) {
                 Ok((crt, key)) => {
+                    if !tls_k8s_secret_pem_looks_valid(&crt, &key) {
+                        e.tls_resolve_error = Some(
+                            "InvalidCertificateRef: tls.crt/tls.key must contain PEM certificate and private key"
+                                .into(),
+                        );
+                        continue;
+                    }
                     e.tls_cert_pem = crt;
                     e.tls_key_pem = key;
                 }

@@ -172,7 +172,9 @@ metadata:
       controller: true
       blockOwnerDeletion: true
 spec:
-  type: ClusterIP
+  # LoadBalancer + MetalLB (see hack/setup.sh) yields an IP conformance can dial from
+  # the host (`go test ./conformance`). ClusterIP is only reachable inside the cluster.
+  type: LoadBalancer
   ipFamilyPolicy: PreferDualStack
   selector:
     gateway.ugwc.io/dataplane: {{ deployment_name }}

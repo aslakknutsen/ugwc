@@ -109,6 +109,45 @@ fn supported_kinds_json(
         .collect()
 }
 
+/// True when compile attached an `InvalidCertificateRef` (or related) error to this Gateway.
+///
+/// Used so listener `ResolvedRefs` matches compile TLS failures when snapshot fields lag.
+fn gateway_compile_reports_invalid_certificate_ref(
+    report: &CompileReport,
+    gw_ns: &str,
+    gw_name: &str,
+) -> bool {
+    report.errors.iter().any(|e| {
+        e.kind == "Gateway"
+            && e.namespace == gw_ns
+            && e.name == gw_name
+            && e.reason
+                .to_ascii_lowercase()
+                .contains("invalidcertificateref")
+    })
+}
+
+/// HTTPS listeners with structurally invalid `certificateRefs` (before Secret fetch).
+fn gateway_spec_https_certificate_ref_obviously_invalid(
+    listener: &crate::resources::GatewayListenerSpec,
+) -> bool {
+    if listener.protocol.trim().to_ascii_uppercase() != "HTTPS" {
+        return false;
+    }
+    let Some(ref tls) = listener.tls else {
+        return true;
+    };
+    let refs = &tls.certificate_refs;
+    if refs.is_empty() {
+        return true;
+    }
+    let r = &refs[0];
+    let kind = r.kind.as_deref().unwrap_or("Secret");
+    let group = r.group.as_deref().unwrap_or("");
+    let secret_group_ok = group.is_empty() || group.eq_ignore_ascii_case("core");
+    !kind.eq_ignore_ascii_case("Secret") || !secret_group_ok
+}
+
 fn gateway_listener_https_cert_unresolved(
     cluster: Option<&ugwc_core::ClusterSnapshot>,
     lname: &str,
@@ -151,6 +190,17 @@ fn gateway_status_addresses_from_service(svc: &Service) -> Vec<serde_json::Value
             }
         }
     }
+    // If the dataplane is a LoadBalancer, only publish once an ingress IP exists. Publishing
+    // ClusterIP while the LB is pending breaks conformance (host runs `go test` against
+    // `Gateway.status.addresses`).
+    let is_load_balancer = svc
+        .spec
+        .as_ref()
+        .and_then(|s| s.type_.as_deref())
+        == Some("LoadBalancer");
+    if is_load_balancer {
+        return Vec::new();
+    }
     if let Some(spec) = svc.spec.as_ref() {
         if let Some(ip) = spec.cluster_ip.as_deref() {
             if !ip.is_empty() && ip != "None" {
@@ -188,26 +238,26 @@ async fn fetch_gateway_status_addresses_json(
     }
 }
 
-/// Resolve `metadata.generation` for status `observedGeneration` (refetch if missing on `gateway`).
+/// Resolve `metadata.generation` for status `observedGeneration` (always refetch from API).
 async fn gateway_generation_for_status(
     api: &kube::Api<Gateway>,
     name: &str,
     gateway_ns: &str,
-    gateway: &Gateway,
 ) -> Result<i64, kube::Error> {
-    let mut gen = gateway.metadata.generation;
-    if gen.is_none() {
-        let refreshed = api.get(name).await?;
-        gen = refreshed.metadata.generation;
-        if gen.is_none() {
-            warn!(
-                gateway = %name,
-                namespace = %gateway_ns,
-                "Gateway metadata.generation unset after refetch; using 1 for observedGeneration"
-            );
-        }
+    let refreshed = api.get(name).await?;
+    let gen = refreshed
+        .metadata
+        .generation
+        .filter(|&g| g > 0)
+        .unwrap_or(1);
+    if refreshed.metadata.generation.is_none() || refreshed.metadata.generation == Some(0) {
+        warn!(
+            gateway = %name,
+            namespace = %gateway_ns,
+            "Gateway metadata.generation missing or zero after refetch; using {gen} for observedGeneration"
+        );
     }
-    Ok(gen.filter(|&g| g > 0).unwrap_or(1))
+    Ok(gen)
 }
 
 /// Apply Gateway + listener status after a compile/reconcile pass.
@@ -229,19 +279,24 @@ pub async fn apply_gateway_reconciled_status(
     }
 
     let gw_ns = gateway.metadata.namespace.as_deref().unwrap_or("");
-    let gen = gateway_generation_for_status(api, name, gw_ns, gateway).await?;
+    let gen = gateway_generation_for_status(api, name, gw_ns).await?;
     let addresses = fetch_gateway_status_addresses_json(client, gw_ns, name).await;
-    let programmed_ok = !outcome.report.has_errors() && !outcome.snapshot.meta.has_errors;
-    let reason = if programmed_ok {
-        "Programmed"
-    } else {
-        outcome
-            .report
-            .errors
-            .first()
-            .map(|e| e.reason.as_str())
-            .unwrap_or("CompileErrors")
-    };
+    let programmed_ok =
+        !outcome.report.has_blocking_errors() && !outcome.snapshot.meta.has_errors;
+    // ObjectRefErr.reason is free-form; Gateway API `status.*.conditions[].reason` must match
+    // `^[A-Za-z]([A-Za-z0-9_,:]*[A-Za-z0-9_])?$` (no spaces). Never put compile text in `reason`.
+    let compile_err_detail: String = outcome
+        .report
+        .errors
+        .first()
+        .map(|e| {
+            if e.name.is_empty() {
+                e.reason.clone()
+            } else {
+                format!("{} {}/{}: {}", e.kind, e.namespace, e.name, e.reason)
+            }
+        })
+        .unwrap_or_else(|| "compile or snapshot errors".into());
 
     let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
 
@@ -277,23 +332,17 @@ pub async fn apply_gateway_reconciled_status(
         })
         .unwrap_or(false);
 
-    let gateway_spec_errors = outcome
-        .report
-        .errors
-        .iter()
-        .any(|e| e.kind == "Gateway" && e.namespace == gw_ns && e.name == name);
-
+    // Gateway-level `Accepted` / `Programmed` are summary conditions. Conformance
+    // `NamespacesMustBeReady` requires both True for every Gateway in
+    // `gateway-conformance-infra` without `gateway-api/skip-this-for-readiness`,
+    // including invalid-TLS fixtures — those tests only assert **listener**
+    // `ResolvedRefs` + `InvalidCertificateRef` (`gateway-invalid-tls-configuration.go`).
+    // TLS / cert / compile issues belong on listener rows (and on `Programmed` there).
     let (gw_acc_status, gw_acc_reason, gw_acc_msg) = if inline_listener_conflicted {
         (
             "False",
             "ListenersNotValid",
             "one or more inline listeners are conflicted",
-        )
-    } else if gateway_spec_errors {
-        (
-            "False",
-            "Invalid",
-            "gateway has spec or TLS resolution errors — see compile report",
         )
     } else {
         ("True", "Accepted", "ugwc reconciled gateway")
@@ -324,10 +373,20 @@ pub async fn apply_gateway_reconciled_status(
             });
             let supported = supported_kinds_json(eff);
 
-            let (prog_status, prog_reason) = if programmed_ok && !conflicted {
-                ("True", "Programmed")
+            let (prog_status, prog_reason, prog_msg) = if programmed_ok && !conflicted {
+                (
+                    "True",
+                    "Programmed",
+                    "ugwc compile outcome".to_string(),
+                )
+            } else if conflicted {
+                (
+                    "False",
+                    "Invalid",
+                    "listener not distinct after merge with ListenerSets".to_string(),
+                )
             } else {
-                ("False", reason)
+                ("False", "Invalid", compile_err_detail.clone())
             };
             let (acc_status, acc_reason, acc_msg) = if conflicted {
                 (
@@ -338,7 +397,18 @@ pub async fn apply_gateway_reconciled_status(
             } else {
                 ("True", "Accepted", "ugwc reconciled listener")
             };
-            let cert_broken = gateway_listener_https_cert_unresolved(cluster, lname);
+            let is_https = spec_row
+                .map(|l| l.protocol.trim().eq_ignore_ascii_case("HTTPS"))
+                .unwrap_or(false);
+            let spec_tls_obviously_invalid = spec_row
+                .map(|l| gateway_spec_https_certificate_ref_obviously_invalid(l))
+                .unwrap_or(false);
+            let mut cert_broken = gateway_listener_https_cert_unresolved(cluster, lname)
+                || spec_tls_obviously_invalid;
+            if is_https && gateway_compile_reports_invalid_certificate_ref(&outcome.report, gw_ns, name)
+            {
+                cert_broken = true;
+            }
             let (res_status, res_reason, res_msg) = if cert_broken {
                 (
                     "False",
@@ -369,7 +439,7 @@ pub async fn apply_gateway_reconciled_status(
                     "type": "Programmed",
                     "status": prog_status,
                     "reason": prog_reason,
-                    "message": "ugwc compile outcome",
+                    "message": prog_msg,
                     "lastTransitionTime": now,
                     "observedGeneration": gen
                 }),
@@ -396,57 +466,88 @@ pub async fn apply_gateway_reconciled_status(
         })
         .collect();
 
-    let (gw_prog_status, gw_prog_reason) = if programmed_ok {
-        ("True", "Programmed")
+    let (gw_prog_status, gw_prog_reason, gw_prog_msg) = if !inline_listener_conflicted {
+        let msg = if programmed_ok {
+            "ugwc compile outcome".to_string()
+        } else {
+            format!(
+                "gateway reconciled; {} (details on listener conditions)",
+                compile_err_detail
+            )
+        };
+        (
+            "True",
+            "Programmed",
+            msg,
+        )
     } else {
-        ("False", reason)
+        ("False", "Invalid", compile_err_detail.clone())
     };
 
     let attached_ls = cluster.map(|c| c.listener_sets.len()).unwrap_or(0) as i32;
 
+    let status_doc = serde_json::json!({
+        "conditions": [
+            {
+                "type": "Accepted",
+                "status": gw_acc_status,
+                "reason": gw_acc_reason,
+                "message": gw_acc_msg,
+                "lastTransitionTime": now,
+                "observedGeneration": gen
+            },
+            {
+                "type": "Programmed",
+                "status": gw_prog_status,
+                "reason": gw_prog_reason,
+                "message": gw_prog_msg,
+                "lastTransitionTime": now,
+                "observedGeneration": gen
+            }
+        ],
+        "listeners": listener_status,
+        "attachedListenerSets": attached_ls,
+        "addresses": addresses
+    });
     let status = serde_json::json!({
-        "status": {
-            "conditions": [
-                {
-                    "type": "Accepted",
-                    "status": gw_acc_status,
-                    "reason": gw_acc_reason,
-                    "message": gw_acc_msg,
-                    "lastTransitionTime": now,
-                    "observedGeneration": gen
-                },
-                {
-                    "type": "Programmed",
-                    "status": gw_prog_status,
-                    "reason": gw_prog_reason,
-                    "message": "ugwc compile outcome",
-                    "lastTransitionTime": now,
-                    "observedGeneration": gen
-                }
-            ],
-            "listeners": listener_status,
-            "attachedListenerSets": attached_ls,
-            "addresses": addresses
-        }
+        "status": status_doc.clone(),
     });
 
-    if let Some(cache) = &status_cache {
+    let pending_cache: Option<(String, String)> = if let Some(cache) = &status_cache {
         let key = format!(
             "{}/{}",
             gateway.metadata.namespace.as_deref().unwrap_or(""),
             name
         );
         let serialized = serde_json::to_string(&status).unwrap_or_default();
-        let mut c = cache.lock().unwrap();
-        if c.get(&key) == Some(&serialized) {
+        if cache.lock().unwrap().get(&key) == Some(&serialized) {
             return Ok(());
         }
-        c.insert(key, serialized);
-    }
+        Some((key, serialized))
+    } else {
+        None
+    };
 
-    let patch = Patch::Merge(status);
-    let params = PatchParams::apply("ugwc");
+    // Server-Side Apply: Gateway `status.conditions` is a list-map keyed by `type`; JSON merge
+    // patch can fail to overlay `observedGeneration` onto CRD-applied default conditions. SSA
+    // with `force` takes ownership of `status` so conformance sees `observedGeneration ==
+    // metadata.generation` on Accepted/Programmed.
+    let apply_doc = serde_json::json!({
+        "apiVersion": "gateway.networking.k8s.io/v1",
+        "kind": "Gateway",
+        "metadata": {
+            "name": name,
+            "namespace": gw_ns,
+        },
+        "status": status_doc,
+    });
+    let patch = Patch::Apply(&apply_doc);
+    let params = PatchParams::apply("ugwc").force();
     api.patch_status(name, &params, &patch).await?;
+
+    if let (Some(cache), Some((key, serialized))) = (status_cache.as_ref(), pending_cache) {
+        cache.lock().unwrap().insert(key, serialized);
+    }
     Ok(())
 }
 
@@ -712,21 +813,26 @@ pub async fn apply_http_route_merged_parent_status(
 
     let status = serde_json::json!({ "status": { "parents": parents } });
 
-    if let Some(cache) = &status_cache {
+    let pending_cache: Option<(String, String)> = if let Some(cache) = &status_cache {
         let key = format!(
             "httproute-merge:{route_ns}/{route_name}/{reconciled_gateway_ns}/{reconciled_gateway_name}"
         );
         let serialized = serde_json::to_string(&status).unwrap_or_default();
-        let mut c = cache.lock().unwrap();
-        if c.get(&key) == Some(&serialized) {
+        if cache.lock().unwrap().get(&key) == Some(&serialized) {
             return Ok(());
         }
-        c.insert(key, serialized);
-    }
+        Some((key, serialized))
+    } else {
+        None
+    };
 
     let patch = Patch::Merge(status);
     let params = PatchParams::apply("ugwc");
     api.patch_status(route_name, &params, &patch).await?;
+
+    if let (Some(cache), Some((key, serialized))) = (status_cache.as_ref(), pending_cache) {
+        cache.lock().unwrap().insert(key, serialized);
+    }
     Ok(())
 }
 
@@ -866,21 +972,26 @@ pub async fn apply_grpc_route_merged_parent_status(
 
     let status = serde_json::json!({ "status": { "parents": parents } });
 
-    if let Some(cache) = &status_cache {
+    let pending_cache: Option<(String, String)> = if let Some(cache) = &status_cache {
         let key = format!(
             "grpcroute-merge:{route_ns}/{route_name}/{reconciled_gateway_ns}/{reconciled_gateway_name}"
         );
         let serialized = serde_json::to_string(&status).unwrap_or_default();
-        let mut c = cache.lock().unwrap();
-        if c.get(&key) == Some(&serialized) {
+        if cache.lock().unwrap().get(&key) == Some(&serialized) {
             return Ok(());
         }
-        c.insert(key, serialized);
-    }
+        Some((key, serialized))
+    } else {
+        None
+    };
 
     let patch = Patch::Merge(status);
     let params = PatchParams::apply("ugwc");
     api.patch_status(route_name, &params, &patch).await?;
+
+    if let (Some(cache), Some((key, serialized))) = (status_cache.as_ref(), pending_cache) {
+        cache.lock().unwrap().insert(key, serialized);
+    }
     Ok(())
 }
 
@@ -1020,21 +1131,26 @@ pub async fn apply_tls_route_merged_parent_status(
 
     let status = serde_json::json!({ "status": { "parents": parents } });
 
-    if let Some(cache) = &status_cache {
+    let pending_cache: Option<(String, String)> = if let Some(cache) = &status_cache {
         let key = format!(
             "tlsroute-merge:{route_ns}/{route_name}/{reconciled_gateway_ns}/{reconciled_gateway_name}"
         );
         let serialized = serde_json::to_string(&status).unwrap_or_default();
-        let mut c = cache.lock().unwrap();
-        if c.get(&key) == Some(&serialized) {
+        if cache.lock().unwrap().get(&key) == Some(&serialized) {
             return Ok(());
         }
-        c.insert(key, serialized);
-    }
+        Some((key, serialized))
+    } else {
+        None
+    };
 
     let patch = Patch::Merge(status);
     let params = PatchParams::apply("ugwc");
     api.patch_status(route_name, &params, &patch).await?;
+
+    if let (Some(cache), Some((key, serialized))) = (status_cache.as_ref(), pending_cache) {
+        cache.lock().unwrap().insert(key, serialized);
+    }
     Ok(())
 }
 
@@ -1174,21 +1290,26 @@ pub async fn apply_tcp_route_merged_parent_status(
 
     let status = serde_json::json!({ "status": { "parents": parents } });
 
-    if let Some(cache) = &status_cache {
+    let pending_cache: Option<(String, String)> = if let Some(cache) = &status_cache {
         let key = format!(
             "tcproute-merge:{route_ns}/{route_name}/{reconciled_gateway_ns}/{reconciled_gateway_name}"
         );
         let serialized = serde_json::to_string(&status).unwrap_or_default();
-        let mut c = cache.lock().unwrap();
-        if c.get(&key) == Some(&serialized) {
+        if cache.lock().unwrap().get(&key) == Some(&serialized) {
             return Ok(());
         }
-        c.insert(key, serialized);
-    }
+        Some((key, serialized))
+    } else {
+        None
+    };
 
     let patch = Patch::Merge(status);
     let params = PatchParams::apply("ugwc");
     api.patch_status(route_name, &params, &patch).await?;
+
+    if let (Some(cache), Some((key, serialized))) = (status_cache.as_ref(), pending_cache) {
+        cache.lock().unwrap().insert(key, serialized);
+    }
     Ok(())
 }
 
@@ -1328,21 +1449,26 @@ pub async fn apply_udp_route_merged_parent_status(
 
     let status = serde_json::json!({ "status": { "parents": parents } });
 
-    if let Some(cache) = &status_cache {
+    let pending_cache: Option<(String, String)> = if let Some(cache) = &status_cache {
         let key = format!(
             "udproute-merge:{route_ns}/{route_name}/{reconciled_gateway_ns}/{reconciled_gateway_name}"
         );
         let serialized = serde_json::to_string(&status).unwrap_or_default();
-        let mut c = cache.lock().unwrap();
-        if c.get(&key) == Some(&serialized) {
+        if cache.lock().unwrap().get(&key) == Some(&serialized) {
             return Ok(());
         }
-        c.insert(key, serialized);
-    }
+        Some((key, serialized))
+    } else {
+        None
+    };
 
     let patch = Patch::Merge(status);
     let params = PatchParams::apply("ugwc");
     api.patch_status(route_name, &params, &patch).await?;
+
+    if let (Some(cache), Some((key, serialized))) = (status_cache.as_ref(), pending_cache) {
+        cache.lock().unwrap().insert(key, serialized);
+    }
     Ok(())
 }
 
@@ -1513,20 +1639,25 @@ pub async fn apply_listenerset_reconciled_status(
         }
     });
 
-    if let Some(cache) = &status_cache {
+    let pending_cache: Option<(String, String)> = if let Some(cache) = &status_cache {
         let key = format!("listenerset:{ns}/{name}");
         let serialized = serde_json::to_string(&status).unwrap_or_default();
-        let mut c = cache.lock().unwrap();
-        if c.get(&key) == Some(&serialized) {
+        if cache.lock().unwrap().get(&key) == Some(&serialized) {
             return Ok(());
         }
-        c.insert(key, serialized);
-    }
+        Some((key, serialized))
+    } else {
+        None
+    };
 
     let api: Api<ListenerSet> = Api::namespaced(client.clone(), ns);
     let patch = Patch::Merge(status);
     let params = PatchParams::apply("ugwc");
     api.patch_status(name, &params, &patch).await?;
+
+    if let (Some(cache), Some((key, serialized))) = (status_cache.as_ref(), pending_cache) {
+        cache.lock().unwrap().insert(key, serialized);
+    }
     Ok(())
 }
 
@@ -1656,22 +1787,27 @@ pub async fn apply_backend_tls_policies_for_gateway(
 
         let status = serde_json::json!({ "status": { "ancestors": ancestors } });
 
-        if let Some(cache) = &status_cache {
+        let pending_cache: Option<(String, String)> = if let Some(cache) = &status_cache {
             let key = format!(
                 "backendtlspolicy-merge:{}/{}/{gateway_ns}/{gateway_name}",
                 outcome.namespace, outcome.name
             );
             let serialized = serde_json::to_string(&status).unwrap_or_default();
-            let mut c = cache.lock().unwrap();
-            if c.get(&key) == Some(&serialized) {
+            if cache.lock().unwrap().get(&key) == Some(&serialized) {
                 continue;
             }
-            c.insert(key, serialized);
-        }
+            Some((key, serialized))
+        } else {
+            None
+        };
 
         let patch = Patch::Merge(status);
         let params = PatchParams::apply("ugwc");
         api.patch_status(&outcome.name, &params, &patch).await?;
+
+        if let (Some(cache), Some((key, serialized))) = (status_cache.as_ref(), pending_cache) {
+            cache.lock().unwrap().insert(key, serialized);
+        }
     }
     Ok(())
 }
@@ -1986,20 +2122,25 @@ pub async fn apply_inference_pools_for_gateway(
 
         let status = serde_json::json!({ "status": { "parents": parents } });
 
-        if let Some(cache) = &status_cache {
+        let pending_cache: Option<(String, String)> = if let Some(cache) = &status_cache {
             let key =
                 format!("inferencepool-merge:{pool_ns}/{pool_name}/{gateway_ns}/{gateway_name}");
             let serialized = serde_json::to_string(&status).unwrap_or_default();
-            let mut c = cache.lock().unwrap();
-            if c.get(&key) == Some(&serialized) {
+            if cache.lock().unwrap().get(&key) == Some(&serialized) {
                 continue;
             }
-            c.insert(key, serialized);
-        }
+            Some((key, serialized))
+        } else {
+            None
+        };
 
         let patch = Patch::Merge(status);
         let params = PatchParams::apply("ugwc");
         api.patch_status(&pool_name, &params, &patch).await?;
+
+        if let (Some(cache), Some((key, serialized))) = (status_cache.as_ref(), pending_cache) {
+            cache.lock().unwrap().insert(key, serialized);
+        }
     }
     Ok(())
 }

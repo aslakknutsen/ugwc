@@ -560,10 +560,6 @@ fn find_service<'a>(sn: &'a ClusterSnapshot, ns: &str, name: &str) -> Option<&'a
         .find(|s| s.namespace == ns && s.name == name)
 }
 
-fn backend_key(ns: &str, name: &str, port: u16) -> String {
-    format!("{ns}/{name}:{port}")
-}
-
 fn collect_endpoints(sn: &ClusterSnapshot, svc_ns: &str, svc_name: &str) -> Vec<BackendEndpointIr> {
     let mut out = Vec::new();
     for sl in &sn.endpoint_slices {
@@ -863,7 +859,7 @@ fn resolve_http_route_backends(
         };
         let backend_tls = snapshot
             .backend_tls_effective
-            .get(&backend_key(svc_ns, svc_name, port))
+            .get(&crate::ir::backend_endpoints_map_key(svc_ns, svc_name, port))
             .map(|e| e.tls.clone());
         if backend_tls.as_ref().is_some_and(|t| t.invalid) {
             report.errors.push(ObjectRefErr {
@@ -961,7 +957,7 @@ fn resolve_grpc_route_backends(
         };
         let backend_tls = snapshot
             .backend_tls_effective
-            .get(&backend_key(svc_ns, svc_name, port))
+            .get(&crate::ir::backend_endpoints_map_key(svc_ns, svc_name, port))
             .map(|e| e.tls.clone());
         if backend_tls.as_ref().is_some_and(|t| t.invalid) {
             report.errors.push(ObjectRefErr {
@@ -1059,7 +1055,7 @@ fn resolve_tls_route_backends(
         };
         let backend_tls = snapshot
             .backend_tls_effective
-            .get(&backend_key(svc_ns, svc_name, port))
+            .get(&crate::ir::backend_endpoints_map_key(svc_ns, svc_name, port))
             .map(|e| e.tls.clone());
         if backend_tls.as_ref().is_some_and(|t| t.invalid) {
             report.errors.push(ObjectRefErr {
@@ -1157,7 +1153,7 @@ fn resolve_tcp_route_backends(
         };
         let backend_tls = snapshot
             .backend_tls_effective
-            .get(&backend_key(svc_ns, svc_name, port))
+            .get(&crate::ir::backend_endpoints_map_key(svc_ns, svc_name, port))
             .map(|e| e.tls.clone());
         if backend_tls.as_ref().is_some_and(|t| t.invalid) {
             report.errors.push(ObjectRefErr {
@@ -1255,7 +1251,7 @@ fn resolve_udp_route_backends(
         };
         let backend_tls = snapshot
             .backend_tls_effective
-            .get(&backend_key(svc_ns, svc_name, port))
+            .get(&crate::ir::backend_endpoints_map_key(svc_ns, svc_name, port))
             .map(|e| e.tls.clone());
         if backend_tls.as_ref().is_some_and(|t| t.invalid) {
             report.errors.push(ObjectRefErr {
@@ -2259,7 +2255,7 @@ pub fn ir_from_cluster(snapshot: &ClusterSnapshot) -> (IrSnapshot, CompileReport
             if wb.backend.inference.is_some() {
                 continue;
             }
-            let key = backend_key(
+            let key = crate::ir::backend_endpoints_map_key(
                 &wb.backend.service_namespace,
                 &wb.backend.service_name,
                 wb.backend.port_number.unwrap_or(80),

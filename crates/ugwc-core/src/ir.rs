@@ -262,11 +262,18 @@ pub struct IrSnapshot {
     pub scope: IrScopeId,
     pub listeners: Vec<ListenerIr>,
     pub routes: Vec<RouteRuleIr>,
+    /// Keys are [`backend_endpoints_map_key`] (`namespace/name:port`).
     pub backends: BTreeMap<String, Vec<BackendEndpointIr>>,
     pub meta: SnapshotMeta,
     /// Policy / inference overlays (Phase 5–6).
     pub policy: crate::policy::PolicyOverlayIr,
     pub inference: crate::inference::InferenceIr,
+}
+
+/// Stable map key for [`IrSnapshot::backends`] (must match `ir_from_cluster` and xDS encoders).
+#[must_use]
+pub fn backend_endpoints_map_key(service_namespace: &str, service_name: &str, port: u16) -> String {
+    format!("{service_namespace}/{service_name}:{port}")
 }
 
 impl IrSnapshot {
