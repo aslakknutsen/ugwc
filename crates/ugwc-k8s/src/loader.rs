@@ -1157,8 +1157,13 @@ pub async fn load_cluster_snapshot(
 
     let mut ns_label_map: BTreeMap<String, BTreeMap<String, String>> = BTreeMap::new();
     for ns in &ns_for_labels {
-        if let Ok(lbl) = namespace_labels(client, ns).await {
-            ns_label_map.insert(ns.clone(), lbl);
+        match namespace_labels(client, ns).await {
+            Ok(lbl) => {
+                ns_label_map.insert(ns.clone(), lbl);
+            }
+            Err(e) => {
+                warn!(error = %e, namespace = %ns, "failed to fetch namespace labels; selector-based allowedRoutes may not match");
+            }
         }
     }
 

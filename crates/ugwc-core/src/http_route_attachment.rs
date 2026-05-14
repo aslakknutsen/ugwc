@@ -443,7 +443,7 @@ pub fn listener_accepts_route_kind(
                 .cloned()
                 .unwrap_or_default();
             if sel.is_empty() {
-                false
+                true
             } else {
                 namespace_labels
                     .get(route_namespace)
@@ -512,7 +512,7 @@ pub(crate) fn hostname_literal_or_wildcard_matches(pattern: &str, host: &str) ->
     if let Some(suffix) = p.strip_prefix("*.") {
         let suf = suffix.to_ascii_lowercase();
         let hh = h.to_ascii_lowercase();
-        hh == suf || hh.ends_with(&format!(".{suf}"))
+        hh.ends_with(&format!(".{suf}"))
     } else {
         p.eq_ignore_ascii_case(h)
     }
@@ -1382,5 +1382,33 @@ mod tests {
     #[test]
     fn hostnames_intersect_rejects_non_overlapping() {
         assert!(!hostnames_intersect("specific.but.wrong.com", "very.specific.com"));
+    }
+
+    #[test]
+    fn wildcard_does_not_match_bare_domain() {
+        assert!(!hostnames_intersect("wildcard.io", "*.wildcard.io"));
+        assert!(!hostnames_intersect("*.wildcard.io", "wildcard.io"));
+    }
+
+    #[test]
+    fn wildcard_matches_subdomain() {
+        assert!(hostnames_intersect("foo.wildcard.io", "*.wildcard.io"));
+        assert!(hostnames_intersect("*.wildcard.io", "foo.wildcard.io"));
+        assert!(hostnames_intersect("foo.bar.wildcard.io", "*.wildcard.io"));
+    }
+
+    #[test]
+    fn exact_hostnames_match() {
+        assert!(hostnames_intersect("very.specific.com", "very.specific.com"));
+    }
+
+    #[test]
+    fn wildcard_route_matches_specific_listener() {
+        assert!(hostnames_intersect("*.specific.com", "very.specific.com"));
+    }
+
+    #[test]
+    fn wildcard_route_matches_wildcard_listener() {
+        assert!(hostnames_intersect("*.anotherwildcard.io", "*.anotherwildcard.io"));
     }
 }

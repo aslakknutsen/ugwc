@@ -9,7 +9,7 @@ rules:
     resources: ["customresourcedefinitions"]
     verbs: ["get", "list", "watch"]
   - apiGroups: [""]
-    resources: ["secrets", "configmaps"]
+    resources: ["namespaces", "secrets", "configmaps"]
     verbs: ["get", "list", "watch"]
   - apiGroups: ["discovery.k8s.io"]
     resources: ["endpointslices"]

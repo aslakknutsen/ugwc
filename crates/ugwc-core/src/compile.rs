@@ -93,7 +93,16 @@ impl CompileReport {
             ) {
                 return false;
             }
-            if matches!(e.kind.as_str(), "HTTPRoute" | "GRPCRoute") {
+            if matches!(
+                e.kind.as_str(),
+                "HTTPRoute" | "GRPCRoute" | "TLSRoute" | "TCPRoute" | "UDPRoute"
+            ) {
+                return false;
+            }
+            if matches!(
+                e.kind.as_str(),
+                "Service" | "InferencePool"
+            ) {
                 return false;
             }
             true
@@ -1428,6 +1437,77 @@ mod tests {
             http_route_accepted_condition_for_parent(&route, parent, &snap, &attached_ls, &report);
         assert_eq!(st, "False");
         assert_eq!(reason, "NotAllowedByListeners");
+    }
+
+    #[test]
+    fn http_route_accepted_cross_namespace_selector_with_matching_labels() {
+        let listeners = vec![GatewayListenerSnap {
+            name: "http".into(),
+            port: 80,
+            protocol: "HTTP".into(),
+            hostname: None,
+            allowed_routes: Some(AllowedRoutesSnap {
+                namespaces: Some(AllowedRoutesNamespacesSnap {
+                    from: Some("Selector".into()),
+                    selector_match_labels: BTreeMap::from([
+                        ("gateway-conformance".into(), "backend".into()),
+                    ]),
+                }),
+                kinds: vec![],
+            }),
+            tls: None,
+        }];
+        let snap = ClusterSnapshot {
+            gateway_namespace: "infra".into(),
+            gateway_name: "gw".into(),
+            gateway_class_name: "gc".into(),
+            gateway_generation: 1,
+            gateway_addresses: vec![],
+            gateway_infrastructure: None,
+            listeners: listeners.clone(),
+            effective_listeners: merge_effective_listeners(&listeners, &[]),
+            listener_sets: vec![],
+            allowed_listeners: None,
+            http_routes: vec![],
+            grpc_routes: vec![],
+            tls_routes: vec![],
+            tcp_routes: vec![],
+            udp_routes: vec![],
+            services: vec![],
+            endpoint_slices: vec![],
+            gateway_class: None,
+            reference_grants: vec![],
+            backend_tls_effective: Default::default(),
+            backend_tls_policy_outcomes: vec![],
+            namespace_labels: BTreeMap::from([(
+                "web-backend".into(),
+                BTreeMap::from([("gateway-conformance".into(), "backend".into())]),
+            )]),
+            inference_pools: vec![],
+        };
+        let route = HttpRouteSnap {
+            namespace: "web-backend".into(),
+            name: "r".into(),
+            generation: 1,
+            parent_refs: vec![ParentRefSnap {
+                group: Some("gateway.networking.k8s.io".into()),
+                kind: Some("Gateway".into()),
+                namespace: Some("infra".into()),
+                name: "gw".into(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let attached_ls = HashSet::new();
+        let report = CompileReport::default();
+        let parent = &route.parent_refs[0];
+        let (st, reason, _) =
+            http_route_accepted_condition_for_parent(&route, parent, &snap, &attached_ls, &report);
+        assert_eq!(
+            (st, reason),
+            ("True", "Accepted"),
+            "cross-namespace route with matching selector labels should be Accepted",
+        );
     }
 
     #[test]

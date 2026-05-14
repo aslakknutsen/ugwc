@@ -2573,8 +2573,9 @@ mod tests {
         EndpointSliceSnap, EndpointSnap, GatewayListenerSnap, GatewayListenerTlsSnap,
         GrpcRouteRuleSnap, GrpcRouteSnap, HttpBackendRefSnap, HttpPathMatchSnap, HttpRouteRuleSnap,
         ListenerSetSnap, ParentRefSnap, ReferenceGrantFromSnap, ReferenceGrantSnap,
-        ReferenceGrantToSnap, ServicePortSnap, ServiceSnap, TcpRouteRuleSnap, TcpRouteSnap,
-        TlsRouteRuleSnap, TlsRouteSnap, UdpRouteRuleSnap, UdpRouteSnap,
+        ReferenceGrantToSnap, RouteGroupKindSnap, ServicePortSnap, ServiceSnap,
+        TcpRouteRuleSnap, TcpRouteSnap, TlsRouteRuleSnap, TlsRouteSnap, UdpRouteRuleSnap,
+        UdpRouteSnap,
     };
 
     fn minimal_cluster() -> ClusterSnapshot {
@@ -2996,6 +2997,43 @@ mod tests {
         };
         assert!(rep.attachment_count_for_listener_key(&lk) >= 1);
         assert!(!ir.routes.is_empty());
+    }
+
+    #[test]
+    fn route_attachment_counts_with_selector_namespace() {
+        let mut c = minimal_cluster();
+        c.listeners[0].allowed_routes = Some(AllowedRoutesSnap {
+            namespaces: Some(AllowedRoutesNamespacesSnap {
+                from: Some("Selector".into()),
+                selector_match_labels: BTreeMap::from([
+                    ("kubernetes.io/metadata.name".into(), "default".into()),
+                ]),
+            }),
+            kinds: vec![RouteGroupKindSnap {
+                group: Some("gateway.networking.k8s.io".into()),
+                kind: "HTTPRoute".into(),
+            }],
+        });
+        c.namespace_labels = BTreeMap::from([(
+            "default".into(),
+            BTreeMap::from([
+                ("kubernetes.io/metadata.name".into(), "default".into()),
+            ]),
+        )]);
+        c.effective_listeners = merge_effective_listeners(&c.listeners, &[]);
+        let (_ir, rep) = ir_from_cluster(&c);
+        let lk = crate::ir::ListenerAttachmentIr {
+            parent_kind: "Gateway".into(),
+            parent_namespace: "default".into(),
+            parent_name: "gw".into(),
+            section_name: "http".into(),
+            port: 80,
+        };
+        assert!(
+            rep.attachment_count_for_listener_key(&lk) >= 1,
+            "Selector-based namespace should produce attachment count, got {:?}",
+            rep.listener_route_attachment_counts,
+        );
     }
 
     #[test]
