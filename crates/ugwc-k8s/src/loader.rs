@@ -1102,6 +1102,7 @@ pub async fn load_cluster_snapshot(
                 namespace: svc.metadata.namespace.unwrap_or_default(),
                 name: svc.metadata.name.unwrap_or_default(),
                 ports,
+                cluster_ip: svc.spec.as_ref().and_then(|s| s.cluster_ip.clone()),
             });
         }
     }

@@ -284,6 +284,7 @@ fn resolve_inference_pool_backend(
                 picker_port,
                 failure_mode_fail_open: fail_open,
             }),
+            dial_port: None,
         },
         weight: br.weight.unwrap_or(1),
     })
@@ -558,6 +559,16 @@ fn resolve_service_port(svc: &ServiceSnap, br: &HttpBackendRefSnap) -> Result<u1
         return Ok(svc.ports[0].port);
     }
     Err("port not found on Service".into())
+}
+
+fn headless_dial_port(svc: &ServiceSnap, service_port: u16) -> Option<u16> {
+    if svc.cluster_ip.as_deref() != Some("None") {
+        return None;
+    }
+    svc.ports
+        .iter()
+        .find(|sp| sp.port == service_port)
+        .and_then(|sp| sp.target_port)
 }
 
 fn find_service<'a>(sn: &'a ClusterSnapshot, ns: &str, name: &str) -> Option<&'a ServiceSnap> {
@@ -891,6 +902,7 @@ fn resolve_http_route_backends(
                 port_number: Some(port),
                 backend_tls,
                 inference: None,
+                dial_port: headless_dial_port(svc, port),
             },
             weight: br.weight.unwrap_or(1),
         });
@@ -989,6 +1001,7 @@ fn resolve_grpc_route_backends(
                 port_number: Some(port),
                 backend_tls,
                 inference: None,
+                dial_port: headless_dial_port(svc, port),
             },
             weight: br.weight.unwrap_or(1),
         });
@@ -1087,6 +1100,7 @@ fn resolve_tls_route_backends(
                 port_number: Some(port),
                 backend_tls,
                 inference: None,
+                dial_port: headless_dial_port(svc, port),
             },
             weight: br.weight.unwrap_or(1),
         });
@@ -1185,6 +1199,7 @@ fn resolve_tcp_route_backends(
                 port_number: Some(port),
                 backend_tls,
                 inference: None,
+                dial_port: headless_dial_port(svc, port),
             },
             weight: br.weight.unwrap_or(1),
         });
@@ -1283,6 +1298,7 @@ fn resolve_udp_route_backends(
                 port_number: Some(port),
                 backend_tls,
                 inference: None,
+                dial_port: headless_dial_port(svc, port),
             },
             weight: br.weight.unwrap_or(1),
         });
@@ -2126,17 +2142,19 @@ pub fn ir_from_cluster(snapshot: &ClusterSnapshot) -> (IrSnapshot, CompileReport
                 continue;
             }
 
-            if redirect_ir.is_none() && backends_ir.is_empty() && rule.filters.is_empty() {
-                // No-op rule — skip
+            if redirect_ir.is_none()
+                && backends_ir.is_empty()
+                && rule.backend_refs.is_empty()
+                && rule.filters.is_empty()
+            {
                 continue;
             }
 
-            if redirect_ir.is_none() && backends_ir.is_empty() {
+            if redirect_ir.is_none() && backends_ir.is_empty() && !rule.backend_refs.is_empty() {
                 report.errors.push(httproute_obj_err(
                     route,
                     format!("Invalid: rule {rule_idx} has no valid backends"),
                 ));
-                continue;
             }
 
             let meta_ts = route.creation_timestamp_rfc3339.clone().unwrap_or_default();
@@ -2210,16 +2228,18 @@ pub fn ir_from_cluster(snapshot: &ClusterSnapshot) -> (IrSnapshot, CompileReport
 
             let backends_ir = resolve_grpc_route_backends(route, rule, snapshot, &mut report);
 
-            if backends_ir.is_empty() && rule.filters.is_empty() {
+            if backends_ir.is_empty()
+                && rule.backend_refs.is_empty()
+                && rule.filters.is_empty()
+            {
                 continue;
             }
 
-            if backends_ir.is_empty() {
+            if backends_ir.is_empty() && !rule.backend_refs.is_empty() {
                 report.errors.push(grpcroute_obj_err(
                     route,
                     format!("Invalid: rule {rule_idx} has no valid backends"),
                 ));
-                continue;
             }
 
             let meta_ts = route.creation_timestamp_rfc3339.clone().unwrap_or_default();
@@ -2286,12 +2306,15 @@ pub fn ir_from_cluster(snapshot: &ClusterSnapshot) -> (IrSnapshot, CompileReport
         let rule_idx = 0usize;
         let backends_ir = resolve_tls_route_backends(route, rule, snapshot, &mut report);
 
-        if backends_ir.is_empty() {
+        if backends_ir.is_empty() && rule.backend_refs.is_empty() {
+            continue;
+        }
+
+        if backends_ir.is_empty() && !rule.backend_refs.is_empty() {
             report.errors.push(tlsroute_obj_err(
                 route,
                 "Invalid: TLSRoute rule has no valid backends",
             ));
-            continue;
         }
 
         let meta_ts = route.creation_timestamp_rfc3339.clone().unwrap_or_default();
@@ -2355,12 +2378,15 @@ pub fn ir_from_cluster(snapshot: &ClusterSnapshot) -> (IrSnapshot, CompileReport
         let rule_idx = 0usize;
         let backends_ir = resolve_tcp_route_backends(route, rule, snapshot, &mut report);
 
-        if backends_ir.is_empty() {
+        if backends_ir.is_empty() && rule.backend_refs.is_empty() {
+            continue;
+        }
+
+        if backends_ir.is_empty() && !rule.backend_refs.is_empty() {
             report.errors.push(tcproute_obj_err(
                 route,
                 "Invalid: TCPRoute rule has no valid backends",
             ));
-            continue;
         }
 
         let meta_ts = route.creation_timestamp_rfc3339.clone().unwrap_or_default();
@@ -2423,12 +2449,15 @@ pub fn ir_from_cluster(snapshot: &ClusterSnapshot) -> (IrSnapshot, CompileReport
         let rule_idx = 0usize;
         let backends_ir = resolve_udp_route_backends(route, rule, snapshot, &mut report);
 
-        if backends_ir.is_empty() {
+        if backends_ir.is_empty() && rule.backend_refs.is_empty() {
+            continue;
+        }
+
+        if backends_ir.is_empty() && !rule.backend_refs.is_empty() {
             report.errors.push(udproute_obj_err(
                 route,
                 "Invalid: UDPRoute rule has no valid backends",
             ));
-            continue;
         }
 
         let meta_ts = route.creation_timestamp_rfc3339.clone().unwrap_or_default();
@@ -2645,6 +2674,7 @@ mod tests {
                     port: 80,
                     target_port: Some(8080),
                 }],
+                cluster_ip: None,
             }],
             endpoint_slices: vec![EndpointSliceSnap {
                 namespace: "default".into(),
@@ -2904,6 +2934,7 @@ mod tests {
                     port: 80,
                     target_port: Some(8080),
                 }],
+                cluster_ip: None,
             }],
             endpoint_slices: vec![EndpointSliceSnap {
                 namespace: "default".into(),
@@ -3085,6 +3116,7 @@ mod tests {
                 port: 80,
                 target_port: Some(9090),
             }],
+            cluster_ip: None,
         });
         c.endpoint_slices.push(EndpointSliceSnap {
             namespace: "other".into(),
@@ -3193,6 +3225,81 @@ mod tests {
             .routes
             .iter()
             .any(|r| r.request_redirect.is_some() && r.backends.is_empty()));
+    }
+
+    #[test]
+    fn invalid_backend_kind_keeps_route_in_ir() {
+        let mut c = minimal_cluster();
+        c.http_routes[0].rules[0].backend_refs = vec![HttpBackendRefSnap {
+            group: None,
+            kind: Some("CronJob".into()),
+            namespace: None,
+            name: "cj".into(),
+            port: Some(80),
+            port_name: None,
+            weight: None,
+        }];
+        let (ir, rep) = ir_from_cluster(&c);
+        assert!(rep.has_errors());
+        assert!(
+            ir.routes.iter().any(|r| r.backends.is_empty()),
+            "route with invalid backend kind must stay in IR with empty backends"
+        );
+    }
+
+    #[test]
+    fn non_existent_backend_keeps_route_in_ir() {
+        let mut c = minimal_cluster();
+        c.http_routes[0].rules[0].backend_refs = vec![HttpBackendRefSnap {
+            group: None,
+            kind: Some("Service".into()),
+            namespace: None,
+            name: "does-not-exist".into(),
+            port: Some(80),
+            port_name: None,
+            weight: None,
+        }];
+        let (ir, rep) = ir_from_cluster(&c);
+        assert!(rep.has_errors());
+        assert!(
+            ir.routes.iter().any(|r| r.backends.is_empty()),
+            "route with missing backend must stay in IR with empty backends"
+        );
+    }
+
+    #[test]
+    fn headless_service_sets_dial_port() {
+        let mut c = minimal_cluster();
+        c.services[0].cluster_ip = Some("None".into());
+        let (ir, _rep) = ir_from_cluster(&c);
+        let backend = ir
+            .routes
+            .iter()
+            .flat_map(|r| &r.backends)
+            .next()
+            .expect("should have a backend");
+        assert_eq!(
+            backend.backend.dial_port,
+            Some(8080),
+            "headless service should set dial_port to targetPort"
+        );
+    }
+
+    #[test]
+    fn clusterip_service_has_no_dial_port() {
+        let mut c = minimal_cluster();
+        c.services[0].cluster_ip = Some("10.96.0.1".into());
+        let (ir, _rep) = ir_from_cluster(&c);
+        let backend = ir
+            .routes
+            .iter()
+            .flat_map(|r| &r.backends)
+            .next()
+            .expect("should have a backend");
+        assert_eq!(
+            backend.backend.dial_port, None,
+            "ClusterIP service should not set dial_port"
+        );
     }
 
     #[test]
@@ -3326,6 +3433,7 @@ mod tests {
                         target_port: Some(8443),
                     },
                 ],
+                cluster_ip: None,
             }],
             endpoint_slices: vec![EndpointSliceSnap {
                 namespace: "default".into(),
@@ -3435,6 +3543,7 @@ mod tests {
                     port: 9000,
                     target_port: Some(19000),
                 }],
+                cluster_ip: None,
             }],
             endpoint_slices: vec![EndpointSliceSnap {
                 namespace: "default".into(),
@@ -3609,6 +3718,7 @@ mod tests {
                     port: 9500,
                     target_port: Some(19500),
                 }],
+                cluster_ip: None,
             }],
             endpoint_slices: vec![EndpointSliceSnap {
                 namespace: "default".into(),
@@ -3786,6 +3896,7 @@ mod tests {
                 port: 443,
                 target_port: Some(8443),
             }],
+            cluster_ip: None,
         });
         snap.endpoint_slices.push(EndpointSliceSnap {
             namespace: "other".into(),

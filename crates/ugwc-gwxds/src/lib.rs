@@ -277,7 +277,7 @@ pub fn encode_ir(ir: &IrSnapshot) -> Vec<Resource> {
                         weight: wb.weight,
                         inference_pool: None,
                         tls,
-                        dial_port: 0,
+                        dial_port: wb.backend.dial_port.map(u32::from).unwrap_or(0),
                     });
                 }
                 if backends_pb.is_empty() {
@@ -441,6 +441,7 @@ mod tests {
                         port_number: Some(443),
                         backend_tls: None,
                         inference: None,
+                        dial_port: None,
                     },
                     weight: 1,
                 }],
@@ -525,6 +526,7 @@ mod tests {
                         port_number: Some(443),
                         backend_tls: None,
                         inference: None,
+                        dial_port: None,
                     },
                     weight: 1,
                 }],
@@ -610,6 +612,7 @@ mod tests {
                         port_number: Some(9000),
                         backend_tls: None,
                         inference: None,
+                        dial_port: None,
                     },
                     weight: 1,
                 }],
@@ -694,6 +697,7 @@ mod tests {
                         port_number: Some(9500),
                         backend_tls: None,
                         inference: None,
+                        dial_port: None,
                     },
                     weight: 1,
                 }],
@@ -793,6 +797,7 @@ mod tests {
                             invalid: false,
                         }),
                         inference: None,
+                        dial_port: None,
                     },
                     weight: 1,
                 }],
@@ -882,6 +887,7 @@ mod tests {
                             picker_port: 9000,
                             failure_mode_fail_open: false,
                         }),
+                        dial_port: None,
                     },
                     weight: 1,
                 }],
@@ -938,6 +944,41 @@ mod tests {
         assert!(
             l.tls.as_ref().is_some_and(|t| !t.cert_pem.is_empty()),
             "{l:?}"
+        );
+    }
+
+    #[test]
+    fn encode_invalid_backend_ref_flag() {
+        let mut f = HttpCompileFixture::minimal_http();
+        f.routes[0].backends.clear();
+        let ir = ugwc_core::http_ir::build_http_ir_from_fixture(&f);
+        let r = encode_ir(&ir);
+        assert!(
+            r[0].routes[0].invalid_backend_ref,
+            "route with empty backends should have invalid_backend_ref=true"
+        );
+    }
+
+    #[test]
+    fn encode_headless_dial_port() {
+        let mut f = HttpCompileFixture::minimal_http();
+        f.routes[0].backends[0].backend.dial_port = Some(8080);
+        let ir = ugwc_core::http_ir::build_http_ir_from_fixture(&f);
+        let r = encode_ir(&ir);
+        assert_eq!(
+            r[0].routes[0].backends[0].dial_port, 8080,
+            "headless dial_port should propagate to proto"
+        );
+    }
+
+    #[test]
+    fn encode_clusterip_dial_port_is_zero() {
+        let f = HttpCompileFixture::minimal_http();
+        let ir = ugwc_core::http_ir::build_http_ir_from_fixture(&f);
+        let r = encode_ir(&ir);
+        assert_eq!(
+            r[0].routes[0].backends[0].dial_port, 0,
+            "ClusterIP service should have dial_port=0"
         );
     }
 }

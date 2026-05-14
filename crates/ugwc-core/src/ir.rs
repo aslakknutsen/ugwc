@@ -240,6 +240,10 @@ pub struct BackendIr {
     pub backend_tls: Option<BackendTlsIr>,
     #[serde(default)]
     pub inference: Option<InferencePoolBackendIr>,
+    /// For headless services (ClusterIP=None): the container `targetPort` to connect to,
+    /// since kube-proxy DNAT does not apply and DNS resolves directly to pod IPs.
+    #[serde(default)]
+    pub dial_port: Option<u16>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize, Ord, PartialOrd)]

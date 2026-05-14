@@ -58,6 +58,7 @@ impl HttpCompileFixture {
                         port_number: Some(80),
                         backend_tls: None,
                         inference: None,
+                        dial_port: None,
                     },
                     weight: 1,
                 }],

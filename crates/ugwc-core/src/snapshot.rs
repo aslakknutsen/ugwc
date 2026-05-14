@@ -397,6 +397,8 @@ pub struct ServiceSnap {
     pub name: String,
     #[serde(default)]
     pub ports: Vec<ServicePortSnap>,
+    #[serde(default, rename = "clusterIP")]
+    pub cluster_ip: Option<String>,
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]

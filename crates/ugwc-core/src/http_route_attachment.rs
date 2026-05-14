@@ -524,10 +524,6 @@ pub(crate) fn hostnames_intersect(a: &str, b: &str) -> bool {
     hostname_literal_or_wildcard_matches(a, b) || hostname_literal_or_wildcard_matches(b, a)
 }
 
-pub(crate) fn hosts_match_route_listener(route_host: &str, listener_host: &str) -> bool {
-    hostnames_intersect(route_host, listener_host)
-}
-
 /// True if any non-conflicted inline Gateway listener admits this route namespace + kind.
 #[must_use]
 pub(crate) fn gateway_inline_any_listener_accepts_route(
