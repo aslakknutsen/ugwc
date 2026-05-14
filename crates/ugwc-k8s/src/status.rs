@@ -392,8 +392,18 @@ pub async fn apply_gateway_reconciled_status(
             {
                 cert_broken = true;
             }
+            let ref_not_permitted = eff
+                .and_then(|e| e.tls_resolve_error.as_deref())
+                .map(|e| e.contains("RefNotPermitted"))
+                .unwrap_or(false);
             let route_kinds_broken = listener_route_kinds_broken_for_status(eff, spec_row);
-            let (res_status, res_reason, res_msg) = if cert_broken {
+            let (res_status, res_reason, res_msg) = if cert_broken && ref_not_permitted {
+                (
+                    "False",
+                    "RefNotPermitted",
+                    "cross-namespace Secret reference not permitted by any ReferenceGrant",
+                )
+            } else if cert_broken {
                 (
                     "False",
                     "InvalidCertificateRef",
@@ -1547,7 +1557,17 @@ pub async fn apply_listenerset_reconciled_status(
             } else {
                 ("False", "Invalid")
             };
-            let (res_s, res_r, res_m) = if cert_broken {
+            let ref_not_permitted_ls = eff
+                .and_then(|e| e.tls_resolve_error.as_deref())
+                .map(|e| e.contains("RefNotPermitted"))
+                .unwrap_or(false);
+            let (res_s, res_r, res_m) = if cert_broken && ref_not_permitted_ls {
+                (
+                    "False",
+                    "RefNotPermitted",
+                    "cross-namespace Secret reference not permitted by any ReferenceGrant",
+                )
+            } else if cert_broken {
                 (
                     "False",
                     "InvalidCertificateRef",

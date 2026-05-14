@@ -10,8 +10,9 @@ use crate::from_cluster::ir_from_cluster;
 use crate::http_ir::{build_http_ir_from_fixture, HttpCompileFixture};
 use crate::http_route_attachment::{
     attachment_keys_for_parent_ref, find_effective_for_key, gateway_api_group,
-    gateway_inline_any_listener_accepts_route, gateway_parent_ref_has_relaxed_keys_non_empty,
-    grpc_attachment_keys_for_parent_ref, grpc_route_listener_hostname_ok,
+    gateway_inline_any_listener_accepts_route, gateway_parent_ref_blocked_by_route_kind,
+    gateway_parent_ref_has_relaxed_keys_non_empty, grpc_attachment_keys_for_parent_ref,
+    grpc_route_listener_hostname_ok,
     listener_attachment_count_key, listener_set_any_listener_accepts_route, parent_namespace,
     route_listener_hostname_ok, route_parent_attachment_ref_not_permitted,
     tcp_attachment_keys_for_parent_ref, tcp_route_listener_ok, tls_attachment_keys_for_parent_ref,
@@ -260,6 +261,18 @@ pub fn http_route_accepted_condition_for_parent(
                 "parentRef does not match any listener sectionName or port on the Gateway",
             );
         }
+        if gateway_parent_ref_blocked_by_route_kind(
+            &route.namespace,
+            "HTTPRoute",
+            parent,
+            snapshot,
+        ) {
+            return (
+                "False",
+                "NotAllowedByListeners",
+                "route kind is not allowed by any matching listener",
+            );
+        }
         return (
             "False",
             "NotAcceptedByListeners",
@@ -372,6 +385,18 @@ pub fn grpc_route_accepted_condition_for_parent(
                 "False",
                 "NoMatchingParent",
                 "parentRef does not match any listener sectionName or port on the Gateway",
+            );
+        }
+        if gateway_parent_ref_blocked_by_route_kind(
+            &route.namespace,
+            "GRPCRoute",
+            parent,
+            snapshot,
+        ) {
+            return (
+                "False",
+                "NotAllowedByListeners",
+                "route kind is not allowed by any matching listener",
             );
         }
         return (
@@ -488,6 +513,18 @@ pub fn tls_route_accepted_condition_for_parent(
                 "parentRef does not match any listener sectionName or port on the Gateway",
             );
         }
+        if gateway_parent_ref_blocked_by_route_kind(
+            &route.namespace,
+            "TLSRoute",
+            parent,
+            snapshot,
+        ) {
+            return (
+                "False",
+                "NotAllowedByListeners",
+                "route kind is not allowed by any matching listener",
+            );
+        }
         return (
             "False",
             "NotAcceptedByListeners",
@@ -602,6 +639,18 @@ pub fn tcp_route_accepted_condition_for_parent(
                 "parentRef does not match any listener sectionName or port on the Gateway",
             );
         }
+        if gateway_parent_ref_blocked_by_route_kind(
+            &route.namespace,
+            "TCPRoute",
+            parent,
+            snapshot,
+        ) {
+            return (
+                "False",
+                "NotAllowedByListeners",
+                "route kind is not allowed by any matching listener",
+            );
+        }
         return (
             "False",
             "NotAcceptedByListeners",
@@ -714,6 +763,18 @@ pub fn udp_route_accepted_condition_for_parent(
                 "False",
                 "NoMatchingParent",
                 "parentRef does not match any listener sectionName or port on the Gateway",
+            );
+        }
+        if gateway_parent_ref_blocked_by_route_kind(
+            &route.namespace,
+            "UDPRoute",
+            parent,
+            snapshot,
+        ) {
+            return (
+                "False",
+                "NotAllowedByListeners",
+                "route kind is not allowed by any matching listener",
             );
         }
         return (

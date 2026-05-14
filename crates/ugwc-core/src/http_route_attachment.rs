@@ -606,6 +606,57 @@ pub(crate) fn gateway_parent_ref_has_relaxed_keys_non_empty(
     })
 }
 
+/// True when a Gateway parentRef targets this scope and at least one listener matches section/port
+/// but the route kind is explicitly not accepted by any of those listeners.
+///
+/// This distinguishes "kind not allowed" (`NotAllowedByListeners`) from generic
+/// "no attachment" (`NotAcceptedByListeners`) which also covers hostname intersection failures.
+#[must_use]
+pub(crate) fn gateway_parent_ref_blocked_by_route_kind(
+    route_ns: &str,
+    route_kind: &str,
+    p: &ParentRefSnap,
+    snapshot: &ClusterSnapshot,
+) -> bool {
+    let g = p.group.as_deref().unwrap_or("gateway.networking.k8s.io");
+    let k = p.kind.as_deref().unwrap_or("Gateway");
+    if !gateway_api_group(&Some(g.to_string())) || k != "Gateway" {
+        return false;
+    }
+    let pns = parent_namespace(p, route_ns);
+    if pns != snapshot.gateway_namespace || p.name != snapshot.gateway_name {
+        return false;
+    }
+    let mut has_section_port_match = false;
+    for e in &snapshot.effective_listeners {
+        if !matches!(e.parent, ListenerParentSnap::InlineGateway) || e.conflicted {
+            continue;
+        }
+        if let Some(ref sn) = p.section_name {
+            if sn != &e.section_name {
+                continue;
+            }
+        }
+        if let Some(port) = p.port {
+            if port != e.port {
+                continue;
+            }
+        }
+        has_section_port_match = true;
+        if listener_accepts_route_kind(
+            route_kind,
+            route_ns,
+            &snapshot.gateway_namespace,
+            &e.protocol,
+            e.allowed_routes.as_ref(),
+            &snapshot.namespace_labels,
+        ) {
+            return false;
+        }
+    }
+    has_section_port_match
+}
+
 /// Hostnames after intersecting route `spec.hostnames` with listener hostname.
 pub(crate) fn intersect_route_listener_hosts(
     route_hostnames: &[String],
