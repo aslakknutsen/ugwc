@@ -1,12 +1,11 @@
 //! Multi-watch controller graph: CRD-gated `Gateway`, routes, policies, classes, pools (via
 //! [`crate::crd_supervisor`]); always-on `EndpointSlice`, `Secret`, `ConfigMap` (BackendTLS CA).
 
+use std::collections::HashSet;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
-
-use std::collections::HashSet;
 
 use futures::StreamExt;
 use k8s_openapi::api::core::v1::{ConfigMap, Secret};
@@ -18,7 +17,7 @@ use kube::{Api, Client, ResourceExt};
 use tokio::sync::mpsc;
 use tracing::{info, instrument, warn};
 
-use crate::crd_supervisor::run_crd_supervisor;
+use crate::crd_supervisor::{run_crd_supervisor, ActiveCrds};
 use crate::resources::{
     backend_tls_policy_spec_references_configmap, backend_tls_policy_spec_references_secret,
     gateway_spec_references_secret, listenerset_spec_references_secret, BackendTLSPolicy, Gateway,
@@ -38,6 +37,7 @@ pub async fn run_gateway_controller(
     endpoint_debounce: Duration,
     reconcile: ReconcileFn,
     owned_controller_names: Vec<String>,
+    active_crds: ActiveCrds,
 ) {
     let (tx, mut rx) = mpsc::channel::<(String, String)>(256);
 
@@ -45,8 +45,9 @@ pub async fn run_gateway_controller(
     let sd_sup = shutdown.clone();
     let tx_sup = tx.clone();
     let owned_sup = owned_controller_names.clone();
+    let active_sup = active_crds.clone();
     tokio::spawn(async move {
-        run_crd_supervisor(c_sup, sd_sup, tx_sup, owned_sup).await;
+        run_crd_supervisor(c_sup, sd_sup, tx_sup, owned_sup, active_sup).await;
     });
 
     let sd_ep = shutdown.clone();

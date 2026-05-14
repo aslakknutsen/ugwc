@@ -4,7 +4,8 @@
 //! `get`, `list`, and `watch`. Without it, this supervisor logs errors and **no** CRD-gated
 //! watchers start; core watches (`EndpointSlice`, `Secret`, `ConfigMap`) still run.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
 use futures::StreamExt;
@@ -16,6 +17,9 @@ use std::borrow::Cow;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
+
+/// Live view of which CRDs the supervisor currently considers active.
+pub type ActiveCrds = Arc<RwLock<HashSet<ManagedCrd>>>;
 
 use crate::gateway_watchers::{
     spawn_backend_tls_policy_watcher, spawn_gateway_class_watcher, spawn_gateway_watcher,
@@ -30,7 +34,7 @@ use crate::resources::{
 
 /// Gateway API + inference CRDs whose watches are gated on CRD presence (`spec.group` + `spec.names.kind`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub(crate) enum ManagedCrd {
+pub enum ManagedCrd {
     Gateway,
     GatewayClass,
     HttpRoute,
@@ -45,7 +49,7 @@ pub(crate) enum ManagedCrd {
 }
 
 impl ManagedCrd {
-    pub(crate) fn from_group_kind(group: &str, kind: &str) -> Option<Self> {
+    pub fn from_group_kind(group: &str, kind: &str) -> Option<Self> {
         match (group, kind) {
             ("gateway.networking.k8s.io", "Gateway") => Some(Self::Gateway),
             ("gateway.networking.k8s.io", "GatewayClass") => Some(Self::GatewayClass),
@@ -127,15 +131,26 @@ fn warn_version_mismatch_if_needed(
     );
 }
 
-fn stop_managed(m: ManagedCrd, running: &mut HashMap<ManagedCrd, CancellationToken>) {
+fn stop_managed(
+    m: ManagedCrd,
+    running: &mut HashMap<ManagedCrd, CancellationToken>,
+    active: &ActiveCrds,
+) {
     if let Some(t) = running.remove(&m) {
         t.cancel();
+        if let Ok(mut set) = active.write() {
+            set.remove(&m);
+        }
     }
 }
 
-fn stop_for_crd(crd: &CustomResourceDefinition, running: &mut HashMap<ManagedCrd, CancellationToken>) {
+fn stop_for_crd(
+    crd: &CustomResourceDefinition,
+    running: &mut HashMap<ManagedCrd, CancellationToken>,
+    active: &ActiveCrds,
+) {
     if let Some(m) = managed_for_crd(crd) {
-        stop_managed(m, running);
+        stop_managed(m, running, active);
     }
 }
 
@@ -171,12 +186,13 @@ async fn apply_crd(
     shutdown: &CancellationToken,
     tx: &mpsc::Sender<(String, String)>,
     owned_controller_names: &[String],
+    active: &ActiveCrds,
 ) {
     let Some(m) = managed_for_crd(crd) else {
         return;
     };
     if !crd_eligible(crd) {
-        stop_managed(m, running);
+        stop_managed(m, running, active);
         return;
     }
     warn_version_mismatch_if_needed(m, crd, last_warned_rv);
@@ -185,6 +201,9 @@ async fn apply_crd(
     }
     let child = shutdown.child_token();
     running.insert(m, child.clone());
+    if let Ok(mut set) = active.write() {
+        set.insert(m);
+    }
     dispatch_spawn(
         m,
         client.clone(),
@@ -199,6 +218,7 @@ pub(crate) async fn run_crd_supervisor(
     shutdown: CancellationToken,
     tx: mpsc::Sender<(String, String)>,
     owned_controller_names: Vec<String>,
+    active: ActiveCrds,
 ) {
     let api: Api<CustomResourceDefinition> = Api::all(client.clone());
     let mut running: HashMap<ManagedCrd, CancellationToken> = HashMap::new();
@@ -215,6 +235,7 @@ pub(crate) async fn run_crd_supervisor(
                     &shutdown,
                     &tx,
                     &owned_controller_names,
+                    &active,
                 )
                 .await;
             }
@@ -237,6 +258,9 @@ pub(crate) async fn run_crd_supervisor(
                         for (_, t) in running.drain() {
                             t.cancel();
                         }
+                        if let Ok(mut set) = active.write() {
+                            set.clear();
+                        }
                         last_warned_rv.clear();
                     }
                     Some(Ok(Event::Apply(crd))) | Some(Ok(Event::InitApply(crd))) => {
@@ -249,11 +273,12 @@ pub(crate) async fn run_crd_supervisor(
                             &shutdown,
                             &tx,
                             &owned_controller_names,
+                            &active,
                         )
                         .await;
                     }
                     Some(Ok(Event::Delete(crd))) => {
-                        stop_for_crd(&crd, &mut running);
+                        stop_for_crd(&crd, &mut running, &active);
                     }
                     Some(Ok(Event::InitDone)) => {}
                     Some(Err(e)) => {
@@ -275,6 +300,9 @@ pub(crate) async fn run_crd_supervisor(
 
     for (_, t) in running.drain() {
         t.cancel();
+    }
+    if let Ok(mut set) = active.write() {
+        set.clear();
     }
     info!("crd supervisor shutdown");
 }

@@ -12,6 +12,7 @@ pub mod resources;
 pub mod status;
 
 pub use controller::{run_gateway_controller, ReconcileFn};
+pub use crd_supervisor::{ActiveCrds, ManagedCrd};
 pub use loader::{load_cluster_snapshot, parent_reference_to_snap, LoaderError};
 pub use mappers::{mapped_gateway_key, GatewayKey, WatchEventCause};
 pub use provision::{

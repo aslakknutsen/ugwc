@@ -26,6 +26,7 @@ use ugwc_core::snapshot::{
     TlsRouteRuleSnap, TlsRouteSnap, UdpRouteRuleSnap, UdpRouteSnap,
 };
 
+use crate::crd_supervisor::{ActiveCrds, ManagedCrd};
 use crate::resources::{
     GRPCRoute, Gateway, GatewayClass, HTTPRoute, InferencePool, ListenerSet, ParentReferenceSpec,
     ReferenceGrant, TCPRoute, TLSRoute, UDPRoute,
@@ -789,10 +790,15 @@ fn udp_route_to_snap(route: &UDPRoute) -> UdpRouteSnap {
     }
 }
 
+fn crd_active(active: &ActiveCrds, m: ManagedCrd) -> bool {
+    active.read().map_or(false, |set| set.contains(&m))
+}
+
 pub async fn load_cluster_snapshot(
     client: &Client,
     gateway_ns: &str,
     gateway_name: &str,
+    active_crds: &ActiveCrds,
 ) -> Result<ClusterSnapshot, LoaderError> {
     let gw_api: Api<Gateway> = Api::namespaced(client.clone(), gateway_ns);
     let gw = gw_api.get(gateway_name).await?;
@@ -808,25 +814,29 @@ pub async fn load_cluster_snapshot(
 
     let mut listener_sets = Vec::new();
     if let Some(ref allowed) = allowed_listeners {
-        let ls_api: Api<ListenerSet> = Api::all(client.clone());
-        match ls_api.list(&ListParams::default()).await {
-            Ok(ls_list) => {
-                for ls in ls_list.items {
-                    if !listenerset_parents_gateway(&ls, gateway_ns, gateway_name) {
-                        continue;
+        if crd_active(active_crds, ManagedCrd::ListenerSet) {
+            let ls_api: Api<ListenerSet> = Api::all(client.clone());
+            match ls_api.list(&ListParams::default()).await {
+                Ok(ls_list) => {
+                    for ls in ls_list.items {
+                        if !listenerset_parents_gateway(&ls, gateway_ns, gateway_name) {
+                            continue;
+                        }
+                        let ls_ns = ls.metadata.namespace.clone().unwrap_or_default();
+                        if !listener_set_namespace_allowed(client, gateway_ns, &ls_ns, allowed)
+                            .await?
+                        {
+                            continue;
+                        }
+                        listener_sets.push(listenerset_to_snap(ls));
                     }
-                    let ls_ns = ls.metadata.namespace.clone().unwrap_or_default();
-                    if !listener_set_namespace_allowed(client, gateway_ns, &ls_ns, allowed).await? {
-                        continue;
-                    }
-                    listener_sets.push(listenerset_to_snap(ls));
                 }
-            }
-            Err(e) => {
-                warn!(
-                    error = %e,
-                    "ListenerSet list failed — clusters without ListenerSet CRD skip merge"
-                );
+                Err(e) => {
+                    warn!(
+                        error = %e,
+                        "ListenerSet list failed — clusters without ListenerSet CRD skip merge"
+                    );
+                }
             }
         }
     }
@@ -873,173 +883,187 @@ pub async fn load_cluster_snapshot(
         http_routes.push(snap);
     }
 
-    let grpc_api: Api<GRPCRoute> = Api::all(client.clone());
-    match grpc_api.list(&ListParams::default()).await {
-        Ok(grpc_list) => {
-            for item in grpc_list.items {
-                if !grpc_route_relevant_to_gateway(
-                    &item,
-                    gateway_ns,
-                    gateway_name,
-                    &attached_ls_keys,
-                ) {
-                    continue;
-                }
-                let rns = item.metadata.namespace.clone().unwrap_or_default();
-                ns_for_labels.insert(rns.clone());
+    if crd_active(active_crds, ManagedCrd::GrpcRoute) {
+        let grpc_api: Api<GRPCRoute> = Api::all(client.clone());
+        match grpc_api.list(&ListParams::default()).await {
+            Ok(grpc_list) => {
+                for item in grpc_list.items {
+                    if !grpc_route_relevant_to_gateway(
+                        &item,
+                        gateway_ns,
+                        gateway_name,
+                        &attached_ls_keys,
+                    ) {
+                        continue;
+                    }
+                    let rns = item.metadata.namespace.clone().unwrap_or_default();
+                    ns_for_labels.insert(rns.clone());
 
-                let snap = grpc_route_to_snap(&item);
-                for rule in &item.spec.rules {
-                    for (sns, sname) in
-                        crate::resources::collect_grpc_route_rule_service_refs(&rns, rule)
-                    {
-                        ns_for_labels.insert(sns.clone());
-                        needed_services.push((sns, sname));
+                    let snap = grpc_route_to_snap(&item);
+                    for rule in &item.spec.rules {
+                        for (sns, sname) in
+                            crate::resources::collect_grpc_route_rule_service_refs(&rns, rule)
+                        {
+                            ns_for_labels.insert(sns.clone());
+                            needed_services.push((sns, sname));
+                        }
+                        for (pns, pname) in
+                            crate::resources::collect_grpc_route_rule_inference_pool_refs(&rns, rule)
+                        {
+                            ns_for_labels.insert(pns.clone());
+                            needed_pools.push((pns, pname));
+                        }
                     }
-                    for (pns, pname) in
-                        crate::resources::collect_grpc_route_rule_inference_pool_refs(&rns, rule)
-                    {
-                        ns_for_labels.insert(pns.clone());
-                        needed_pools.push((pns, pname));
-                    }
+                    grpc_routes.push(snap);
                 }
-                grpc_routes.push(snap);
             }
-        }
-        Err(e) => {
-            warn!(
-                error = %e,
-                "GRPCRoute list failed — clusters without GRPCRoute CRD skip gRPC routes"
-            );
+            Err(e) => {
+                warn!(
+                    error = %e,
+                    "GRPCRoute list failed — clusters without GRPCRoute CRD skip gRPC routes"
+                );
+            }
         }
     }
 
-    let tls_api: Api<TLSRoute> = Api::all(client.clone());
-    match tls_api.list(&ListParams::default()).await {
-        Ok(tls_list) => {
-            for item in tls_list.items {
-                if !tls_route_relevant_to_gateway(
-                    &item,
-                    gateway_ns,
-                    gateway_name,
-                    &attached_ls_keys,
-                ) {
-                    continue;
-                }
-                let rns = item.metadata.namespace.clone().unwrap_or_default();
-                ns_for_labels.insert(rns.clone());
+    if crd_active(active_crds, ManagedCrd::TlsRoute) {
+        let tls_api: Api<TLSRoute> = Api::all(client.clone());
+        match tls_api.list(&ListParams::default()).await {
+            Ok(tls_list) => {
+                for item in tls_list.items {
+                    if !tls_route_relevant_to_gateway(
+                        &item,
+                        gateway_ns,
+                        gateway_name,
+                        &attached_ls_keys,
+                    ) {
+                        continue;
+                    }
+                    let rns = item.metadata.namespace.clone().unwrap_or_default();
+                    ns_for_labels.insert(rns.clone());
 
-                let snap = tls_route_to_snap(&item);
-                for rule in &item.spec.rules {
-                    for (sns, sname) in crate::resources::collect_backend_refs_service_refs(
-                        &rns,
-                        &rule.backend_refs,
-                    ) {
-                        ns_for_labels.insert(sns.clone());
-                        needed_services.push((sns, sname));
+                    let snap = tls_route_to_snap(&item);
+                    for rule in &item.spec.rules {
+                        for (sns, sname) in crate::resources::collect_backend_refs_service_refs(
+                            &rns,
+                            &rule.backend_refs,
+                        ) {
+                            ns_for_labels.insert(sns.clone());
+                            needed_services.push((sns, sname));
+                        }
+                        for (pns, pname) in
+                            crate::resources::collect_backend_refs_inference_pool_refs(
+                                &rns,
+                                &rule.backend_refs,
+                            )
+                        {
+                            ns_for_labels.insert(pns.clone());
+                            needed_pools.push((pns, pname));
+                        }
                     }
-                    for (pns, pname) in crate::resources::collect_backend_refs_inference_pool_refs(
-                        &rns,
-                        &rule.backend_refs,
-                    ) {
-                        ns_for_labels.insert(pns.clone());
-                        needed_pools.push((pns, pname));
-                    }
+                    tls_routes.push(snap);
                 }
-                tls_routes.push(snap);
             }
-        }
-        Err(e) => {
-            warn!(
-                error = %e,
-                "TLSRoute list failed — clusters without TLSRoute CRD skip TLS routes"
-            );
+            Err(e) => {
+                warn!(
+                    error = %e,
+                    "TLSRoute list failed — clusters without TLSRoute CRD skip TLS routes"
+                );
+            }
         }
     }
 
-    let tcp_api: Api<TCPRoute> = Api::all(client.clone());
-    match tcp_api.list(&ListParams::default()).await {
-        Ok(tcp_list) => {
-            for item in tcp_list.items {
-                if !tcp_route_relevant_to_gateway(
-                    &item,
-                    gateway_ns,
-                    gateway_name,
-                    &attached_ls_keys,
-                ) {
-                    continue;
-                }
-                let rns = item.metadata.namespace.clone().unwrap_or_default();
-                ns_for_labels.insert(rns.clone());
+    if crd_active(active_crds, ManagedCrd::TcpRoute) {
+        let tcp_api: Api<TCPRoute> = Api::all(client.clone());
+        match tcp_api.list(&ListParams::default()).await {
+            Ok(tcp_list) => {
+                for item in tcp_list.items {
+                    if !tcp_route_relevant_to_gateway(
+                        &item,
+                        gateway_ns,
+                        gateway_name,
+                        &attached_ls_keys,
+                    ) {
+                        continue;
+                    }
+                    let rns = item.metadata.namespace.clone().unwrap_or_default();
+                    ns_for_labels.insert(rns.clone());
 
-                let snap = tcp_route_to_snap(&item);
-                for rule in &item.spec.rules {
-                    for (sns, sname) in crate::resources::collect_backend_refs_service_refs(
-                        &rns,
-                        &rule.backend_refs,
-                    ) {
-                        ns_for_labels.insert(sns.clone());
-                        needed_services.push((sns, sname));
+                    let snap = tcp_route_to_snap(&item);
+                    for rule in &item.spec.rules {
+                        for (sns, sname) in crate::resources::collect_backend_refs_service_refs(
+                            &rns,
+                            &rule.backend_refs,
+                        ) {
+                            ns_for_labels.insert(sns.clone());
+                            needed_services.push((sns, sname));
+                        }
+                        for (pns, pname) in
+                            crate::resources::collect_backend_refs_inference_pool_refs(
+                                &rns,
+                                &rule.backend_refs,
+                            )
+                        {
+                            ns_for_labels.insert(pns.clone());
+                            needed_pools.push((pns, pname));
+                        }
                     }
-                    for (pns, pname) in crate::resources::collect_backend_refs_inference_pool_refs(
-                        &rns,
-                        &rule.backend_refs,
-                    ) {
-                        ns_for_labels.insert(pns.clone());
-                        needed_pools.push((pns, pname));
-                    }
+                    tcp_routes.push(snap);
                 }
-                tcp_routes.push(snap);
             }
-        }
-        Err(e) => {
-            warn!(
-                error = %e,
-                "TCPRoute list failed — clusters without TCPRoute CRD skip TCP routes"
-            );
+            Err(e) => {
+                warn!(
+                    error = %e,
+                    "TCPRoute list failed — clusters without TCPRoute CRD skip TCP routes"
+                );
+            }
         }
     }
 
-    let udp_api: Api<UDPRoute> = Api::all(client.clone());
-    match udp_api.list(&ListParams::default()).await {
-        Ok(udp_list) => {
-            for item in udp_list.items {
-                if !udp_route_relevant_to_gateway(
-                    &item,
-                    gateway_ns,
-                    gateway_name,
-                    &attached_ls_keys,
-                ) {
-                    continue;
-                }
-                let rns = item.metadata.namespace.clone().unwrap_or_default();
-                ns_for_labels.insert(rns.clone());
+    if crd_active(active_crds, ManagedCrd::UdpRoute) {
+        let udp_api: Api<UDPRoute> = Api::all(client.clone());
+        match udp_api.list(&ListParams::default()).await {
+            Ok(udp_list) => {
+                for item in udp_list.items {
+                    if !udp_route_relevant_to_gateway(
+                        &item,
+                        gateway_ns,
+                        gateway_name,
+                        &attached_ls_keys,
+                    ) {
+                        continue;
+                    }
+                    let rns = item.metadata.namespace.clone().unwrap_or_default();
+                    ns_for_labels.insert(rns.clone());
 
-                let snap = udp_route_to_snap(&item);
-                for rule in &item.spec.rules {
-                    for (sns, sname) in crate::resources::collect_backend_refs_service_refs(
-                        &rns,
-                        &rule.backend_refs,
-                    ) {
-                        ns_for_labels.insert(sns.clone());
-                        needed_services.push((sns, sname));
+                    let snap = udp_route_to_snap(&item);
+                    for rule in &item.spec.rules {
+                        for (sns, sname) in crate::resources::collect_backend_refs_service_refs(
+                            &rns,
+                            &rule.backend_refs,
+                        ) {
+                            ns_for_labels.insert(sns.clone());
+                            needed_services.push((sns, sname));
+                        }
+                        for (pns, pname) in
+                            crate::resources::collect_backend_refs_inference_pool_refs(
+                                &rns,
+                                &rule.backend_refs,
+                            )
+                        {
+                            ns_for_labels.insert(pns.clone());
+                            needed_pools.push((pns, pname));
+                        }
                     }
-                    for (pns, pname) in crate::resources::collect_backend_refs_inference_pool_refs(
-                        &rns,
-                        &rule.backend_refs,
-                    ) {
-                        ns_for_labels.insert(pns.clone());
-                        needed_pools.push((pns, pname));
-                    }
+                    udp_routes.push(snap);
                 }
-                udp_routes.push(snap);
             }
-        }
-        Err(e) => {
-            warn!(
-                error = %e,
-                "UDPRoute list failed — clusters without UDPRoute CRD skip UDP routes"
-            );
+            Err(e) => {
+                warn!(
+                    error = %e,
+                    "UDPRoute list failed — clusters without UDPRoute CRD skip UDP routes"
+                );
+            }
         }
     }
 
@@ -1169,20 +1193,22 @@ pub async fn load_cluster_snapshot(
     }
 
     let mut reference_grants: Vec<ReferenceGrantSnap> = Vec::new();
-    let rg_api: Api<ReferenceGrant> = Api::all(client.clone());
-    match rg_api.list(&ListParams::default()).await {
-        Ok(list) => {
-            reference_grants = list
-                .items
-                .into_iter()
-                .map(reference_grant_to_snap)
-                .collect();
-        }
-        Err(e) => {
-            warn!(
-                error = %e,
-                "ReferenceGrant list failed — clusters without CRD skip cross-namespace grants"
-            );
+    if crd_active(active_crds, ManagedCrd::ReferenceGrant) {
+        let rg_api: Api<ReferenceGrant> = Api::all(client.clone());
+        match rg_api.list(&ListParams::default()).await {
+            Ok(list) => {
+                reference_grants = list
+                    .items
+                    .into_iter()
+                    .map(reference_grant_to_snap)
+                    .collect();
+            }
+            Err(e) => {
+                warn!(
+                    error = %e,
+                    "ReferenceGrant list failed — clusters without CRD skip cross-namespace grants"
+                );
+            }
         }
     }
 

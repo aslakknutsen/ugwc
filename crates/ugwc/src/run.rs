@@ -104,6 +104,10 @@ pub async fn run(cfg: Config) -> Result<(), Box<dyn std::error::Error + Send + S
         let status_cache: std::sync::Arc<
             std::sync::Mutex<std::collections::HashMap<String, String>>,
         > = std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new()));
+        let active_crds: ugwc_k8s::ActiveCrds = Arc::new(std::sync::RwLock::new(
+            std::collections::HashSet::new(),
+        ));
+        let active_crds_reconcile = active_crds.clone();
         let status_cache_k = status_cache.clone();
         let kube_task = tokio::spawn(async move {
             let rfn: ugwc_k8s::ReconcileFn = Arc::new(move |ns: String, name: String| {
@@ -119,13 +123,14 @@ pub async fn run(cfg: Config) -> Result<(), Box<dyn std::error::Error + Send + S
                 let control_plane_xds = control_plane_xds.clone();
                 let xds_insecure = xds_insecure;
                 let xds_wire = xds_wire.clone();
+                let active_crds = active_crds_reconcile.clone();
                 Box::pin(async move {
                     let api: Api<Gateway> = Api::namespaced(client_inner.clone(), &ns);
                     let latest = api.get(&name).await.map_err(|e| e.to_string())?;
 
                     let t_load = Instant::now();
                     let cluster =
-                        match ugwc_k8s::load_cluster_snapshot(&client_inner, &ns, &name).await {
+                        match ugwc_k8s::load_cluster_snapshot(&client_inner, &ns, &name, &active_crds).await {
                             Ok(c) => Some(c),
                             Err(e) => {
                                 warn!(error = %e, %ns, %name, "cluster snapshot load");
@@ -443,6 +448,7 @@ pub async fn run(cfg: Config) -> Result<(), Box<dyn std::error::Error + Send + S
                 debounce,
                 rfn,
                 controller_names.clone(),
+                active_crds,
             )
             .await;
         });
