@@ -105,6 +105,43 @@ fn gateway_listener_https_cert_unresolved(
     eff.tls_resolve_error.is_some() || eff.tls_cert_pem.is_empty() || eff.tls_key_pem.is_empty()
 }
 
+/// Check whether a listener's cross-namespace certificateRef is blocked by a
+/// missing or invalid ReferenceGrant.  This is a status-time safety net on top
+/// of the loader's `tls_resolve_error` — it reads the Gateway spec directly so
+/// the result is correct even when the effective-listener snapshot lags.
+fn gateway_listener_cert_ref_not_permitted(
+    spec_row: Option<&crate::resources::GatewayListenerSpec>,
+    gw_ns: &str,
+    cluster: Option<&ugwc_core::ClusterSnapshot>,
+) -> bool {
+    let Some(l) = spec_row else { return false };
+    if !l.protocol.trim().eq_ignore_ascii_case("HTTPS") {
+        return false;
+    }
+    let refs = match l.tls.as_ref() {
+        Some(t) => &t.certificate_refs,
+        None => return false,
+    };
+    if refs.is_empty() {
+        return false;
+    }
+    let r = &refs[0];
+    let kind = r.kind.as_deref().unwrap_or("Secret");
+    let group = r.group.as_deref().unwrap_or("");
+    let secret_group_ok = group.is_empty() || group.eq_ignore_ascii_case("core");
+    if !kind.eq_ignore_ascii_case("Secret") || !secret_group_ok {
+        return false;
+    }
+    let secret_ns = r.namespace.as_deref().unwrap_or(gw_ns);
+    if secret_ns == gw_ns {
+        return false;
+    }
+    let grants = cluster
+        .map(|c| c.reference_grants.as_slice())
+        .unwrap_or(&[]);
+    !ugwc_core::reference_grant_permits_gateway_secret_ref(grants, gw_ns, secret_ns, &r.name)
+}
+
 fn gateway_ip_address_json(ip: &str) -> serde_json::Value {
     serde_json::json!({
         "type": "IPAddress",
@@ -395,9 +432,13 @@ pub async fn apply_gateway_reconciled_status(
             let ref_not_permitted = eff
                 .and_then(|e| e.tls_resolve_error.as_deref())
                 .map(|e| e.contains("RefNotPermitted"))
-                .unwrap_or(false);
+                .unwrap_or(false)
+                || gateway_listener_cert_ref_not_permitted(spec_row, gw_ns, cluster);
+            if ref_not_permitted {
+                cert_broken = true;
+            }
             let route_kinds_broken = listener_route_kinds_broken_for_status(eff, spec_row);
-            let (res_status, res_reason, res_msg) = if cert_broken && ref_not_permitted {
+            let (res_status, res_reason, res_msg) = if ref_not_permitted {
                 (
                     "False",
                     "RefNotPermitted",
