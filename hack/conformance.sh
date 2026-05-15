@@ -45,7 +45,7 @@ CLONE_DIR="${CACHE_ROOT}/gateway-api"
 if [[ -z "${GO_TEST_FLAGS:-}" ]]; then
   GO_TEST_FLAGS="-timeout=3h -count=1 -v"
 fi
-SUPPORTED_FEATURES="${CONFORMANCE_SUPPORTED_FEATURES:-Gateway,HTTPRoute,ReferenceGrant,TLSRoute,GRPCRoute}"
+SUPPORTED_FEATURES="${CONFORMANCE_SUPPORTED_FEATURES:-Gateway,HTTPRoute,ReferenceGrant,TLSRoute,GRPCRoute,ListenerSet}"
 GO_TEST_RUN="${GO_TEST_RUN:-TestConformance}"
 SINGLE_TEST="${CONFORMANCE_SINGLE_TEST:-}"
 FORWARD_ARGS=()
