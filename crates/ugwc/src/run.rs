@@ -329,6 +329,35 @@ pub async fn run(cfg: Config) -> Result<(), Box<dyn std::error::Error + Send + S
                             }
                         }
 
+                        for rej in &snap.rejected_listener_sets {
+                            let ls_api: Api<ListenerSet> =
+                                Api::namespaced(client_inner.clone(), &rej.namespace);
+                            match ls_api.get(&rej.name).await {
+                                Ok(ls) => {
+                                    if let Err(e) =
+                                        ugwc_k8s::apply_listenerset_rejected_status(
+                                            &client_inner,
+                                            &ls,
+                                            &rej.reason,
+                                            Some(status_cache.clone()),
+                                        )
+                                        .await
+                                    {
+                                        warn!(
+                                            error = %e,
+                                            listenerset = %rej.name,
+                                            "rejected listenerset status patch"
+                                        );
+                                    }
+                                }
+                                Err(e) => warn!(
+                                    error = %e,
+                                    listenerset = %rej.name,
+                                    "get rejected listenerset for status"
+                                ),
+                            }
+                        }
+
                         if let Err(e) = ugwc_k8s::apply_backend_tls_policies_for_gateway(
                             &client_inner,
                             &ns,

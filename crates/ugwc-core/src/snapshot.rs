@@ -449,6 +449,14 @@ pub struct ListenerNamespacesSnap {
     pub selector_match_labels: BTreeMap<String, String>,
 }
 
+/// A `ListenerSet` that references this Gateway but was rejected (not allowed or wrong namespace).
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct RejectedListenerSetSnap {
+    pub namespace: String,
+    pub name: String,
+    pub reason: String,
+}
+
 /// Attached `ListenerSet` documents selected by the loader for this Gateway.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct ListenerSetSnap {
@@ -511,6 +519,9 @@ pub struct EffectiveListenerSnap {
     pub hostname: Option<String>,
     #[serde(default)]
     pub conflicted: bool,
+    /// When `conflicted` is true, the Gateway API reason string (e.g. `HostnameConflict`, `ProtocolConflict`).
+    #[serde(rename = "conflictReason", default)]
+    pub conflict_reason: Option<String>,
     #[serde(rename = "allowedRoutes", default)]
     pub allowed_routes: Option<AllowedRoutesSnap>,
     #[serde(default)]
@@ -586,6 +597,8 @@ pub struct ClusterSnapshot {
     pub effective_listeners: Vec<EffectiveListenerSnap>,
     #[serde(rename = "listenerSets", default)]
     pub listener_sets: Vec<ListenerSetSnap>,
+    #[serde(rename = "rejectedListenerSets", default)]
+    pub rejected_listener_sets: Vec<RejectedListenerSetSnap>,
     #[serde(rename = "allowedListeners", default)]
     pub allowed_listeners: Option<AllowedListenersSnap>,
     #[serde(rename = "httpRoutes", default)]

@@ -486,12 +486,15 @@ pub async fn apply_gateway_reconciled_status(
                 }),
             ];
             if conflicted {
+                let conflict_reason_str = eff
+                    .and_then(|e| e.conflict_reason.as_deref())
+                    .unwrap_or("HostnameConflict");
                 conditions.insert(
                     1,
                     serde_json::json!({
                         "type": "Conflicted",
                         "status": "True",
-                        "reason": "HostnameConflict",
+                        "reason": conflict_reason_str,
                         "message": "indistinct listener after merge",
                         "lastTransitionTime": now,
                         "observedGeneration": gen
@@ -1650,12 +1653,15 @@ pub async fn apply_listenerset_reconciled_status(
                 }),
             ];
             if conflicted {
+                let conflict_reason_str = eff
+                    .and_then(|e| e.conflict_reason.as_deref())
+                    .unwrap_or("HostnameConflict");
                 conditions.insert(
                     1,
                     serde_json::json!({
                         "type": "Conflicted",
                         "status": "True",
-                        "reason": "HostnameConflict",
+                        "reason": conflict_reason_str,
                         "message": "indistinct listener after merge",
                         "lastTransitionTime": now,
                         "observedGeneration": gen
@@ -1671,10 +1677,27 @@ pub async fn apply_listenerset_reconciled_status(
         })
         .collect();
 
-    let (acc_g, prog_g, prog_rs) = if ok {
-        ("True", "True", "Programmed")
+    let any_listener_conflicted = ls.spec.listeners.iter().any(|l| {
+        snapshot.effective_listeners.iter().any(|e| {
+            matches!(
+                &e.parent,
+                ugwc_core::snapshot::ListenerParentSnap::ListenerSet {
+                    namespace,
+                    name,
+                } if namespace == &ls_ns_name.0 && name == &ls_ns_name.1
+            ) && e.section_name == l.name
+                && e.conflicted
+        })
+    });
+    let (acc_g, acc_reason_g) = if any_listener_conflicted {
+        ("False", "ListenersNotValid")
     } else {
-        ("True", "False", "Invalid")
+        ("True", "Accepted")
+    };
+    let (prog_g, prog_rs) = if ok && !any_listener_conflicted {
+        ("True", "Programmed")
+    } else {
+        ("False", "Invalid")
     };
 
     let status = serde_json::json!({
@@ -1683,7 +1706,7 @@ pub async fn apply_listenerset_reconciled_status(
                 {
                     "type": "Accepted",
                     "status": acc_g,
-                    "reason": "Accepted",
+                    "reason": acc_reason_g,
                     "message": "ugwc listenerset",
                     "lastTransitionTime": now,
                     "observedGeneration": gen
@@ -1693,6 +1716,100 @@ pub async fn apply_listenerset_reconciled_status(
                     "status": prog_g,
                     "reason": prog_rs,
                     "message": "ugwc compile outcome",
+                    "lastTransitionTime": now,
+                    "observedGeneration": gen
+                }
+            ],
+            "listeners": listeners_json
+        }
+    });
+
+    let pending_cache: Option<(String, String)> = if let Some(cache) = &status_cache {
+        let key = format!("listenerset:{ns}/{name}");
+        let serialized = serde_json::to_string(&status).unwrap_or_default();
+        if cache.lock().unwrap().get(&key) == Some(&serialized) {
+            return Ok(());
+        }
+        Some((key, serialized))
+    } else {
+        None
+    };
+
+    let api: Api<ListenerSet> = Api::namespaced(client.clone(), ns);
+    let patch = Patch::Merge(status);
+    let params = PatchParams::apply("ugwc");
+    api.patch_status(name, &params, &patch).await?;
+
+    if let (Some(cache), Some((key, serialized))) = (status_cache.as_ref(), pending_cache) {
+        cache.lock().unwrap().insert(key, serialized);
+    }
+    Ok(())
+}
+
+/// Write rejection status for a `ListenerSet` that references this Gateway
+/// but was not allowed (e.g. `allowedListeners` absent or namespace mismatch).
+pub async fn apply_listenerset_rejected_status(
+    client: &Client,
+    ls: &ListenerSet,
+    reason: &str,
+    status_cache: Option<Arc<Mutex<HashMap<String, String>>>>,
+) -> Result<(), kube::Error> {
+    let name = ls.metadata.name.as_deref().unwrap_or("");
+    let ns = ls.metadata.namespace.as_deref().unwrap_or("");
+    if name.is_empty() || ns.is_empty() {
+        return Ok(());
+    }
+    let gen = ls.metadata.generation.filter(|&g| g > 0).unwrap_or(1);
+    let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+
+    let listeners_json: Vec<serde_json::Value> = ls
+        .spec
+        .listeners
+        .iter()
+        .map(|l| {
+            let supported = supported_kinds_json(None);
+            serde_json::json!({
+                "name": l.name,
+                "supportedKinds": supported,
+                "attachedRoutes": 0,
+                "conditions": [
+                    {
+                        "type": "Accepted",
+                        "status": "False",
+                        "reason": reason,
+                        "message": "listener set not allowed by gateway",
+                        "lastTransitionTime": now,
+                        "observedGeneration": gen
+                    },
+                    {
+                        "type": "Programmed",
+                        "status": "False",
+                        "reason": reason,
+                        "message": "listener set not allowed by gateway",
+                        "lastTransitionTime": now,
+                        "observedGeneration": gen
+                    }
+                ]
+            })
+        })
+        .collect();
+
+    let status = serde_json::json!({
+        "status": {
+            "conditions": [
+                {
+                    "type": "Accepted",
+                    "status": "False",
+                    "reason": reason,
+                    "message": "listener set not allowed by gateway",
+                    "lastTransitionTime": now,
+                    "observedGeneration": gen
+                },
+                {
+                    "type": "Programmed",
+                    "status": "False",
+                    "reason": reason,
+                    "message": "listener set not allowed by gateway",
                     "lastTransitionTime": now,
                     "observedGeneration": gen
                 }

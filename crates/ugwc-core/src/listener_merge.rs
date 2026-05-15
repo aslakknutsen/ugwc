@@ -30,6 +30,7 @@ pub fn merge_effective_listeners(
             protocol: normalize_protocol(&l.protocol),
             hostname: l.hostname.clone(),
             conflicted: false,
+            conflict_reason: None,
             allowed_routes: l.allowed_routes.clone(),
             tls: l.tls.clone(),
             tls_cert_pem: Vec::new(),
@@ -50,6 +51,7 @@ pub fn merge_effective_listeners(
                 protocol: normalize_protocol(&l.protocol),
                 hostname: l.hostname.clone(),
                 conflicted: false,
+                conflict_reason: None,
                 allowed_routes: l.allowed_routes.clone(),
                 tls: l.tls.clone(),
                 tls_cert_pem: Vec::new(),
@@ -90,6 +92,9 @@ fn mark_distinctness_conflicts(effective: &mut [EffectiveListenerSnap]) {
         if idxs.len() > 1 {
             for &i in idxs {
                 effective[i].conflicted = true;
+                if effective[i].conflict_reason.is_none() {
+                    effective[i].conflict_reason = Some("HostnameConflict".into());
+                }
             }
         }
     }
@@ -121,6 +126,7 @@ fn mark_tcp_layer7_port_conflicts(effective: &mut [EffectiveListenerSnap]) {
         let l7 = matches!(e.protocol.as_str(), "HTTP" | "HTTPS" | "TLS");
         if e.protocol == "TCP" || l7 {
             e.conflicted = true;
+            e.conflict_reason = Some("ProtocolConflict".into());
         }
     }
 }
@@ -151,6 +157,7 @@ fn mark_udp_layer7_port_conflicts(effective: &mut [EffectiveListenerSnap]) {
         let l7 = matches!(e.protocol.as_str(), "HTTP" | "HTTPS" | "TLS");
         if e.protocol == "UDP" || l7 {
             e.conflicted = true;
+            e.conflict_reason = Some("ProtocolConflict".into());
         }
     }
 }
@@ -256,6 +263,11 @@ mod tests {
         ];
         let m = merge_effective_listeners(&gw, &[]);
         assert!(m.iter().all(|e| e.conflicted), "{m:?}");
+        assert!(
+            m.iter()
+                .all(|e| e.conflict_reason.as_deref() == Some("ProtocolConflict")),
+            "TCP+HTTPS should be ProtocolConflict: {m:?}"
+        );
     }
 
     #[test]
@@ -280,5 +292,39 @@ mod tests {
         ];
         let m = merge_effective_listeners(&gw, &[]);
         assert!(m.iter().all(|e| e.conflicted), "{m:?}");
+        assert!(
+            m.iter()
+                .all(|e| e.conflict_reason.as_deref() == Some("ProtocolConflict")),
+            "UDP+HTTPS should be ProtocolConflict: {m:?}"
+        );
+    }
+
+    #[test]
+    fn hostname_conflict_reason() {
+        let gw = vec![
+            GatewayListenerSnap {
+                name: "a".into(),
+                port: 80,
+                protocol: "HTTP".into(),
+                hostname: Some("example.com".into()),
+                allowed_routes: None,
+                tls: None,
+            },
+            GatewayListenerSnap {
+                name: "b".into(),
+                port: 80,
+                protocol: "HTTP".into(),
+                hostname: Some("example.com".into()),
+                allowed_routes: None,
+                tls: None,
+            },
+        ];
+        let m = merge_effective_listeners(&gw, &[]);
+        assert!(m.iter().all(|e| e.conflicted), "{m:?}");
+        assert!(
+            m.iter()
+                .all(|e| e.conflict_reason.as_deref() == Some("HostnameConflict")),
+            "duplicate hostname should be HostnameConflict: {m:?}"
+        );
     }
 }

@@ -20,7 +20,7 @@ use ugwc_core::snapshot::{
     HttpHeaderFilterSnap, HttpHeaderMatchSnap, HttpHeaderNameValueSnap, HttpPathMatchSnap,
     HttpPathModifierSnap, HttpRequestMatchSnap, HttpRequestRedirectFilterSnap, HttpRouteFilterSnap,
     HttpRouteRuleSnap, HttpRouteSnap, InferencePoolPortSnap, InferencePoolSelectorSnap,
-    InferencePoolSnap, ListenerNamespacesSnap, ListenerSetSnap, ParentRefSnap,
+    InferencePoolSnap, ListenerNamespacesSnap, ListenerSetSnap, ParentRefSnap, RejectedListenerSetSnap,
     ReferenceGrantFromSnap, ReferenceGrantSnap, ReferenceGrantToSnap, RouteGroupKindSnap,
     SecretObjectReferenceSnap, ServicePortSnap, ServiceSnap, TcpRouteRuleSnap, TcpRouteSnap,
     TlsRouteRuleSnap, TlsRouteSnap, UdpRouteRuleSnap, UdpRouteSnap,
@@ -813,30 +813,43 @@ pub async fn load_cluster_snapshot(
     let allowed_listeners = allowed_snap_for_merge(&gw);
 
     let mut listener_sets = Vec::new();
-    if let Some(ref allowed) = allowed_listeners {
-        if crd_active(active_crds, ManagedCrd::ListenerSet) {
-            let ls_api: Api<ListenerSet> = Api::all(client.clone());
-            match ls_api.list(&ListParams::default()).await {
-                Ok(ls_list) => {
-                    for ls in ls_list.items {
-                        if !listenerset_parents_gateway(&ls, gateway_ns, gateway_name) {
-                            continue;
-                        }
-                        let ls_ns = ls.metadata.namespace.clone().unwrap_or_default();
+    let mut rejected_listener_sets: Vec<RejectedListenerSetSnap> = Vec::new();
+    if crd_active(active_crds, ManagedCrd::ListenerSet) {
+        let ls_api: Api<ListenerSet> = Api::all(client.clone());
+        match ls_api.list(&ListParams::default()).await {
+            Ok(ls_list) => {
+                for ls in ls_list.items {
+                    if !listenerset_parents_gateway(&ls, gateway_ns, gateway_name) {
+                        continue;
+                    }
+                    let ls_ns = ls.metadata.namespace.clone().unwrap_or_default();
+                    let ls_name = ls.metadata.name.clone().unwrap_or_default();
+                    if let Some(ref allowed) = allowed_listeners {
                         if !listener_set_namespace_allowed(client, gateway_ns, &ls_ns, allowed)
                             .await?
                         {
+                            rejected_listener_sets.push(RejectedListenerSetSnap {
+                                namespace: ls_ns,
+                                name: ls_name,
+                                reason: "NotAllowed".into(),
+                            });
                             continue;
                         }
                         listener_sets.push(listenerset_to_snap(ls));
+                    } else {
+                        rejected_listener_sets.push(RejectedListenerSetSnap {
+                            namespace: ls_ns,
+                            name: ls_name,
+                            reason: "NotAllowed".into(),
+                        });
                     }
                 }
-                Err(e) => {
-                    warn!(
-                        error = %e,
-                        "ListenerSet list failed — clusters without ListenerSet CRD skip merge"
-                    );
-                }
+            }
+            Err(e) => {
+                warn!(
+                    error = %e,
+                    "ListenerSet list failed — clusters without ListenerSet CRD skip merge"
+                );
             }
         }
     }
@@ -1268,6 +1281,7 @@ pub async fn load_cluster_snapshot(
         listeners,
         effective_listeners,
         listener_sets,
+        rejected_listener_sets,
         allowed_listeners,
         http_routes,
         grpc_routes,
