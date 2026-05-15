@@ -42,7 +42,7 @@ pub fn mapped_gateway_key(
         });
     }
     if let Some(r) = obj.downcast_ref::<HTTPRoute>() {
-        for p in &r.spec.parent_refs {
+        for p in r.spec.parent_refs.as_deref().unwrap_or_default() {
             let g = p.group.as_deref().unwrap_or("gateway.networking.k8s.io");
             let k = p.kind.as_deref().unwrap_or("Gateway");
             if g != "gateway.networking.k8s.io" || k != "Gateway" {
@@ -61,7 +61,7 @@ pub fn mapped_gateway_key(
         return None;
     }
     if let Some(r) = obj.downcast_ref::<GRPCRoute>() {
-        for p in &r.spec.parent_refs {
+        for p in r.spec.parent_refs.as_deref().unwrap_or_default() {
             let g = p.group.as_deref().unwrap_or("gateway.networking.k8s.io");
             let k = p.kind.as_deref().unwrap_or("Gateway");
             if g != "gateway.networking.k8s.io" || k != "Gateway" {
@@ -80,7 +80,7 @@ pub fn mapped_gateway_key(
         return None;
     }
     if let Some(r) = obj.downcast_ref::<TLSRoute>() {
-        for p in &r.spec.parent_refs {
+        for p in r.spec.parent_refs.as_deref().unwrap_or_default() {
             let g = p.group.as_deref().unwrap_or("gateway.networking.k8s.io");
             let k = p.kind.as_deref().unwrap_or("Gateway");
             if g != "gateway.networking.k8s.io" || k != "Gateway" {
@@ -99,7 +99,7 @@ pub fn mapped_gateway_key(
         return None;
     }
     if let Some(r) = obj.downcast_ref::<TCPRoute>() {
-        for p in &r.spec.parent_refs {
+        for p in r.spec.parent_refs.as_deref().unwrap_or_default() {
             let g = p.group.as_deref().unwrap_or("gateway.networking.k8s.io");
             let k = p.kind.as_deref().unwrap_or("Gateway");
             if g != "gateway.networking.k8s.io" || k != "Gateway" {
@@ -118,7 +118,7 @@ pub fn mapped_gateway_key(
         return None;
     }
     if let Some(r) = obj.downcast_ref::<UDPRoute>() {
-        for p in &r.spec.parent_refs {
+        for p in r.spec.parent_refs.as_deref().unwrap_or_default() {
             let g = p.group.as_deref().unwrap_or("gateway.networking.k8s.io");
             let k = p.kind.as_deref().unwrap_or("Gateway");
             if g != "gateway.networking.k8s.io" || k != "Gateway" {
@@ -162,9 +162,7 @@ mod tests {
             spec: crate::resources::GatewaySpec {
                 gateway_class_name: "cls".into(),
                 listeners: vec![],
-                allowed_listeners: None,
-                addresses: vec![],
-                infrastructure: None,
+                ..Default::default()
             },
             status: Default::default(),
         };
@@ -186,17 +184,16 @@ mod tests {
                 name: Some("hr".into()),
                 ..Default::default()
             },
-            spec: crate::resources::HTTPRouteSpec {
-                hostnames: vec![],
-                parent_refs: vec![crate::resources::ParentReferenceSpec {
+            spec: crate::resources::HttpRouteSpec {
+                parent_refs: Some(vec![crate::resources::HttpRouteParentRefs {
                     group: Some("gateway.networking.k8s.io".into()),
                     kind: Some("Gateway".into()),
                     namespace: None,
                     name: "gw".into(),
                     section_name: None,
                     port: None,
-                }],
-                rules: vec![],
+                }]),
+                ..Default::default()
             },
             status: Default::default(),
         };
@@ -218,17 +215,16 @@ mod tests {
                 name: Some("gr".into()),
                 ..Default::default()
             },
-            spec: crate::resources::GRPCRouteSpec {
-                hostnames: vec![],
-                parent_refs: vec![crate::resources::ParentReferenceSpec {
+            spec: crate::resources::GrpcRouteSpec {
+                parent_refs: Some(vec![crate::resources::GrpcRouteParentRefs {
                     group: Some("gateway.networking.k8s.io".into()),
                     kind: Some("Gateway".into()),
                     namespace: None,
                     name: "gw".into(),
                     section_name: None,
                     port: None,
-                }],
-                rules: vec![],
+                }]),
+                ..Default::default()
             },
             status: Default::default(),
         };
@@ -250,17 +246,16 @@ mod tests {
                 name: Some("tr".into()),
                 ..Default::default()
             },
-            spec: crate::resources::TLSRouteSpec {
-                hostnames: vec![],
-                parent_refs: vec![crate::resources::ParentReferenceSpec {
+            spec: crate::resources::TlsRouteSpec {
+                parent_refs: Some(vec![crate::resources::TlsRouteParentRefs {
                     group: Some("gateway.networking.k8s.io".into()),
                     kind: Some("Gateway".into()),
                     namespace: None,
                     name: "gw".into(),
                     section_name: None,
                     port: None,
-                }],
-                rules: vec![],
+                }]),
+                ..Default::default()
             },
             status: Default::default(),
         };
@@ -282,16 +277,16 @@ mod tests {
                 name: Some("tcp1".into()),
                 ..Default::default()
             },
-            spec: crate::resources::TCPRouteSpec {
-                parent_refs: vec![crate::resources::ParentReferenceSpec {
+            spec: crate::resources::TcpRouteSpec {
+                parent_refs: Some(vec![crate::resources::TcpRouteParentRefs {
                     group: Some("gateway.networking.k8s.io".into()),
                     kind: Some("Gateway".into()),
                     namespace: None,
                     name: "gw".into(),
                     section_name: None,
                     port: None,
-                }],
-                rules: vec![],
+                }]),
+                ..Default::default()
             },
             status: Default::default(),
         };
@@ -313,16 +308,16 @@ mod tests {
                 name: Some("udp1".into()),
                 ..Default::default()
             },
-            spec: crate::resources::UDPRouteSpec {
-                parent_refs: vec![crate::resources::ParentReferenceSpec {
+            spec: crate::resources::UdpRouteSpec {
+                parent_refs: Some(vec![crate::resources::UdpRouteParentRefs {
                     group: Some("gateway.networking.k8s.io".into()),
                     kind: Some("Gateway".into()),
                     namespace: None,
                     name: "gw".into(),
                     section_name: None,
                     port: None,
-                }],
-                rules: vec![],
+                }]),
+                ..Default::default()
             },
             status: Default::default(),
         };

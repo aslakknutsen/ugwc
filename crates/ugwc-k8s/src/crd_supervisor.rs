@@ -319,7 +319,7 @@ mod tests {
                 resource_version: Some("1".to_string()),
                 deletion_timestamp: if deletion {
                     Some(k8s_openapi::apimachinery::pkg::apis::meta::v1::Time(
-                        chrono::Utc::now(),
+                        k8s_openapi::jiff::Timestamp::now(),
                     ))
                 } else {
                     None

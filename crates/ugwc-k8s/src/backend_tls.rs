@@ -12,21 +12,22 @@ use ugwc_core::snapshot::{
     ServiceSnap,
 };
 
-use crate::resources::BackendTLSPolicy;
+use crate::resources::{
+    BackendTLSPolicy, BackendTlsPolicyValidation, BackendTlsPolicyValidationCaCertificateRefs,
+    BackendTlsPolicyValidationSubjectAltNamesType,
+};
 
 use super::LoaderError;
 
-fn backend_tls_target_is_service(group: Option<&str>, kind: Option<&str>) -> bool {
-    let k = kind.unwrap_or("Service");
-    let g = group.unwrap_or("");
-    k.eq_ignore_ascii_case("Service") && (g.is_empty() || g.eq_ignore_ascii_case(""))
+fn backend_tls_target_is_service(group: &str, kind: &str) -> bool {
+    let k = if kind.is_empty() { "Service" } else { kind };
+    k.eq_ignore_ascii_case("Service") && (group.is_empty() || group.eq_ignore_ascii_case(""))
 }
 
-fn backend_tls_target_is_inference_pool(group: Option<&str>, kind: Option<&str>) -> bool {
-    let k = kind.unwrap_or("");
-    let g = group.unwrap_or("");
+fn backend_tls_target_is_inference_pool(group: &str, kind: &str) -> bool {
+    let k = kind;
     k.eq_ignore_ascii_case("InferencePool")
-        && (g.is_empty() || g.eq_ignore_ascii_case("inference.networking.k8s.io"))
+        && (group.is_empty() || group.eq_ignore_ascii_case("inference.networking.k8s.io"))
 }
 
 fn inference_pool_backend_tls_key(pool_ns: &str, pool_name: &str, port: u16) -> String {
@@ -74,17 +75,18 @@ fn tls_invalid(
 async fn fetch_configmap_ca_pem(
     client: &Client,
     policy_ns: &str,
-    ca: &crate::resources::LocalObjectReferenceSpec,
+    ca: &BackendTlsPolicyValidationCaCertificateRefs,
     grants: &[ReferenceGrantSnap],
 ) -> Result<Vec<u8>, &'static str> {
-    let kind = ca.kind.as_deref().unwrap_or("ConfigMap");
-    let group = ca.group.as_deref().unwrap_or("");
+    let kind = ca.kind.as_str();
+    let kind = if kind.is_empty() { "ConfigMap" } else { kind };
+    let group = ca.group.as_str();
     if !kind.eq_ignore_ascii_case("ConfigMap")
         || !(group.is_empty() || group.eq_ignore_ascii_case(""))
     {
         return Err("InvalidKind");
     }
-    let res_ns = ca.namespace.as_deref().unwrap_or(policy_ns);
+    let res_ns = policy_ns;
     if !reference_grant_permits_backend_tls_policy_resource_ref(
         grants,
         policy_ns,
@@ -108,16 +110,17 @@ async fn fetch_configmap_ca_pem(
 async fn fetch_secret_ca_pem(
     client: &Client,
     policy_ns: &str,
-    ca: &crate::resources::LocalObjectReferenceSpec,
+    ca: &BackendTlsPolicyValidationCaCertificateRefs,
     grants: &[ReferenceGrantSnap],
 ) -> Result<Vec<u8>, &'static str> {
-    let kind = ca.kind.as_deref().unwrap_or("Secret");
-    let group = ca.group.as_deref().unwrap_or("");
+    let kind = ca.kind.as_str();
+    let kind = if kind.is_empty() { "Secret" } else { kind };
+    let group = ca.group.as_str();
     if !kind.eq_ignore_ascii_case("Secret") || !(group.is_empty() || group.eq_ignore_ascii_case(""))
     {
         return Err("InvalidKind");
     }
-    let res_ns = ca.namespace.as_deref().unwrap_or(policy_ns);
+    let res_ns = policy_ns;
     if !reference_grant_permits_backend_tls_policy_resource_ref(
         grants, policy_ns, res_ns, "Secret", &ca.name,
     ) {
@@ -138,79 +141,34 @@ async fn fetch_secret_ca_pem(
     Err("InvalidCACertificateRef")
 }
 
-async fn fetch_secret_client_identity(
-    client: &Client,
-    policy_ns: &str,
-    r: &crate::resources::LocalObjectReferenceSpec,
-    grants: &[ReferenceGrantSnap],
-) -> Result<(Vec<u8>, Vec<u8>), &'static str> {
-    let kind = r.kind.as_deref().unwrap_or("Secret");
-    let group = r.group.as_deref().unwrap_or("");
-    if !kind.eq_ignore_ascii_case("Secret") || !(group.is_empty() || group.eq_ignore_ascii_case(""))
-    {
-        return Err("InvalidKind");
-    }
-    let res_ns = r.namespace.as_deref().unwrap_or(policy_ns);
-    if !reference_grant_permits_backend_tls_policy_resource_ref(
-        grants, policy_ns, res_ns, "Secret", &r.name,
-    ) {
-        return Err("RefNotPermitted");
-    }
-    let sec_api: Api<k8s_openapi::api::core::v1::Secret> = Api::namespaced(client.clone(), res_ns);
-    let sec = sec_api
-        .get(&r.name)
-        .await
-        .map_err(|_| "InvalidCACertificateRef")?;
-    let data = sec.data.as_ref().ok_or("InvalidCACertificateRef")?;
-    let cert = data.get("tls.crt").ok_or("InvalidCACertificateRef")?;
-    let key = data.get("tls.key").ok_or("InvalidCACertificateRef")?;
-    Ok((cert.0.clone(), key.0.clone()))
-}
-
 async fn backend_tls_ir_from_validation(
     client: &Client,
     policy_ns: &str,
-    v: &crate::resources::BackendTLSPolicyValidationSpec,
+    v: &BackendTlsPolicyValidation,
     grants: &[ReferenceGrantSnap],
 ) -> (BackendTlsIr, Option<String>) {
     let hostname = v.hostname.clone();
     let mut sans = Vec::new();
-    for san in &v.subject_alt_names {
-        match san.type_.as_str() {
-            "Hostname" => {
+    for san in v.subject_alt_names.as_deref().unwrap_or_default() {
+        match san.r#type {
+            BackendTlsPolicyValidationSubjectAltNamesType::Hostname => {
                 if let Some(ref h) = san.hostname {
                     sans.push(h.clone());
                 }
             }
-            "URI" => {
+            BackendTlsPolicyValidationSubjectAltNamesType::Uri => {
                 if let Some(ref u) = san.uri {
                     sans.push(u.clone());
                 }
             }
-            _ => {}
         }
     }
 
-    let mut client_cert_pem = Vec::new();
-    let mut client_key_pem = Vec::new();
-    if !v.client_certificate_refs.is_empty() {
-        let r = &v.client_certificate_refs[0];
-        match fetch_secret_client_identity(client, policy_ns, r, grants).await {
-            Ok((c, k)) => {
-                client_cert_pem = c;
-                client_key_pem = k;
-            }
-            Err(reason) => return tls_invalid(hostname, sans, reason),
-        }
-        if v.client_certificate_refs.len() > 1 {
-            warn!(
-                "BackendTLSPolicy clientCertificateRefs: only first Secret is used ({} total)",
-                v.client_certificate_refs.len()
-            );
-        }
-    }
+    let client_cert_pem = Vec::new();
+    let client_key_pem = Vec::new();
 
-    let has_ca = !v.ca_certificate_refs.is_empty();
+    let ca_refs = v.ca_certificate_refs.as_deref().unwrap_or_default();
+    let has_ca = !ca_refs.is_empty();
     let well = v
         .well_known_ca_certificates
         .as_deref()
@@ -244,8 +202,9 @@ async fn backend_tls_ir_from_validation(
     }
 
     let mut bundle = Vec::new();
-    for ca in &v.ca_certificate_refs {
-        let kind = ca.kind.as_deref().unwrap_or("ConfigMap");
+    for ca in ca_refs {
+        let kind = ca.kind.as_str();
+        let kind = if kind.is_empty() { "ConfigMap" } else { kind };
         let res = if kind.eq_ignore_ascii_case("ConfigMap") {
             fetch_configmap_ca_pem(client, policy_ns, ca, grants).await
         } else if kind.eq_ignore_ascii_case("Secret") {
@@ -329,21 +288,19 @@ pub async fn load_backend_tls_for_gateway(
                 .metadata
                 .creation_timestamp
                 .as_ref()
-                .map(|t| t.0.to_rfc3339())
+                .map(|t| t.0.to_string())
                 .unwrap_or_default();
 
             let mut service_targets: Vec<(String, Option<String>)> = Vec::new();
             let mut pool_targets: Vec<(String, Option<String>)> = Vec::new();
             for t in &pol.spec.target_refs {
                 let section = t.section_name.clone().filter(|s| !s.trim().is_empty());
-                if backend_tls_target_is_service(t.group.as_deref(), t.kind.as_deref()) {
+                if backend_tls_target_is_service(&t.group, &t.kind) {
                     if needed_set.contains(&(policy_ns.clone(), t.name.clone())) {
                         service_targets.push((t.name.clone(), section));
                     }
-                } else if backend_tls_target_is_inference_pool(
-                    t.group.as_deref(),
-                    t.kind.as_deref(),
-                ) && needed_pool_set.contains(&(policy_ns.clone(), t.name.clone()))
+                } else if backend_tls_target_is_inference_pool(&t.group, &t.kind)
+                    && needed_pool_set.contains(&(policy_ns.clone(), t.name.clone()))
                 {
                     pool_targets.push((t.name.clone(), section));
                 }

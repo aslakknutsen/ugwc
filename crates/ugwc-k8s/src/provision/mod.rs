@@ -226,8 +226,9 @@ pub async fn reconcile_per_gateway_praxis(
         .spec
         .infrastructure
         .as_ref()
-        .map(|inf| {
-            inf.labels
+        .and_then(|inf| inf.labels.as_ref())
+        .map(|labels| {
+            labels
                 .iter()
                 .map(|(k, v)| InfraLabelRow {
                     key: k.clone(),

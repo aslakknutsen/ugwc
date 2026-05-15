@@ -7,20 +7,106 @@ use std::sync::{Arc, Mutex};
 use k8s_openapi::api::core::v1::Service;
 use kube::api::{Patch, PatchParams};
 use kube::{Api, Client};
+use serde::Serialize;
 use tracing::warn;
 
-use crate::loader::parent_reference_to_snap;
 use crate::provision::per_gateway_dataplane_name;
 use crate::resources::{
-    BackendTLSPolicy, GRPCRoute, Gateway, GatewayClass, HTTPRoute, InferencePool, ListenerSet,
-    TCPRoute, TLSRoute, UDPRoute,
+    BackendTLSPolicy, GRPCRoute, Gateway, GatewayClass, GatewayListeners,
+    GatewayListenersTlsMode, GrpcRouteParentRefs, HTTPRoute, HttpRouteParentRefs,
+    InferencePool, ListenerSet, ListenerSetListeners, TcpRouteParentRefs, TCPRoute, TLSRoute,
+    TlsRouteParentRefs, UDPRoute, UdpRouteParentRefs,
 };
 use ugwc_core::compile::CompileReport;
+use ugwc_core::snapshot::{ParentRefSnap, RouteGroupKindSnap};
 use ugwc_core::{
     grpc_route_accepted_condition_for_parent, http_route_accepted_condition_for_parent,
     tcp_route_accepted_condition_for_parent, tls_route_accepted_condition_for_parent,
     udp_route_accepted_condition_for_parent,
 };
+
+trait ToParentRefSnap {
+    fn to_parent_ref_snap(&self) -> ParentRefSnap;
+}
+
+macro_rules! impl_to_parent_ref_snap {
+    ($($t:ty),* $(,)?) => {$(
+        impl ToParentRefSnap for $t {
+            fn to_parent_ref_snap(&self) -> ParentRefSnap {
+                ParentRefSnap {
+                    group: self.group.clone(),
+                    kind: self.kind.clone(),
+                    namespace: self.namespace.clone(),
+                    name: self.name.clone(),
+                    section_name: self.section_name.clone(),
+                    port: self.port.and_then(|p| u16::try_from(p).ok()),
+                }
+            }
+        }
+    )*};
+}
+
+impl_to_parent_ref_snap!(
+    HttpRouteParentRefs,
+    GrpcRouteParentRefs,
+    TlsRouteParentRefs,
+    TcpRouteParentRefs,
+    UdpRouteParentRefs,
+);
+
+/// Gateway listeners and ListenerSet entries both expose protocol + optional allowed route kinds.
+trait ListenerAllowedRouteKinds {
+    fn protocol_for_route_kinds(&self) -> &str;
+    fn route_group_kinds(&self) -> Vec<RouteGroupKindSnap>;
+}
+
+impl ListenerAllowedRouteKinds for GatewayListeners {
+    fn protocol_for_route_kinds(&self) -> &str {
+        self.protocol.as_str()
+    }
+
+    fn route_group_kinds(&self) -> Vec<RouteGroupKindSnap> {
+        self.allowed_routes
+            .as_ref()
+            .and_then(|a| a.kinds.as_ref())
+            .map(|kinds| {
+                kinds
+                    .iter()
+                    .map(|k| RouteGroupKindSnap {
+                        group: k.group.clone(),
+                        kind: k.kind.clone(),
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+}
+
+impl ListenerAllowedRouteKinds for ListenerSetListeners {
+    fn protocol_for_route_kinds(&self) -> &str {
+        self.protocol.as_str()
+    }
+
+    fn route_group_kinds(&self) -> Vec<RouteGroupKindSnap> {
+        self.allowed_routes
+            .as_ref()
+            .and_then(|a| a.kinds.as_ref())
+            .map(|kinds| {
+                kinds
+                    .iter()
+                    .map(|k| RouteGroupKindSnap {
+                        group: k.group.clone(),
+                        kind: k.kind.clone(),
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+}
+
+fn status_rows_to_json<T: Serialize>(rows: &[T]) -> Vec<serde_json::Value> {
+    rows.iter().filter_map(|r| serde_json::to_value(r).ok()).collect()
+}
 
 fn supported_kinds_json(
     eff: Option<&ugwc_core::snapshot::EffectiveListenerSnap>,
@@ -78,7 +164,7 @@ fn gateway_compile_reports_ref_not_permitted(
 
 /// HTTPS listeners with structurally invalid `certificateRefs` (before Secret fetch).
 fn gateway_spec_https_certificate_ref_obviously_invalid(
-    listener: &crate::resources::GatewayListenerSpec,
+    listener: &crate::resources::GatewayListeners,
 ) -> bool {
     if listener.protocol.trim().to_ascii_uppercase() != "HTTPS" {
         return false;
@@ -86,7 +172,7 @@ fn gateway_spec_https_certificate_ref_obviously_invalid(
     let Some(ref tls) = listener.tls else {
         return true;
     };
-    let refs = &tls.certificate_refs;
+    let refs = tls.certificate_refs.as_deref().unwrap_or_default();
     if refs.is_empty() {
         return true;
     }
@@ -123,7 +209,7 @@ fn gateway_listener_https_cert_unresolved(
 /// of the loader's `tls_resolve_error` — it reads the Gateway spec directly so
 /// the result is correct even when the effective-listener snapshot lags.
 fn gateway_listener_cert_ref_not_permitted(
-    spec_row: Option<&crate::resources::GatewayListenerSpec>,
+    spec_row: Option<&crate::resources::GatewayListeners>,
     gw_ns: &str,
     cluster: Option<&ugwc_core::ClusterSnapshot>,
 ) -> bool {
@@ -132,7 +218,7 @@ fn gateway_listener_cert_ref_not_permitted(
         return false;
     }
     let refs = match l.tls.as_ref() {
-        Some(t) => &t.certificate_refs,
+        Some(t) => t.certificate_refs.as_deref().unwrap_or_default(),
         None => return false,
     };
     if refs.is_empty() {
@@ -211,35 +297,21 @@ fn gateway_status_addresses_from_service(svc: &Service) -> Vec<serde_json::Value
     Vec::new()
 }
 
-fn gateway_listener_spec_route_kinds_broken(spec_listener: &crate::resources::GatewayListenerSpec) -> bool {
-    let kinds: Vec<ugwc_core::snapshot::RouteGroupKindSnap> = spec_listener
-        .allowed_routes
-        .as_ref()
-        .map(|a| {
-            a.kinds
-                .iter()
-                .map(|k| ugwc_core::snapshot::RouteGroupKindSnap {
-                    group: k.group.clone(),
-                    kind: k.kind.clone(),
-                })
-                .collect()
-        })
-        .unwrap_or_default();
-    ugwc_core::allowed_route_kinds_invalid_for_gateway_protocol(
-        spec_listener.protocol.as_str(),
-        &kinds,
-    )
-}
-
-fn listener_route_kinds_broken_for_status(
+fn listener_route_kinds_broken_for_status<L: ListenerAllowedRouteKinds>(
     eff: Option<&ugwc_core::snapshot::EffectiveListenerSnap>,
-    spec_listener: Option<&crate::resources::GatewayListenerSpec>,
+    spec_listener: Option<&L>,
 ) -> bool {
     let eff_broken = eff
         .map(ugwc_core::effective_listener_has_invalid_allowed_route_kinds)
         .unwrap_or(false);
     let spec_broken = spec_listener
-        .map(gateway_listener_spec_route_kinds_broken)
+        .map(|l| {
+            let kinds = l.route_group_kinds();
+            ugwc_core::allowed_route_kinds_invalid_for_gateway_protocol(
+                l.protocol_for_route_kinds(),
+                &kinds,
+            )
+        })
         .unwrap_or(false);
     eff_broken || spec_broken
 }
@@ -386,13 +458,15 @@ pub async fn apply_gateway_reconciled_status(
         .map(|lname| {
             let conflicted = gateway_listener_conflicted(lname);
             let spec_row = gateway.spec.listeners.iter().find(|l| l.name == *lname);
-            let port = spec_row.map(|l| l.port).unwrap_or(0);
+            let port_u16 = spec_row
+                .and_then(|l| u16::try_from(l.port).ok())
+                .unwrap_or(0);
             let lk = ugwc_core::ListenerAttachmentIr {
                 parent_kind: "Gateway".into(),
                 parent_namespace: gw_ns.to_string(),
                 parent_name: name.to_string(),
                 section_name: (*lname).clone(),
-                port,
+                port: port_u16,
             };
             let attached = outcome.report.attachment_count_for_listener_key(&lk);
 
@@ -410,8 +484,10 @@ pub async fn apply_gateway_reconciled_status(
                     if proto != "TLS" {
                         return false;
                     }
-                    let mode = l.tls.as_ref().and_then(|t| t.mode.as_deref()).unwrap_or("");
-                    mode.eq_ignore_ascii_case("Terminate")
+                    matches!(
+                        l.tls.as_ref().and_then(|t| t.mode.as_ref()),
+                        Some(GatewayListenersTlsMode::Terminate)
+                    )
                 })
                 .unwrap_or(false);
             let supported = if tls_mode_unsupported {
@@ -719,15 +795,12 @@ pub struct UdpRouteMergedParentStatusArgs<'a> {
     pub status_cache: Option<Arc<Mutex<HashMap<String, String>>>>,
 }
 
-fn parent_ref_json_from_spec(
-    p: &crate::resources::ParentReferenceSpec,
-    route_ns: &str,
-) -> serde_json::Value {
+fn parent_ref_json_from_snap(p: &ParentRefSnap, route_ns: &str) -> serde_json::Value {
     let mut m = serde_json::json!({
         "group": p.group.as_deref().unwrap_or("gateway.networking.k8s.io"),
         "kind": p.kind.as_deref().unwrap_or("Gateway"),
         "namespace": p.namespace.as_deref().unwrap_or(route_ns),
-        "name": p.name,
+        "name": &p.name,
     });
     if let Some(obj) = m.as_object_mut() {
         if let Some(sn) = &p.section_name {
@@ -784,8 +857,8 @@ pub async fn apply_http_route_merged_parent_status(
     let api: Api<HTTPRoute> = Api::namespaced(client.clone(), route_ns);
     let route = api.get(route_name).await?;
 
-    let mut ours: Vec<&crate::resources::ParentReferenceSpec> = Vec::new();
-    for p in &route.spec.parent_refs {
+    let mut ours: Vec<ParentRefSnap> = Vec::new();
+    for p in route.spec.parent_refs.as_deref().unwrap_or_default() {
         let g = p.group.as_deref().unwrap_or("gateway.networking.k8s.io");
         let k = p.kind.as_deref().unwrap_or("Gateway");
         if g != "gateway.networking.k8s.io" {
@@ -796,11 +869,11 @@ pub async fn apply_http_route_merged_parent_status(
             && pns == reconciled_gateway_ns
             && p.name.as_str() == reconciled_gateway_name
         {
-            ours.push(p);
+            ours.push(p.to_parent_ref_snap());
             continue;
         }
         if k == "ListenerSet" && attached_ls.contains(&(pns.to_string(), p.name.clone())) {
-            ours.push(p);
+            ours.push(p.to_parent_ref_snap());
         }
     }
 
@@ -811,7 +884,7 @@ pub async fn apply_http_route_merged_parent_status(
     let mut parents: Vec<serde_json::Value> = route
         .status
         .as_ref()
-        .map(|s| s.parents.clone())
+        .map(|s| status_rows_to_json(s.parents.as_slice()))
         .unwrap_or_default();
 
     parents.retain(|row| {
@@ -822,9 +895,9 @@ pub async fn apply_http_route_merged_parent_status(
         let Some(pref) = row.get("parentRef") else {
             return true;
         };
-        !ours
-            .iter()
-            .any(|p| parent_ref_matches_json(pref, &parent_ref_json_from_spec(p, route_ns)))
+        !ours.iter().any(|snap| {
+            parent_ref_matches_json(pref, &parent_ref_json_from_snap(snap, route_ns))
+        })
     });
 
     let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
@@ -839,12 +912,11 @@ pub async fn apply_http_route_merged_parent_status(
         .iter()
         .find(|r| r.namespace == route_ns && r.name == route_name);
 
-    for p in ours {
-        let pref_snap = parent_reference_to_snap(p);
+    for snap in &ours {
         let (acc_status, acc_reason, acc_message) = match route_snap {
             Some(rs) => http_route_accepted_condition_for_parent(
                 rs,
-                &pref_snap,
+                snap,
                 snapshot,
                 &attached_ls,
                 compile_report,
@@ -856,7 +928,7 @@ pub async fn apply_http_route_merged_parent_status(
             ),
         };
 
-        let pref = parent_ref_json_from_spec(p, route_ns);
+        let pref = parent_ref_json_from_snap(snap, route_ns);
         parents.push(serde_json::json!({
             "parentRef": pref,
             "controllerName": controller_name,
@@ -943,8 +1015,8 @@ pub async fn apply_grpc_route_merged_parent_status(
     let api: Api<GRPCRoute> = Api::namespaced(client.clone(), route_ns);
     let route = api.get(route_name).await?;
 
-    let mut ours: Vec<&crate::resources::ParentReferenceSpec> = Vec::new();
-    for p in &route.spec.parent_refs {
+    let mut ours: Vec<ParentRefSnap> = Vec::new();
+    for p in route.spec.parent_refs.as_deref().unwrap_or_default() {
         let g = p.group.as_deref().unwrap_or("gateway.networking.k8s.io");
         let k = p.kind.as_deref().unwrap_or("Gateway");
         if g != "gateway.networking.k8s.io" {
@@ -955,11 +1027,11 @@ pub async fn apply_grpc_route_merged_parent_status(
             && pns == reconciled_gateway_ns
             && p.name.as_str() == reconciled_gateway_name
         {
-            ours.push(p);
+            ours.push(p.to_parent_ref_snap());
             continue;
         }
         if k == "ListenerSet" && attached_ls.contains(&(pns.to_string(), p.name.clone())) {
-            ours.push(p);
+            ours.push(p.to_parent_ref_snap());
         }
     }
 
@@ -970,7 +1042,7 @@ pub async fn apply_grpc_route_merged_parent_status(
     let mut parents: Vec<serde_json::Value> = route
         .status
         .as_ref()
-        .map(|s| s.parents.clone())
+        .map(|s| status_rows_to_json(s.parents.as_slice()))
         .unwrap_or_default();
 
     parents.retain(|row| {
@@ -981,9 +1053,9 @@ pub async fn apply_grpc_route_merged_parent_status(
         let Some(pref) = row.get("parentRef") else {
             return true;
         };
-        !ours
-            .iter()
-            .any(|p| parent_ref_matches_json(pref, &parent_ref_json_from_spec(p, route_ns)))
+        !ours.iter().any(|snap| {
+            parent_ref_matches_json(pref, &parent_ref_json_from_snap(snap, route_ns))
+        })
     });
 
     let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
@@ -998,12 +1070,11 @@ pub async fn apply_grpc_route_merged_parent_status(
         .iter()
         .find(|r| r.namespace == route_ns && r.name == route_name);
 
-    for p in ours {
-        let pref_snap = parent_reference_to_snap(p);
+    for snap in &ours {
         let (acc_status, acc_reason, acc_message) = match route_snap {
             Some(rs) => grpc_route_accepted_condition_for_parent(
                 rs,
-                &pref_snap,
+                snap,
                 snapshot,
                 &attached_ls,
                 compile_report,
@@ -1015,7 +1086,7 @@ pub async fn apply_grpc_route_merged_parent_status(
             ),
         };
 
-        let pref = parent_ref_json_from_spec(p, route_ns);
+        let pref = parent_ref_json_from_snap(snap, route_ns);
         parents.push(serde_json::json!({
             "parentRef": pref,
             "controllerName": controller_name,
@@ -1102,8 +1173,8 @@ pub async fn apply_tls_route_merged_parent_status(
     let api: Api<TLSRoute> = Api::namespaced(client.clone(), route_ns);
     let route = api.get(route_name).await?;
 
-    let mut ours: Vec<&crate::resources::ParentReferenceSpec> = Vec::new();
-    for p in &route.spec.parent_refs {
+    let mut ours: Vec<ParentRefSnap> = Vec::new();
+    for p in route.spec.parent_refs.as_deref().unwrap_or_default() {
         let g = p.group.as_deref().unwrap_or("gateway.networking.k8s.io");
         let k = p.kind.as_deref().unwrap_or("Gateway");
         if g != "gateway.networking.k8s.io" {
@@ -1114,11 +1185,11 @@ pub async fn apply_tls_route_merged_parent_status(
             && pns == reconciled_gateway_ns
             && p.name.as_str() == reconciled_gateway_name
         {
-            ours.push(p);
+            ours.push(p.to_parent_ref_snap());
             continue;
         }
         if k == "ListenerSet" && attached_ls.contains(&(pns.to_string(), p.name.clone())) {
-            ours.push(p);
+            ours.push(p.to_parent_ref_snap());
         }
     }
 
@@ -1129,7 +1200,7 @@ pub async fn apply_tls_route_merged_parent_status(
     let mut parents: Vec<serde_json::Value> = route
         .status
         .as_ref()
-        .map(|s| s.parents.clone())
+        .map(|s| status_rows_to_json(s.parents.as_slice()))
         .unwrap_or_default();
 
     parents.retain(|row| {
@@ -1140,9 +1211,9 @@ pub async fn apply_tls_route_merged_parent_status(
         let Some(pref) = row.get("parentRef") else {
             return true;
         };
-        !ours
-            .iter()
-            .any(|p| parent_ref_matches_json(pref, &parent_ref_json_from_spec(p, route_ns)))
+        !ours.iter().any(|snap| {
+            parent_ref_matches_json(pref, &parent_ref_json_from_snap(snap, route_ns))
+        })
     });
 
     let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
@@ -1157,12 +1228,11 @@ pub async fn apply_tls_route_merged_parent_status(
         .iter()
         .find(|r| r.namespace == route_ns && r.name == route_name);
 
-    for p in ours {
-        let pref_snap = parent_reference_to_snap(p);
+    for snap in &ours {
         let (acc_status, acc_reason, acc_message) = match route_snap {
             Some(rs) => tls_route_accepted_condition_for_parent(
                 rs,
-                &pref_snap,
+                snap,
                 snapshot,
                 &attached_ls,
                 compile_report,
@@ -1174,7 +1244,7 @@ pub async fn apply_tls_route_merged_parent_status(
             ),
         };
 
-        let pref = parent_ref_json_from_spec(p, route_ns);
+        let pref = parent_ref_json_from_snap(snap, route_ns);
         parents.push(serde_json::json!({
             "parentRef": pref,
             "controllerName": controller_name,
@@ -1261,8 +1331,8 @@ pub async fn apply_tcp_route_merged_parent_status(
     let api: Api<TCPRoute> = Api::namespaced(client.clone(), route_ns);
     let route = api.get(route_name).await?;
 
-    let mut ours: Vec<&crate::resources::ParentReferenceSpec> = Vec::new();
-    for p in &route.spec.parent_refs {
+    let mut ours: Vec<ParentRefSnap> = Vec::new();
+    for p in route.spec.parent_refs.as_deref().unwrap_or_default() {
         let g = p.group.as_deref().unwrap_or("gateway.networking.k8s.io");
         let k = p.kind.as_deref().unwrap_or("Gateway");
         if g != "gateway.networking.k8s.io" {
@@ -1273,11 +1343,11 @@ pub async fn apply_tcp_route_merged_parent_status(
             && pns == reconciled_gateway_ns
             && p.name.as_str() == reconciled_gateway_name
         {
-            ours.push(p);
+            ours.push(p.to_parent_ref_snap());
             continue;
         }
         if k == "ListenerSet" && attached_ls.contains(&(pns.to_string(), p.name.clone())) {
-            ours.push(p);
+            ours.push(p.to_parent_ref_snap());
         }
     }
 
@@ -1288,7 +1358,7 @@ pub async fn apply_tcp_route_merged_parent_status(
     let mut parents: Vec<serde_json::Value> = route
         .status
         .as_ref()
-        .map(|s| s.parents.clone())
+        .map(|s| status_rows_to_json(s.parents.as_slice()))
         .unwrap_or_default();
 
     parents.retain(|row| {
@@ -1299,9 +1369,9 @@ pub async fn apply_tcp_route_merged_parent_status(
         let Some(pref) = row.get("parentRef") else {
             return true;
         };
-        !ours
-            .iter()
-            .any(|p| parent_ref_matches_json(pref, &parent_ref_json_from_spec(p, route_ns)))
+        !ours.iter().any(|snap| {
+            parent_ref_matches_json(pref, &parent_ref_json_from_snap(snap, route_ns))
+        })
     });
 
     let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
@@ -1316,12 +1386,11 @@ pub async fn apply_tcp_route_merged_parent_status(
         .iter()
         .find(|r| r.namespace == route_ns && r.name == route_name);
 
-    for p in ours {
-        let pref_snap = parent_reference_to_snap(p);
+    for snap in &ours {
         let (acc_status, acc_reason, acc_message) = match route_snap {
             Some(rs) => tcp_route_accepted_condition_for_parent(
                 rs,
-                &pref_snap,
+                snap,
                 snapshot,
                 &attached_ls,
                 compile_report,
@@ -1333,7 +1402,7 @@ pub async fn apply_tcp_route_merged_parent_status(
             ),
         };
 
-        let pref = parent_ref_json_from_spec(p, route_ns);
+        let pref = parent_ref_json_from_snap(snap, route_ns);
         parents.push(serde_json::json!({
             "parentRef": pref,
             "controllerName": controller_name,
@@ -1420,8 +1489,8 @@ pub async fn apply_udp_route_merged_parent_status(
     let api: Api<UDPRoute> = Api::namespaced(client.clone(), route_ns);
     let route = api.get(route_name).await?;
 
-    let mut ours: Vec<&crate::resources::ParentReferenceSpec> = Vec::new();
-    for p in &route.spec.parent_refs {
+    let mut ours: Vec<ParentRefSnap> = Vec::new();
+    for p in route.spec.parent_refs.as_deref().unwrap_or_default() {
         let g = p.group.as_deref().unwrap_or("gateway.networking.k8s.io");
         let k = p.kind.as_deref().unwrap_or("Gateway");
         if g != "gateway.networking.k8s.io" {
@@ -1432,11 +1501,11 @@ pub async fn apply_udp_route_merged_parent_status(
             && pns == reconciled_gateway_ns
             && p.name.as_str() == reconciled_gateway_name
         {
-            ours.push(p);
+            ours.push(p.to_parent_ref_snap());
             continue;
         }
         if k == "ListenerSet" && attached_ls.contains(&(pns.to_string(), p.name.clone())) {
-            ours.push(p);
+            ours.push(p.to_parent_ref_snap());
         }
     }
 
@@ -1447,7 +1516,7 @@ pub async fn apply_udp_route_merged_parent_status(
     let mut parents: Vec<serde_json::Value> = route
         .status
         .as_ref()
-        .map(|s| s.parents.clone())
+        .map(|s| status_rows_to_json(s.parents.as_slice()))
         .unwrap_or_default();
 
     parents.retain(|row| {
@@ -1458,9 +1527,9 @@ pub async fn apply_udp_route_merged_parent_status(
         let Some(pref) = row.get("parentRef") else {
             return true;
         };
-        !ours
-            .iter()
-            .any(|p| parent_ref_matches_json(pref, &parent_ref_json_from_spec(p, route_ns)))
+        !ours.iter().any(|snap| {
+            parent_ref_matches_json(pref, &parent_ref_json_from_snap(snap, route_ns))
+        })
     });
 
     let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
@@ -1475,12 +1544,11 @@ pub async fn apply_udp_route_merged_parent_status(
         .iter()
         .find(|r| r.namespace == route_ns && r.name == route_name);
 
-    for p in ours {
-        let pref_snap = parent_reference_to_snap(p);
+    for snap in &ours {
         let (acc_status, acc_reason, acc_message) = match route_snap {
             Some(rs) => udp_route_accepted_condition_for_parent(
                 rs,
-                &pref_snap,
+                snap,
                 snapshot,
                 &attached_ls,
                 compile_report,
@@ -1492,7 +1560,7 @@ pub async fn apply_udp_route_merged_parent_status(
             ),
         };
 
-        let pref = parent_ref_json_from_spec(p, route_ns);
+        let pref = parent_ref_json_from_snap(snap, route_ns);
         parents.push(serde_json::json!({
             "parentRef": pref,
             "controllerName": controller_name,
@@ -1617,7 +1685,7 @@ pub async fn apply_listenerset_reconciled_status(
                 parent_namespace: ls_ns_name.0.clone(),
                 parent_name: ls_ns_name.1.clone(),
                 section_name: l.name.clone(),
-                port: l.port,
+                port: u16::try_from(l.port).unwrap_or(0),
             };
             let attached = outcome.report.attachment_count_for_listener_key(&lk);
 
@@ -1734,33 +1802,31 @@ pub async fn apply_listenerset_reconciled_status(
         ("False", "Invalid")
     };
 
-    let status = serde_json::json!({
-        "status": {
-            "conditions": [
-                {
-                    "type": "Accepted",
-                    "status": acc_g,
-                    "reason": acc_reason_g,
-                    "message": "ugwc listenerset",
-                    "lastTransitionTime": now,
-                    "observedGeneration": gen
-                },
-                {
-                    "type": "Programmed",
-                    "status": prog_g,
-                    "reason": prog_rs,
-                    "message": "ugwc compile outcome",
-                    "lastTransitionTime": now,
-                    "observedGeneration": gen
-                }
-            ],
-            "listeners": listeners_json
-        }
+    let status_doc = serde_json::json!({
+        "conditions": [
+            {
+                "type": "Accepted",
+                "status": acc_g,
+                "reason": acc_reason_g,
+                "message": "ugwc listenerset",
+                "lastTransitionTime": now,
+                "observedGeneration": gen
+            },
+            {
+                "type": "Programmed",
+                "status": prog_g,
+                "reason": prog_rs,
+                "message": "ugwc compile outcome",
+                "lastTransitionTime": now,
+                "observedGeneration": gen
+            }
+        ],
+        "listeners": listeners_json
     });
 
     let pending_cache: Option<(String, String)> = if let Some(cache) = &status_cache {
         let key = format!("listenerset:{ns}/{name}");
-        let serialized = serde_json::to_string(&status).unwrap_or_default();
+        let serialized = serde_json::to_string(&status_doc).unwrap_or_default();
         if cache.lock().unwrap().get(&key) == Some(&serialized) {
             return Ok(());
         }
@@ -1769,9 +1835,18 @@ pub async fn apply_listenerset_reconciled_status(
         None
     };
 
+    let apply_doc = serde_json::json!({
+        "apiVersion": "gateway.networking.k8s.io/v1",
+        "kind": "ListenerSet",
+        "metadata": {
+            "name": name,
+            "namespace": ns,
+        },
+        "status": status_doc,
+    });
     let api: Api<ListenerSet> = Api::namespaced(client.clone(), ns);
-    let patch = Patch::Merge(status);
-    let params = PatchParams::apply("ugwc");
+    let patch = Patch::Apply(&apply_doc);
+    let params = PatchParams::apply("ugwc").force();
     api.patch_status(name, &params, &patch).await?;
 
     if let (Some(cache), Some((key, serialized))) = (status_cache.as_ref(), pending_cache) {
@@ -1828,33 +1903,31 @@ pub async fn apply_listenerset_rejected_status(
         })
         .collect();
 
-    let status = serde_json::json!({
-        "status": {
-            "conditions": [
-                {
-                    "type": "Accepted",
-                    "status": "False",
-                    "reason": reason,
-                    "message": "listener set not allowed by gateway",
-                    "lastTransitionTime": now,
-                    "observedGeneration": gen
-                },
-                {
-                    "type": "Programmed",
-                    "status": "False",
-                    "reason": reason,
-                    "message": "listener set not allowed by gateway",
-                    "lastTransitionTime": now,
-                    "observedGeneration": gen
-                }
-            ],
-            "listeners": listeners_json
-        }
+    let status_doc = serde_json::json!({
+        "conditions": [
+            {
+                "type": "Accepted",
+                "status": "False",
+                "reason": reason,
+                "message": "listener set not allowed by gateway",
+                "lastTransitionTime": now,
+                "observedGeneration": gen
+            },
+            {
+                "type": "Programmed",
+                "status": "False",
+                "reason": reason,
+                "message": "listener set not allowed by gateway",
+                "lastTransitionTime": now,
+                "observedGeneration": gen
+            }
+        ],
+        "listeners": listeners_json
     });
 
     let pending_cache: Option<(String, String)> = if let Some(cache) = &status_cache {
         let key = format!("listenerset:{ns}/{name}");
-        let serialized = serde_json::to_string(&status).unwrap_or_default();
+        let serialized = serde_json::to_string(&status_doc).unwrap_or_default();
         if cache.lock().unwrap().get(&key) == Some(&serialized) {
             return Ok(());
         }
@@ -1863,9 +1936,18 @@ pub async fn apply_listenerset_rejected_status(
         None
     };
 
+    let apply_doc = serde_json::json!({
+        "apiVersion": "gateway.networking.k8s.io/v1",
+        "kind": "ListenerSet",
+        "metadata": {
+            "name": name,
+            "namespace": ns,
+        },
+        "status": status_doc,
+    });
     let api: Api<ListenerSet> = Api::namespaced(client.clone(), ns);
-    let patch = Patch::Merge(status);
-    let params = PatchParams::apply("ugwc");
+    let patch = Patch::Apply(&apply_doc);
+    let params = PatchParams::apply("ugwc").force();
     api.patch_status(name, &params, &patch).await?;
 
     if let (Some(cache), Some((key, serialized))) = (status_cache.as_ref(), pending_cache) {
@@ -1902,7 +1984,7 @@ pub async fn apply_backend_tls_policies_for_gateway(
         let mut ancestors: Vec<serde_json::Value> = pol
             .status
             .as_ref()
-            .map(|s| s.ancestors.clone())
+            .map(|s| status_rows_to_json(&s.ancestors))
             .unwrap_or_default();
 
         ancestors.retain(|row| {

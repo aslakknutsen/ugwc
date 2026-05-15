@@ -591,12 +591,10 @@ pub(crate) fn spawn_listener_set_watcher(
                     match ev {
                         Some(Ok(ls)) => {
                             backoff.reset();
-                            for pr in &ls.spec.parent_refs {
-                                let pg = pr.group.as_deref().unwrap_or("gateway.networking.k8s.io");
-                                let pk = pr.kind.as_deref().unwrap_or("Gateway");
-                                if pg != "gateway.networking.k8s.io" || pk != "Gateway" {
-                                    continue;
-                                }
+                            let pr = &ls.spec.parent_ref;
+                            let pg = pr.group.as_deref().unwrap_or("gateway.networking.k8s.io");
+                            let pk = pr.kind.as_deref().unwrap_or("Gateway");
+                            if pg == "gateway.networking.k8s.io" && pk == "Gateway" {
                                 let gwns = pr
                                     .namespace
                                     .clone()

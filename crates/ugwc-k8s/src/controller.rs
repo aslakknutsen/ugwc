@@ -127,20 +127,19 @@ pub async fn run_gateway_controller(
                                         if !listenerset_spec_references_secret(&ls.spec, &ls_ns, &sns, &sn) {
                                             continue;
                                         }
-                                        for pr in &ls.spec.parent_refs {
-                                            let pg = pr.group.as_deref().unwrap_or("gateway.networking.k8s.io");
-                                            let pk = pr.kind.as_deref().unwrap_or("Gateway");
-                                            if pg != "gateway.networking.k8s.io" || pk != "Gateway" {
-                                                continue;
-                                            }
-                                            let gwns = pr
-                                                .namespace
-                                                .clone()
-                                                .or(ls.metadata.namespace.clone())
-                                                .unwrap_or_default();
-                                            if tx_sec.send((gwns, pr.name.clone())).await.is_err() {
-                                                return;
-                                            }
+                                        let pr = &ls.spec.parent_ref;
+                                        let pg = pr.group.as_deref().unwrap_or("gateway.networking.k8s.io");
+                                        let pk = pr.kind.as_deref().unwrap_or("Gateway");
+                                        if pg != "gateway.networking.k8s.io" || pk != "Gateway" {
+                                            continue;
+                                        }
+                                        let gwns = pr
+                                            .namespace
+                                            .clone()
+                                            .or(ls.metadata.namespace.clone())
+                                            .unwrap_or_default();
+                                        if tx_sec.send((gwns, pr.name.clone())).await.is_err() {
+                                            return;
                                         }
                                     }
                                 }
@@ -250,9 +249,9 @@ pub async fn run_gateway_controller(
 
 #[cfg(test)]
 mod reference_grant_route_ns_tests {
-    use crate::resources::ReferenceGrantFromSpec;
+    use crate::resources::ReferenceGrantFrom;
 
-    fn route_namespace_hints(from: &[ReferenceGrantFromSpec]) -> Vec<String> {
+    fn route_namespace_hints(from: &[ReferenceGrantFrom]) -> Vec<String> {
         let mut route_ns_list: Vec<String> = from
             .iter()
             .map(|f| f.namespace.trim().to_string())
@@ -266,17 +265,17 @@ mod reference_grant_route_ns_tests {
     #[test]
     fn route_namespace_hints_sort_dedup() {
         let from = vec![
-            ReferenceGrantFromSpec {
+            ReferenceGrantFrom {
                 namespace: "b".into(),
                 kind: "HTTPRoute".into(),
                 ..Default::default()
             },
-            ReferenceGrantFromSpec {
+            ReferenceGrantFrom {
                 namespace: "a".into(),
                 kind: "HTTPRoute".into(),
                 ..Default::default()
             },
-            ReferenceGrantFromSpec {
+            ReferenceGrantFrom {
                 namespace: "b".into(),
                 kind: "GRPCRoute".into(),
                 ..Default::default()
@@ -290,7 +289,7 @@ mod reference_grant_route_ns_tests {
 
     #[test]
     fn route_namespace_hints_skips_blank() {
-        let from = vec![ReferenceGrantFromSpec {
+        let from = vec![ReferenceGrantFrom {
             namespace: "  ".into(),
             kind: "HTTPRoute".into(),
             ..Default::default()

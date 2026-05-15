@@ -28,8 +28,27 @@ use ugwc_core::snapshot::{
 
 use crate::crd_supervisor::{ActiveCrds, ManagedCrd};
 use crate::resources::{
-    GRPCRoute, Gateway, GatewayClass, HTTPRoute, InferencePool, ListenerSet, ParentReferenceSpec,
-    ReferenceGrant, TCPRoute, TLSRoute, UDPRoute,
+    Gateway, GatewayAllowedListenersNamespacesFrom, GatewayClass, GatewayListeners,
+    GatewayListenersAllowedRoutes, GatewayListenersAllowedRoutesKinds,
+    GatewayListenersAllowedRoutesNamespaces, GatewayListenersTls,
+    GatewayListenersTlsCertificateRefs, GatewayListenersTlsMode, GRPCRoute, GrpcRouteParentRefs,
+    GrpcRouteRules, GrpcRouteRulesBackendRefs, GrpcRouteRulesFilters,
+    GrpcRouteRulesFiltersRequestHeaderModifier, GrpcRouteRulesFiltersResponseHeaderModifier,
+    GrpcRouteRulesFiltersType, GrpcRouteRulesMatches, GrpcRouteRulesMatchesHeaders,
+    GrpcRouteRulesMatchesHeadersType, GrpcRouteRulesMatchesMethodType, HTTPRoute,
+    HttpRouteParentRefs, HttpRouteRules, HttpRouteRulesBackendRefs, HttpRouteRulesFilters,
+    HttpRouteRulesFiltersRequestHeaderModifier, HttpRouteRulesFiltersRequestRedirectPath,
+    HttpRouteRulesFiltersRequestRedirectPathType, HttpRouteRulesFiltersRequestRedirectScheme,
+    HttpRouteRulesFiltersType,
+    HttpRouteRulesMatches, HttpRouteRulesMatchesHeaders, HttpRouteRulesMatchesHeadersType,
+    HttpRouteRulesMatchesPathType, InferencePool, ListenerSet, ListenerSetListeners,
+    ListenerSetListenersAllowedRoutes, ListenerSetListenersAllowedRoutesKinds,
+    ListenerSetListenersAllowedRoutesNamespaces, ListenerSetListenersTls,
+    ListenerSetListenersTlsCertificateRefs, ListenerSetListenersTlsMode, ListenerSetParentRef,
+    ReferenceGrant, ReferenceGrantFrom, ReferenceGrantTo, TCPRoute, TcpRouteParentRefs,
+    TcpRouteRules, TcpRouteRulesBackendRefs, TLSRoute, TlsRouteParentRefs, TlsRouteRules,
+    TlsRouteRulesBackendRefs, UDPRoute, UdpRouteParentRefs, UdpRouteRules,
+    UdpRouteRulesBackendRefs,
 };
 
 #[derive(Debug, Error)]
@@ -41,21 +60,103 @@ pub enum LoaderError {
 #[path = "backend_tls.rs"]
 pub(crate) mod backend_tls;
 
+fn snap_u16_port(port: Option<i32>) -> Option<u16> {
+    port.and_then(|n| u16::try_from(n).ok())
+}
+
+fn snap_nonnegative_weight(w: Option<i32>) -> Option<u32> {
+    match w {
+        Some(x) if x >= 0 => Some(x as u32),
+        _ => None,
+    }
+}
+
+#[must_use]
+fn parent_ref_snap_from_route_fields(
+    group: Option<String>,
+    kind: Option<String>,
+    namespace: Option<String>,
+    name: String,
+    section_name: Option<String>,
+    port: Option<i32>,
+) -> ParentRefSnap {
+    ParentRefSnap {
+        group,
+        kind,
+        namespace,
+        name,
+        section_name,
+        port: snap_u16_port(port),
+    }
+}
+
 /// Convert spec parentRef to snapshot form (HTTPRoute status merge).
 #[must_use]
-pub fn parent_reference_to_snap(p: &ParentReferenceSpec) -> ParentRefSnap {
+pub fn parent_reference_to_snap(p: &HttpRouteParentRefs) -> ParentRefSnap {
+    parent_ref_snap_from_route_fields(
+        p.group.clone(),
+        p.kind.clone(),
+        p.namespace.clone(),
+        p.name.clone(),
+        p.section_name.clone(),
+        p.port,
+    )
+}
+
+fn tls_parent_ref_to_snap(p: &TlsRouteParentRefs) -> ParentRefSnap {
+    parent_ref_snap_from_route_fields(
+        p.group.clone(),
+        p.kind.clone(),
+        p.namespace.clone(),
+        p.name.clone(),
+        p.section_name.clone(),
+        p.port,
+    )
+}
+
+fn grpc_parent_ref_to_snap(p: &GrpcRouteParentRefs) -> ParentRefSnap {
+    parent_ref_snap_from_route_fields(
+        p.group.clone(),
+        p.kind.clone(),
+        p.namespace.clone(),
+        p.name.clone(),
+        p.section_name.clone(),
+        p.port,
+    )
+}
+
+fn tcp_parent_ref_to_snap(p: &TcpRouteParentRefs) -> ParentRefSnap {
+    parent_ref_snap_from_route_fields(
+        p.group.clone(),
+        p.kind.clone(),
+        p.namespace.clone(),
+        p.name.clone(),
+        p.section_name.clone(),
+        p.port,
+    )
+}
+
+fn udp_parent_ref_to_snap(p: &UdpRouteParentRefs) -> ParentRefSnap {
+    parent_ref_snap_from_route_fields(
+        p.group.clone(),
+        p.kind.clone(),
+        p.namespace.clone(),
+        p.name.clone(),
+        p.section_name.clone(),
+        p.port,
+    )
+}
+
+#[must_use]
+fn listenerset_parent_ref_to_snap(p: &ListenerSetParentRef) -> ParentRefSnap {
     ParentRefSnap {
         group: p.group.clone(),
         kind: p.kind.clone(),
         namespace: p.namespace.clone(),
         name: p.name.clone(),
-        section_name: p.section_name.clone(),
-        port: p.port,
+        section_name: None,
+        port: None,
     }
-}
-
-fn parent_to_snap(p: &ParentReferenceSpec) -> ParentRefSnap {
-    parent_reference_to_snap(p)
 }
 
 fn inference_pool_to_snap(ip: InferencePool) -> InferencePoolSnap {
@@ -102,33 +203,36 @@ fn inference_pool_to_snap(ip: InferencePool) -> InferencePoolSnap {
 fn allowed_snap_for_merge(gw: &Gateway) -> Option<AllowedListenersSnap> {
     let al = gw.spec.allowed_listeners.as_ref()?;
     let ns = al.namespaces.as_ref()?;
-    let from = ns.from.as_deref().unwrap_or("None");
-    if from == "None" || from.is_empty() {
+    let from = ns
+        .from
+        .as_ref()
+        .cloned()
+        .unwrap_or(GatewayAllowedListenersNamespacesFrom::None);
+    if matches!(from, GatewayAllowedListenersNamespacesFrom::None) {
         return None;
     }
     Some(AllowedListenersSnap {
         namespaces: Some(ListenerNamespacesSnap {
-            from: Some(from.to_string()),
+            from: Some(format!("{from:?}")),
             selector_match_labels: ns
                 .selector
                 .as_ref()
-                .map(|s| s.match_labels.clone())
+                .and_then(|s| s.match_labels.clone())
                 .unwrap_or_default(),
         }),
     })
 }
 
 fn listenerset_parents_gateway(ls: &ListenerSet, gw_ns: &str, gw_name: &str) -> bool {
+    let p = &ls.spec.parent_ref;
     let ls_ns_default = ls.metadata.namespace.as_deref().unwrap_or("");
-    ls.spec.parent_refs.iter().any(|p| {
-        let g = p.group.as_deref().unwrap_or("gateway.networking.k8s.io");
-        let k = p.kind.as_deref().unwrap_or("Gateway");
-        if g != "gateway.networking.k8s.io" || k != "Gateway" {
-            return false;
-        }
-        let pns = p.namespace.as_deref().unwrap_or(ls_ns_default);
-        pns == gw_ns && p.name == gw_name
-    })
+    let g = p.group.as_deref().unwrap_or("gateway.networking.k8s.io");
+    let k = p.kind.as_deref().unwrap_or("Gateway");
+    if g != "gateway.networking.k8s.io" || k != "Gateway" {
+        return false;
+    }
+    let pns = p.namespace.as_deref().unwrap_or(ls_ns_default);
+    pns == gw_ns && p.name == gw_name
 }
 
 async fn namespace_labels(
@@ -167,20 +271,28 @@ async fn listener_set_namespace_allowed(
     })
 }
 
-fn allowed_routes_snap(ar: &crate::resources::AllowedRoutesSpec) -> AllowedRoutesSnap {
+fn gateway_allowed_routes_namespaces_snap(
+    n: &GatewayListenersAllowedRoutesNamespaces,
+) -> AllowedRoutesNamespacesSnap {
+    AllowedRoutesNamespacesSnap {
+        from: n.from.as_ref().map(|f| format!("{f:?}")),
+        selector_match_labels: n
+            .selector
+            .as_ref()
+            .and_then(|s| s.match_labels.clone())
+            .unwrap_or_default(),
+    }
+}
+
+fn gateway_allowed_routes_snap(ar: &GatewayListenersAllowedRoutes) -> AllowedRoutesSnap {
     AllowedRoutesSnap {
-        namespaces: ar.namespaces.as_ref().map(|n| AllowedRoutesNamespacesSnap {
-            from: n.from.clone(),
-            selector_match_labels: n
-                .selector
-                .as_ref()
-                .map(|s| s.match_labels.clone())
-                .unwrap_or_default(),
-        }),
+        namespaces: ar.namespaces.as_ref().map(gateway_allowed_routes_namespaces_snap),
         kinds: ar
             .kinds
+            .as_deref()
+            .unwrap_or_default()
             .iter()
-            .map(|k| RouteGroupKindSnap {
+            .map(|k: &GatewayListenersAllowedRoutesKinds| RouteGroupKindSnap {
                 group: k.group.clone(),
                 kind: k.kind.clone(),
             })
@@ -188,33 +300,124 @@ fn allowed_routes_snap(ar: &crate::resources::AllowedRoutesSpec) -> AllowedRoute
     }
 }
 
-fn gateway_listener_to_snap(l: &crate::resources::GatewayListenerSpec) -> GatewayListenerSnap {
+fn listenerset_allowed_routes_namespaces_snap(
+    n: &ListenerSetListenersAllowedRoutesNamespaces,
+) -> AllowedRoutesNamespacesSnap {
+    AllowedRoutesNamespacesSnap {
+        from: n.from.as_ref().map(|f| format!("{f:?}")),
+        selector_match_labels: n
+            .selector
+            .as_ref()
+            .and_then(|s| s.match_labels.clone())
+            .unwrap_or_default(),
+    }
+}
+
+fn listenerset_allowed_routes_snap(ar: &ListenerSetListenersAllowedRoutes) -> AllowedRoutesSnap {
+    AllowedRoutesSnap {
+        namespaces: ar
+            .namespaces
+            .as_ref()
+            .map(listenerset_allowed_routes_namespaces_snap),
+        kinds: ar
+            .kinds
+            .as_deref()
+            .unwrap_or_default()
+            .iter()
+            .map(|k: &ListenerSetListenersAllowedRoutesKinds| RouteGroupKindSnap {
+                group: k.group.clone(),
+                kind: k.kind.clone(),
+            })
+            .collect(),
+    }
+}
+
+fn gateway_listener_to_snap(l: &GatewayListeners) -> GatewayListenerSnap {
     GatewayListenerSnap {
         name: l.name.clone(),
-        port: l.port,
+        port: snap_u16_port(Some(l.port)).unwrap_or(0),
         protocol: if l.protocol.is_empty() {
             "HTTP".into()
         } else {
             l.protocol.clone()
         },
         hostname: l.hostname.clone(),
-        allowed_routes: l.allowed_routes.as_ref().map(allowed_routes_snap),
-        tls: l.tls.as_ref().map(listener_tls_to_snap),
+        allowed_routes: l.allowed_routes.as_ref().map(gateway_allowed_routes_snap),
+        tls: l.tls.as_ref().map(listener_tls_gateway_to_snap),
     }
 }
 
-fn listener_tls_to_snap(t: &crate::resources::ListenerTlsSpec) -> GatewayListenerTlsSnap {
+fn listenerset_listener_to_snap(l: &ListenerSetListeners) -> GatewayListenerSnap {
+    GatewayListenerSnap {
+        name: l.name.clone(),
+        port: snap_u16_port(Some(l.port)).unwrap_or(0),
+        protocol: if l.protocol.is_empty() {
+            "HTTP".into()
+        } else {
+            l.protocol.clone()
+        },
+        hostname: l.hostname.clone(),
+        allowed_routes: l.allowed_routes.as_ref().map(listenerset_allowed_routes_snap),
+        tls: l.tls.as_ref().map(listener_tls_listenerset_to_snap),
+    }
+}
+
+fn tls_mode_gateway_str(mode: Option<GatewayListenersTlsMode>) -> Option<String> {
+    mode.map(|m| match m {
+        GatewayListenersTlsMode::Terminate => "Terminate".to_string(),
+        GatewayListenersTlsMode::Passthrough => "Passthrough".to_string(),
+    })
+}
+
+fn tls_mode_listenerset_str(mode: Option<ListenerSetListenersTlsMode>) -> Option<String> {
+    mode.map(|m| match m {
+        ListenerSetListenersTlsMode::Terminate => "Terminate".to_string(),
+        ListenerSetListenersTlsMode::Passthrough => "Passthrough".to_string(),
+    })
+}
+
+fn snap_from_gateway_cert_ref(r: &GatewayListenersTlsCertificateRefs) -> SecretObjectReferenceSnap {
+    SecretObjectReferenceSnap {
+        group: r.group.clone(),
+        kind: r.kind.clone(),
+        name: r.name.clone(),
+        namespace: r.namespace.clone(),
+    }
+}
+
+fn snap_from_listenerset_cert_ref(
+    r: &ListenerSetListenersTlsCertificateRefs,
+) -> SecretObjectReferenceSnap {
+    SecretObjectReferenceSnap {
+        group: r.group.clone(),
+        kind: r.kind.clone(),
+        name: r.name.clone(),
+        namespace: r.namespace.clone(),
+    }
+}
+
+fn listener_tls_gateway_to_snap(t: &GatewayListenersTls) -> GatewayListenerTlsSnap {
     GatewayListenerTlsSnap {
-        mode: t.mode.clone(),
+        mode: tls_mode_gateway_str(t.mode.clone()),
         certificate_refs: t
             .certificate_refs
+            .as_deref()
+            .unwrap_or_default()
             .iter()
-            .map(|r| SecretObjectReferenceSnap {
-                group: r.group.clone(),
-                kind: r.kind.clone(),
-                name: r.name.clone(),
-                namespace: r.namespace.clone(),
-            })
+            .map(snap_from_gateway_cert_ref)
+            .collect(),
+    }
+}
+
+fn listener_tls_listenerset_to_snap(t: &ListenerSetListenersTls) -> GatewayListenerTlsSnap {
+    GatewayListenerTlsSnap {
+        mode: tls_mode_listenerset_str(t.mode.clone()),
+        certificate_refs: t
+            .certificate_refs
+            .as_deref()
+            .unwrap_or_default()
+            .iter()
+            .map(snap_from_listenerset_cert_ref)
             .collect(),
     }
 }
@@ -325,10 +528,12 @@ async fn resolve_gateway_listener_tls(
     Ok(())
 }
 
-fn http_header_filter_snap(h: &crate::resources::HTTPHeaderFilterSpec) -> HttpHeaderFilterSnap {
+fn http_header_filter_snap(h: &HttpRouteRulesFiltersRequestHeaderModifier) -> HttpHeaderFilterSnap {
     HttpHeaderFilterSnap {
         set: h
             .set
+            .as_deref()
+            .unwrap_or_default()
             .iter()
             .map(|x| HttpHeaderNameValueSnap {
                 name: x.name.clone(),
@@ -337,33 +542,115 @@ fn http_header_filter_snap(h: &crate::resources::HTTPHeaderFilterSpec) -> HttpHe
             .collect(),
         add: h
             .add
+            .as_deref()
+            .unwrap_or_default()
             .iter()
             .map(|x| HttpHeaderNameValueSnap {
                 name: x.name.clone(),
                 value: x.value.clone(),
             })
             .collect(),
-        remove: h.remove.clone(),
+        remove: h.remove.clone().unwrap_or_default(),
     }
 }
 
-fn http_route_filter_snap(f: &crate::resources::HTTPRouteFilterSpec) -> HttpRouteFilterSnap {
+fn grpc_req_header_filter_snap(h: &GrpcRouteRulesFiltersRequestHeaderModifier) -> HttpHeaderFilterSnap {
+    HttpHeaderFilterSnap {
+        set: h
+            .set
+            .as_deref()
+            .unwrap_or_default()
+            .iter()
+            .map(|x| HttpHeaderNameValueSnap {
+                name: x.name.clone(),
+                value: x.value.clone(),
+            })
+            .collect(),
+        add: h
+            .add
+            .as_deref()
+            .unwrap_or_default()
+            .iter()
+            .map(|x| HttpHeaderNameValueSnap {
+                name: x.name.clone(),
+                value: x.value.clone(),
+            })
+            .collect(),
+        remove: h.remove.clone().unwrap_or_default(),
+    }
+}
+
+fn grpc_resp_header_filter_snap(
+    h: &GrpcRouteRulesFiltersResponseHeaderModifier,
+) -> HttpHeaderFilterSnap {
+    HttpHeaderFilterSnap {
+        set: h
+            .set
+            .as_deref()
+            .unwrap_or_default()
+            .iter()
+            .map(|x| HttpHeaderNameValueSnap {
+                name: x.name.clone(),
+                value: x.value.clone(),
+            })
+            .collect(),
+        add: h
+            .add
+            .as_deref()
+            .unwrap_or_default()
+            .iter()
+            .map(|x| HttpHeaderNameValueSnap {
+                name: x.name.clone(),
+                value: x.value.clone(),
+            })
+            .collect(),
+        remove: h.remove.clone().unwrap_or_default(),
+    }
+}
+
+fn http_route_filters_type_str(ty: &HttpRouteRulesFiltersType) -> &'static str {
+    match ty {
+        HttpRouteRulesFiltersType::RequestHeaderModifier => "RequestHeaderModifier",
+        HttpRouteRulesFiltersType::ResponseHeaderModifier => "ResponseHeaderModifier",
+        HttpRouteRulesFiltersType::RequestMirror => "RequestMirror",
+        HttpRouteRulesFiltersType::RequestRedirect => "RequestRedirect",
+        HttpRouteRulesFiltersType::UrlRewrite => "URLRewrite",
+        HttpRouteRulesFiltersType::ExtensionRef => "ExtensionRef",
+        HttpRouteRulesFiltersType::Cors => "CORS",
+    }
+}
+
+fn redirect_scheme_snap(sch: Option<&HttpRouteRulesFiltersRequestRedirectScheme>) -> Option<String> {
+    sch.map(|s| match s {
+        HttpRouteRulesFiltersRequestRedirectScheme::Http => "http".to_string(),
+        HttpRouteRulesFiltersRequestRedirectScheme::Https => "https".to_string(),
+    })
+}
+
+fn http_path_modifier_snap(p: &HttpRouteRulesFiltersRequestRedirectPath) -> HttpPathModifierSnap {
+    let modifier_type = match p.r#type {
+        HttpRouteRulesFiltersRequestRedirectPathType::ReplaceFullPath => "ReplaceFullPath",
+        HttpRouteRulesFiltersRequestRedirectPathType::ReplacePrefixMatch => "ReplacePrefixMatch",
+    };
+    HttpPathModifierSnap {
+        modifier_type: modifier_type.to_string(),
+        replace_full_path: p.replace_full_path.clone(),
+        replace_prefix_match: p.replace_prefix_match.clone(),
+    }
+}
+
+fn http_route_filter_snap(f: &HttpRouteRulesFilters) -> HttpRouteFilterSnap {
     HttpRouteFilterSnap {
-        filter_type: f.filter_type.clone(),
-        request_redirect: f
-            .request_redirect
-            .as_ref()
-            .map(|rr| HttpRequestRedirectFilterSnap {
-                scheme: rr.scheme.clone(),
-                hostname: rr.hostname.clone(),
-                port: rr.port,
-                status_code: rr.status_code,
-                path: rr.path.as_ref().map(|pm| HttpPathModifierSnap {
-                    modifier_type: pm.modifier_type.clone(),
-                    replace_full_path: pm.replace_full_path.clone(),
-                    replace_prefix_match: pm.replace_prefix_match.clone(),
-                }),
-            }),
+        filter_type: http_route_filters_type_str(&f.r#type).to_string(),
+        request_redirect: f.request_redirect.as_ref().map(|rr| HttpRequestRedirectFilterSnap {
+            scheme: redirect_scheme_snap(rr.scheme.as_ref()),
+            hostname: rr.hostname.clone(),
+            port: snap_u16_port(rr.port),
+            status_code: rr
+                .status_code
+                .and_then(|c| i32::try_from(c).ok()),
+            path: rr.path.as_ref().map(http_path_modifier_snap),
+        }),
         request_header_modifier: f
             .request_header_modifier
             .as_ref()
@@ -371,17 +658,50 @@ fn http_route_filter_snap(f: &crate::resources::HTTPRouteFilterSpec) -> HttpRout
     }
 }
 
-fn grpc_route_filter_snap(f: &crate::resources::GRPCRouteFilterSpec) -> GrpcRouteFilterSnap {
+fn grpc_route_filters_type_str(ty: &GrpcRouteRulesFiltersType) -> &'static str {
+    match ty {
+        GrpcRouteRulesFiltersType::ResponseHeaderModifier => "ResponseHeaderModifier",
+        GrpcRouteRulesFiltersType::RequestHeaderModifier => "RequestHeaderModifier",
+        GrpcRouteRulesFiltersType::RequestMirror => "RequestMirror",
+        GrpcRouteRulesFiltersType::ExtensionRef => "ExtensionRef",
+    }
+}
+
+fn grpc_route_filter_snap(f: &GrpcRouteRulesFilters) -> GrpcRouteFilterSnap {
     GrpcRouteFilterSnap {
-        filter_type: f.filter_type.clone(),
+        filter_type: grpc_route_filters_type_str(&f.r#type).to_string(),
         request_header_modifier: f
             .request_header_modifier
             .as_ref()
-            .map(http_header_filter_snap),
+            .map(grpc_req_header_filter_snap),
         response_header_modifier: f
             .response_header_modifier
             .as_ref()
-            .map(http_header_filter_snap),
+            .map(grpc_resp_header_filter_snap),
+    }
+}
+
+fn reference_grant_from_to_snap(f: ReferenceGrantFrom) -> ReferenceGrantFromSnap {
+    ReferenceGrantFromSnap {
+        group: if f.group.is_empty() {
+            None
+        } else {
+            Some(f.group)
+        },
+        kind: f.kind,
+        namespace: f.namespace,
+    }
+}
+
+fn reference_grant_to_snap_one(t: ReferenceGrantTo) -> ReferenceGrantToSnap {
+    ReferenceGrantToSnap {
+        group: if t.group.is_empty() {
+            None
+        } else {
+            Some(t.group)
+        },
+        kind: t.kind,
+        name: t.name,
     }
 }
 
@@ -392,22 +712,14 @@ fn reference_grant_to_snap(rg: ReferenceGrant) -> ReferenceGrantSnap {
         from: rg
             .spec
             .from
-            .iter()
-            .map(|f| ReferenceGrantFromSnap {
-                group: f.group.clone(),
-                kind: f.kind.clone(),
-                namespace: f.namespace.clone(),
-            })
+            .into_iter()
+            .map(reference_grant_from_to_snap)
             .collect(),
         to: rg
             .spec
             .to
-            .iter()
-            .map(|t| ReferenceGrantToSnap {
-                group: t.group.clone(),
-                kind: t.kind.clone(),
-                name: t.name.clone(),
-            })
+            .into_iter()
+            .map(reference_grant_to_snap_one)
             .collect(),
     }
 }
@@ -416,13 +728,15 @@ fn listenerset_to_snap(ls: ListenerSet) -> ListenerSetSnap {
     let ns = ls.metadata.namespace.unwrap_or_default();
     let name = ls.metadata.name.unwrap_or_default();
     let uid = ls.metadata.uid.unwrap_or_default();
-    let creation_timestamp_rfc3339 = ls.metadata.creation_timestamp.map(|t| t.0.to_rfc3339());
-    let parent_refs = ls.spec.parent_refs.iter().map(parent_to_snap).collect();
+    let creation_timestamp_rfc3339 = ls.metadata.creation_timestamp.map(|t| t.0.to_string());
+    let parent_refs = vec![listenerset_parent_ref_to_snap(&ls.spec.parent_ref)];
+    let mut seen_names = HashSet::new();
     let listeners = ls
         .spec
         .listeners
         .iter()
-        .map(gateway_listener_to_snap)
+        .filter(|l| seen_names.insert(l.name.clone()))
+        .map(listenerset_listener_to_snap)
         .collect();
     ListenerSetSnap {
         namespace: ns,
@@ -434,51 +748,164 @@ fn listenerset_to_snap(ls: ListenerSet) -> ListenerSetSnap {
     }
 }
 
-fn route_attaches_to_gateway_parent(
-    p: &ParentReferenceSpec,
+fn route_attaches_to_gateway_parent_fields(
+    group: Option<&str>,
+    kind: Option<&str>,
+    namespace: Option<&str>,
+    name: &str,
     route_namespace: Option<&str>,
     gw_ns: &str,
     gw_name: &str,
 ) -> bool {
-    let g = p.group.as_deref().unwrap_or("gateway.networking.k8s.io");
-    let k = p.kind.as_deref().unwrap_or("Gateway");
+    let g = group.unwrap_or("gateway.networking.k8s.io");
+    let k = kind.unwrap_or("Gateway");
     if g != "gateway.networking.k8s.io" || k != "Gateway" {
         return false;
     }
-    let pns = p.namespace.as_deref().or(route_namespace).unwrap_or("");
-    pns == gw_ns && p.name == gw_name
+    let pns = namespace.or(route_namespace).unwrap_or("");
+    pns == gw_ns && name == gw_name
 }
 
-fn route_attaches_to_listener_set_parent(
-    p: &ParentReferenceSpec,
+fn route_attaches_to_listener_set_parent_fields(
+    group: Option<&str>,
+    kind: Option<&str>,
+    namespace: Option<&str>,
+    name: &str,
     route_namespace: Option<&str>,
     attached_ls: &HashSet<(String, String)>,
 ) -> bool {
-    let g = p.group.as_deref().unwrap_or("gateway.networking.k8s.io");
-    let k = p.kind.as_deref().unwrap_or("ListenerSet");
+    let g = group.unwrap_or("gateway.networking.k8s.io");
+    let k = kind.unwrap_or("ListenerSet");
     if g != "gateway.networking.k8s.io" || k != "ListenerSet" {
         return false;
     }
-    let ls_ns = p
-        .namespace
-        .as_deref()
-        .or(route_namespace)
-        .unwrap_or_default()
-        .to_string();
-    attached_ls.contains(&(ls_ns, p.name.clone()))
+    let ls_ns = namespace.or(route_namespace).unwrap_or_default().to_string();
+    attached_ls.contains(&(ls_ns, name.to_string()))
 }
 
-fn route_relevant_to_gateway_refs(
-    parent_refs: &[ParentReferenceSpec],
+fn route_parent_relevant_http(
+    p: &HttpRouteParentRefs,
     route_namespace: Option<&str>,
     gw_ns: &str,
     gw_name: &str,
     attached_ls: &HashSet<(String, String)>,
 ) -> bool {
-    parent_refs.iter().any(|p| {
-        route_attaches_to_gateway_parent(p, route_namespace, gw_ns, gw_name)
-            || route_attaches_to_listener_set_parent(p, route_namespace, attached_ls)
-    })
+    route_attaches_to_gateway_parent_fields(
+        p.group.as_deref(),
+        p.kind.as_deref(),
+        p.namespace.as_deref(),
+        &p.name,
+        route_namespace,
+        gw_ns,
+        gw_name,
+    ) || route_attaches_to_listener_set_parent_fields(
+        p.group.as_deref(),
+        p.kind.as_deref(),
+        p.namespace.as_deref(),
+        &p.name,
+        route_namespace,
+        attached_ls,
+    )
+}
+
+fn route_parent_relevant_tls(
+    p: &TlsRouteParentRefs,
+    route_namespace: Option<&str>,
+    gw_ns: &str,
+    gw_name: &str,
+    attached_ls: &HashSet<(String, String)>,
+) -> bool {
+    route_attaches_to_gateway_parent_fields(
+        p.group.as_deref(),
+        p.kind.as_deref(),
+        p.namespace.as_deref(),
+        &p.name,
+        route_namespace,
+        gw_ns,
+        gw_name,
+    ) || route_attaches_to_listener_set_parent_fields(
+        p.group.as_deref(),
+        p.kind.as_deref(),
+        p.namespace.as_deref(),
+        &p.name,
+        route_namespace,
+        attached_ls,
+    )
+}
+
+fn route_parent_relevant_grpc(
+    p: &GrpcRouteParentRefs,
+    route_namespace: Option<&str>,
+    gw_ns: &str,
+    gw_name: &str,
+    attached_ls: &HashSet<(String, String)>,
+) -> bool {
+    route_attaches_to_gateway_parent_fields(
+        p.group.as_deref(),
+        p.kind.as_deref(),
+        p.namespace.as_deref(),
+        &p.name,
+        route_namespace,
+        gw_ns,
+        gw_name,
+    ) || route_attaches_to_listener_set_parent_fields(
+        p.group.as_deref(),
+        p.kind.as_deref(),
+        p.namespace.as_deref(),
+        &p.name,
+        route_namespace,
+        attached_ls,
+    )
+}
+
+fn route_parent_relevant_tcp(
+    p: &TcpRouteParentRefs,
+    route_namespace: Option<&str>,
+    gw_ns: &str,
+    gw_name: &str,
+    attached_ls: &HashSet<(String, String)>,
+) -> bool {
+    route_attaches_to_gateway_parent_fields(
+        p.group.as_deref(),
+        p.kind.as_deref(),
+        p.namespace.as_deref(),
+        &p.name,
+        route_namespace,
+        gw_ns,
+        gw_name,
+    ) || route_attaches_to_listener_set_parent_fields(
+        p.group.as_deref(),
+        p.kind.as_deref(),
+        p.namespace.as_deref(),
+        &p.name,
+        route_namespace,
+        attached_ls,
+    )
+}
+
+fn route_parent_relevant_udp(
+    p: &UdpRouteParentRefs,
+    route_namespace: Option<&str>,
+    gw_ns: &str,
+    gw_name: &str,
+    attached_ls: &HashSet<(String, String)>,
+) -> bool {
+    route_attaches_to_gateway_parent_fields(
+        p.group.as_deref(),
+        p.kind.as_deref(),
+        p.namespace.as_deref(),
+        &p.name,
+        route_namespace,
+        gw_ns,
+        gw_name,
+    ) || route_attaches_to_listener_set_parent_fields(
+        p.group.as_deref(),
+        p.kind.as_deref(),
+        p.namespace.as_deref(),
+        &p.name,
+        route_namespace,
+        attached_ls,
+    )
 }
 
 fn route_relevant_to_gateway(
@@ -487,13 +914,21 @@ fn route_relevant_to_gateway(
     gw_name: &str,
     attached_ls: &HashSet<(String, String)>,
 ) -> bool {
-    route_relevant_to_gateway_refs(
-        &route.spec.parent_refs,
-        route.metadata.namespace.as_deref(),
-        gw_ns,
-        gw_name,
-        attached_ls,
-    )
+    route
+        .spec
+        .parent_refs
+        .as_deref()
+        .unwrap_or_default()
+        .iter()
+        .any(|p| {
+            route_parent_relevant_http(
+                p,
+                route.metadata.namespace.as_deref(),
+                gw_ns,
+                gw_name,
+                attached_ls,
+            )
+        })
 }
 
 fn grpc_route_relevant_to_gateway(
@@ -502,13 +937,21 @@ fn grpc_route_relevant_to_gateway(
     gw_name: &str,
     attached_ls: &HashSet<(String, String)>,
 ) -> bool {
-    route_relevant_to_gateway_refs(
-        &route.spec.parent_refs,
-        route.metadata.namespace.as_deref(),
-        gw_ns,
-        gw_name,
-        attached_ls,
-    )
+    route
+        .spec
+        .parent_refs
+        .as_deref()
+        .unwrap_or_default()
+        .iter()
+        .any(|p| {
+            route_parent_relevant_grpc(
+                p,
+                route.metadata.namespace.as_deref(),
+                gw_ns,
+                gw_name,
+                attached_ls,
+            )
+        })
 }
 
 fn tls_route_relevant_to_gateway(
@@ -517,13 +960,21 @@ fn tls_route_relevant_to_gateway(
     gw_name: &str,
     attached_ls: &HashSet<(String, String)>,
 ) -> bool {
-    route_relevant_to_gateway_refs(
-        &route.spec.parent_refs,
-        route.metadata.namespace.as_deref(),
-        gw_ns,
-        gw_name,
-        attached_ls,
-    )
+    route
+        .spec
+        .parent_refs
+        .as_deref()
+        .unwrap_or_default()
+        .iter()
+        .any(|p| {
+            route_parent_relevant_tls(
+                p,
+                route.metadata.namespace.as_deref(),
+                gw_ns,
+                gw_name,
+                attached_ls,
+            )
+        })
 }
 
 fn tcp_route_relevant_to_gateway(
@@ -532,13 +983,21 @@ fn tcp_route_relevant_to_gateway(
     gw_name: &str,
     attached_ls: &HashSet<(String, String)>,
 ) -> bool {
-    route_relevant_to_gateway_refs(
-        &route.spec.parent_refs,
-        route.metadata.namespace.as_deref(),
-        gw_ns,
-        gw_name,
-        attached_ls,
-    )
+    route
+        .spec
+        .parent_refs
+        .as_deref()
+        .unwrap_or_default()
+        .iter()
+        .any(|p| {
+            route_parent_relevant_tcp(
+                p,
+                route.metadata.namespace.as_deref(),
+                gw_ns,
+                gw_name,
+                attached_ls,
+            )
+        })
 }
 
 fn udp_route_relevant_to_gateway(
@@ -547,13 +1006,97 @@ fn udp_route_relevant_to_gateway(
     gw_name: &str,
     attached_ls: &HashSet<(String, String)>,
 ) -> bool {
-    route_relevant_to_gateway_refs(
-        &route.spec.parent_refs,
-        route.metadata.namespace.as_deref(),
-        gw_ns,
-        gw_name,
-        attached_ls,
-    )
+    route
+        .spec
+        .parent_refs
+        .as_deref()
+        .unwrap_or_default()
+        .iter()
+        .any(|p| {
+            route_parent_relevant_udp(
+                p,
+                route.metadata.namespace.as_deref(),
+                gw_ns,
+                gw_name,
+                attached_ls,
+            )
+        })
+}
+
+fn http_path_match_type_str(ty: Option<&HttpRouteRulesMatchesPathType>) -> Option<String> {
+    ty.map(|t| format!("{t:?}"))
+}
+
+fn http_header_match_type_str(ty: Option<&HttpRouteRulesMatchesHeadersType>) -> Option<String> {
+    ty.map(|t| format!("{t:?}"))
+}
+
+fn grpc_header_match_type_str(ty: Option<&GrpcRouteRulesMatchesHeadersType>) -> Option<String> {
+    ty.map(|t| format!("{t:?}"))
+}
+
+fn grpc_method_match_type_str(ty: Option<&GrpcRouteRulesMatchesMethodType>) -> Option<String> {
+    ty.map(|t| format!("{t:?}"))
+}
+
+fn http_backend_ref_to_snap(b: &HttpRouteRulesBackendRefs) -> HttpBackendRefSnap {
+    HttpBackendRefSnap {
+        group: b.group.clone(),
+        kind: b.kind.clone(),
+        namespace: b.namespace.clone(),
+        name: b.name.clone(),
+        port: snap_u16_port(b.port),
+        port_name: None,
+        weight: snap_nonnegative_weight(b.weight),
+    }
+}
+
+fn grpc_backend_ref_to_snap(b: &GrpcRouteRulesBackendRefs) -> HttpBackendRefSnap {
+    HttpBackendRefSnap {
+        group: b.group.clone(),
+        kind: b.kind.clone(),
+        namespace: b.namespace.clone(),
+        name: b.name.clone(),
+        port: snap_u16_port(b.port),
+        port_name: None,
+        weight: snap_nonnegative_weight(b.weight),
+    }
+}
+
+fn tls_backend_ref_to_snap(b: &TlsRouteRulesBackendRefs) -> HttpBackendRefSnap {
+    HttpBackendRefSnap {
+        group: b.group.clone(),
+        kind: b.kind.clone(),
+        namespace: b.namespace.clone(),
+        name: b.name.clone(),
+        port: snap_u16_port(b.port),
+        port_name: None,
+        weight: snap_nonnegative_weight(b.weight),
+    }
+}
+
+fn tcp_backend_ref_to_snap(b: &TcpRouteRulesBackendRefs) -> HttpBackendRefSnap {
+    HttpBackendRefSnap {
+        group: b.group.clone(),
+        kind: b.kind.clone(),
+        namespace: b.namespace.clone(),
+        name: b.name.clone(),
+        port: snap_u16_port(b.port),
+        port_name: None,
+        weight: snap_nonnegative_weight(b.weight),
+    }
+}
+
+fn udp_backend_ref_to_snap(b: &UdpRouteRulesBackendRefs) -> HttpBackendRefSnap {
+    HttpBackendRefSnap {
+        group: b.group.clone(),
+        kind: b.kind.clone(),
+        namespace: b.namespace.clone(),
+        name: b.name.clone(),
+        port: snap_u16_port(b.port),
+        port_name: None,
+        weight: snap_nonnegative_weight(b.weight),
+    }
 }
 
 fn http_route_to_snap(route: &HTTPRoute) -> HttpRouteSnap {
@@ -562,44 +1105,50 @@ fn http_route_to_snap(route: &HTTPRoute) -> HttpRouteSnap {
         .metadata
         .creation_timestamp
         .as_ref()
-        .map(|t| t.0.to_rfc3339());
+        .map(|t| t.0.to_string());
     let rules: Vec<HttpRouteRuleSnap> = route
         .spec
         .rules
+        .as_deref()
+        .unwrap_or_default()
         .iter()
-        .map(|r| HttpRouteRuleSnap {
+        .map(|r: &HttpRouteRules| HttpRouteRuleSnap {
             matches: r
                 .matches
+                .as_deref()
+                .unwrap_or_default()
                 .iter()
-                .map(|m| HttpRequestMatchSnap {
+                .map(|m: &HttpRouteRulesMatches| HttpRequestMatchSnap {
                     path: m.path.as_ref().map(|p| HttpPathMatchSnap {
-                        path_type: p.path_type.clone(),
+                        path_type: http_path_match_type_str(p.r#type.as_ref()),
                         value: p.value.clone(),
                     }),
                     headers: m
                         .headers
+                        .as_deref()
+                        .unwrap_or_default()
                         .iter()
-                        .map(|h| HttpHeaderMatchSnap {
-                            match_type: h.match_type.clone(),
+                        .map(|h: &HttpRouteRulesMatchesHeaders| HttpHeaderMatchSnap {
+                            match_type: http_header_match_type_str(h.r#type.as_ref()),
                             name: h.name.clone(),
                             value: h.value.clone(),
                         })
                         .collect(),
                 })
                 .collect(),
-            filters: r.filters.iter().map(http_route_filter_snap).collect(),
+            filters: r
+                .filters
+                .as_deref()
+                .unwrap_or_default()
+                .iter()
+                .map(http_route_filter_snap)
+                .collect(),
             backend_refs: r
                 .backend_refs
+                .as_deref()
+                .unwrap_or_default()
                 .iter()
-                .map(|b| HttpBackendRefSnap {
-                    group: b.group.clone(),
-                    kind: b.kind.clone(),
-                    namespace: b.namespace.clone(),
-                    name: b.name.clone(),
-                    port: b.port,
-                    port_name: b.port_name.clone(),
-                    weight: b.weight,
-                })
+                .map(http_backend_ref_to_snap)
                 .collect(),
         })
         .collect();
@@ -609,8 +1158,15 @@ fn http_route_to_snap(route: &HTTPRoute) -> HttpRouteSnap {
         name: route.metadata.name.clone().unwrap_or_default(),
         generation: gen,
         creation_timestamp_rfc3339,
-        parent_refs: route.spec.parent_refs.iter().map(parent_to_snap).collect(),
-        hostnames: route.spec.hostnames.clone(),
+        parent_refs: route
+            .spec
+            .parent_refs
+            .as_deref()
+            .unwrap_or_default()
+            .iter()
+            .map(parent_reference_to_snap)
+            .collect(),
+        hostnames: route.spec.hostnames.clone().unwrap_or_default(),
         rules,
     }
 }
@@ -621,45 +1177,51 @@ fn grpc_route_to_snap(route: &GRPCRoute) -> GrpcRouteSnap {
         .metadata
         .creation_timestamp
         .as_ref()
-        .map(|t| t.0.to_rfc3339());
+        .map(|t| t.0.to_string());
     let rules: Vec<GrpcRouteRuleSnap> = route
         .spec
         .rules
+        .as_deref()
+        .unwrap_or_default()
         .iter()
-        .map(|r| GrpcRouteRuleSnap {
+        .map(|r: &GrpcRouteRules| GrpcRouteRuleSnap {
             matches: r
                 .matches
+                .as_deref()
+                .unwrap_or_default()
                 .iter()
-                .map(|m| GrpcRouteMatchSnap {
+                .map(|m: &GrpcRouteRulesMatches| GrpcRouteMatchSnap {
                     method: m.method.as_ref().map(|mm| GrpcMethodMatchSnap {
-                        match_type: mm.match_type.clone(),
+                        match_type: grpc_method_match_type_str(mm.r#type.as_ref()),
                         service: mm.service.clone(),
                         method: mm.method.clone(),
                     }),
                     headers: m
                         .headers
+                        .as_deref()
+                        .unwrap_or_default()
                         .iter()
-                        .map(|h| GrpcHeaderMatchSnap {
-                            match_type: h.match_type.clone(),
+                        .map(|h: &GrpcRouteRulesMatchesHeaders| GrpcHeaderMatchSnap {
+                            match_type: grpc_header_match_type_str(h.r#type.as_ref()),
                             name: h.name.clone(),
                             value: h.value.clone(),
                         })
                         .collect(),
                 })
                 .collect(),
-            filters: r.filters.iter().map(grpc_route_filter_snap).collect(),
+            filters: r
+                .filters
+                .as_deref()
+                .unwrap_or_default()
+                .iter()
+                .map(grpc_route_filter_snap)
+                .collect(),
             backend_refs: r
                 .backend_refs
+                .as_deref()
+                .unwrap_or_default()
                 .iter()
-                .map(|b| HttpBackendRefSnap {
-                    group: b.group.clone(),
-                    kind: b.kind.clone(),
-                    namespace: b.namespace.clone(),
-                    name: b.name.clone(),
-                    port: b.port,
-                    port_name: b.port_name.clone(),
-                    weight: b.weight,
-                })
+                .map(grpc_backend_ref_to_snap)
                 .collect(),
         })
         .collect();
@@ -669,8 +1231,15 @@ fn grpc_route_to_snap(route: &GRPCRoute) -> GrpcRouteSnap {
         name: route.metadata.name.clone().unwrap_or_default(),
         generation: gen,
         creation_timestamp_rfc3339,
-        parent_refs: route.spec.parent_refs.iter().map(parent_to_snap).collect(),
-        hostnames: route.spec.hostnames.clone(),
+        parent_refs: route
+            .spec
+            .parent_refs
+            .as_deref()
+            .unwrap_or_default()
+            .iter()
+            .map(grpc_parent_ref_to_snap)
+            .collect(),
+        hostnames: route.spec.hostnames.clone().unwrap_or_default(),
         rules,
     }
 }
@@ -681,24 +1250,16 @@ fn tls_route_to_snap(route: &TLSRoute) -> TlsRouteSnap {
         .metadata
         .creation_timestamp
         .as_ref()
-        .map(|t| t.0.to_rfc3339());
+        .map(|t| t.0.to_string());
     let rules: Vec<TlsRouteRuleSnap> = route
         .spec
         .rules
         .iter()
-        .map(|r| TlsRouteRuleSnap {
+        .map(|r: &TlsRouteRules| TlsRouteRuleSnap {
             backend_refs: r
                 .backend_refs
                 .iter()
-                .map(|b| HttpBackendRefSnap {
-                    group: b.group.clone(),
-                    kind: b.kind.clone(),
-                    namespace: b.namespace.clone(),
-                    name: b.name.clone(),
-                    port: b.port,
-                    port_name: b.port_name.clone(),
-                    weight: b.weight,
-                })
+                .map(tls_backend_ref_to_snap)
                 .collect(),
         })
         .collect();
@@ -708,7 +1269,14 @@ fn tls_route_to_snap(route: &TLSRoute) -> TlsRouteSnap {
         name: route.metadata.name.clone().unwrap_or_default(),
         generation: gen,
         creation_timestamp_rfc3339,
-        parent_refs: route.spec.parent_refs.iter().map(parent_to_snap).collect(),
+        parent_refs: route
+            .spec
+            .parent_refs
+            .as_deref()
+            .unwrap_or_default()
+            .iter()
+            .map(tls_parent_ref_to_snap)
+            .collect(),
         hostnames: route.spec.hostnames.clone(),
         rules,
     }
@@ -720,24 +1288,16 @@ fn tcp_route_to_snap(route: &TCPRoute) -> TcpRouteSnap {
         .metadata
         .creation_timestamp
         .as_ref()
-        .map(|t| t.0.to_rfc3339());
+        .map(|t| t.0.to_string());
     let rules: Vec<TcpRouteRuleSnap> = route
         .spec
         .rules
         .iter()
-        .map(|r| TcpRouteRuleSnap {
+        .map(|r: &TcpRouteRules| TcpRouteRuleSnap {
             backend_refs: r
                 .backend_refs
                 .iter()
-                .map(|b| HttpBackendRefSnap {
-                    group: b.group.clone(),
-                    kind: b.kind.clone(),
-                    namespace: b.namespace.clone(),
-                    name: b.name.clone(),
-                    port: b.port,
-                    port_name: b.port_name.clone(),
-                    weight: b.weight,
-                })
+                .map(tcp_backend_ref_to_snap)
                 .collect(),
         })
         .collect();
@@ -747,7 +1307,14 @@ fn tcp_route_to_snap(route: &TCPRoute) -> TcpRouteSnap {
         name: route.metadata.name.clone().unwrap_or_default(),
         generation: gen,
         creation_timestamp_rfc3339,
-        parent_refs: route.spec.parent_refs.iter().map(parent_to_snap).collect(),
+        parent_refs: route
+            .spec
+            .parent_refs
+            .as_deref()
+            .unwrap_or_default()
+            .iter()
+            .map(tcp_parent_ref_to_snap)
+            .collect(),
         rules,
     }
 }
@@ -758,24 +1325,16 @@ fn udp_route_to_snap(route: &UDPRoute) -> UdpRouteSnap {
         .metadata
         .creation_timestamp
         .as_ref()
-        .map(|t| t.0.to_rfc3339());
+        .map(|t| t.0.to_string());
     let rules: Vec<UdpRouteRuleSnap> = route
         .spec
         .rules
         .iter()
-        .map(|r| UdpRouteRuleSnap {
+        .map(|r: &UdpRouteRules| UdpRouteRuleSnap {
             backend_refs: r
                 .backend_refs
                 .iter()
-                .map(|b| HttpBackendRefSnap {
-                    group: b.group.clone(),
-                    kind: b.kind.clone(),
-                    namespace: b.namespace.clone(),
-                    name: b.name.clone(),
-                    port: b.port,
-                    port_name: b.port_name.clone(),
-                    weight: b.weight,
-                })
+                .map(udp_backend_ref_to_snap)
                 .collect(),
         })
         .collect();
@@ -785,7 +1344,14 @@ fn udp_route_to_snap(route: &UDPRoute) -> UdpRouteSnap {
         name: route.metadata.name.clone().unwrap_or_default(),
         generation: gen,
         creation_timestamp_rfc3339,
-        parent_refs: route.spec.parent_refs.iter().map(parent_to_snap).collect(),
+        parent_refs: route
+            .spec
+            .parent_refs
+            .as_deref()
+            .unwrap_or_default()
+            .iter()
+            .map(udp_parent_ref_to_snap)
+            .collect(),
         rules,
     }
 }
@@ -881,7 +1447,7 @@ pub async fn load_cluster_snapshot(
         ns_for_labels.insert(rns.clone());
 
         let snap = http_route_to_snap(&item);
-        for rule in &item.spec.rules {
+        for rule in item.spec.rules.as_deref().unwrap_or_default() {
             for (sns, sname) in crate::resources::collect_http_route_rule_service_refs(&rns, rule) {
                 ns_for_labels.insert(sns.clone());
                 needed_services.push((sns, sname));
@@ -913,7 +1479,7 @@ pub async fn load_cluster_snapshot(
                     ns_for_labels.insert(rns.clone());
 
                     let snap = grpc_route_to_snap(&item);
-                    for rule in &item.spec.rules {
+                    for rule in item.spec.rules.as_deref().unwrap_or_default() {
                         for (sns, sname) in
                             crate::resources::collect_grpc_route_rule_service_refs(&rns, rule)
                         {
@@ -957,17 +1523,15 @@ pub async fn load_cluster_snapshot(
 
                     let snap = tls_route_to_snap(&item);
                     for rule in &item.spec.rules {
-                        for (sns, sname) in crate::resources::collect_backend_refs_service_refs(
-                            &rns,
-                            &rule.backend_refs,
-                        ) {
+                        for (sns, sname) in
+                            crate::resources::collect_tls_route_rule_service_refs(&rns, rule)
+                        {
                             ns_for_labels.insert(sns.clone());
                             needed_services.push((sns, sname));
                         }
                         for (pns, pname) in
-                            crate::resources::collect_backend_refs_inference_pool_refs(
-                                &rns,
-                                &rule.backend_refs,
+                            crate::resources::collect_tls_route_rule_inference_pool_refs(
+                                &rns, rule,
                             )
                         {
                             ns_for_labels.insert(pns.clone());
@@ -1004,17 +1568,15 @@ pub async fn load_cluster_snapshot(
 
                     let snap = tcp_route_to_snap(&item);
                     for rule in &item.spec.rules {
-                        for (sns, sname) in crate::resources::collect_backend_refs_service_refs(
-                            &rns,
-                            &rule.backend_refs,
-                        ) {
+                        for (sns, sname) in
+                            crate::resources::collect_tcp_route_rule_service_refs(&rns, rule)
+                        {
                             ns_for_labels.insert(sns.clone());
                             needed_services.push((sns, sname));
                         }
                         for (pns, pname) in
-                            crate::resources::collect_backend_refs_inference_pool_refs(
-                                &rns,
-                                &rule.backend_refs,
+                            crate::resources::collect_tcp_route_rule_inference_pool_refs(
+                                &rns, rule,
                             )
                         {
                             ns_for_labels.insert(pns.clone());
@@ -1051,17 +1613,15 @@ pub async fn load_cluster_snapshot(
 
                     let snap = udp_route_to_snap(&item);
                     for rule in &item.spec.rules {
-                        for (sns, sname) in crate::resources::collect_backend_refs_service_refs(
-                            &rns,
-                            &rule.backend_refs,
-                        ) {
+                        for (sns, sname) in
+                            crate::resources::collect_udp_route_rule_service_refs(&rns, rule)
+                        {
                             ns_for_labels.insert(sns.clone());
                             needed_services.push((sns, sname));
                         }
                         for (pns, pname) in
-                            crate::resources::collect_backend_refs_inference_pool_refs(
-                                &rns,
-                                &rule.backend_refs,
+                            crate::resources::collect_udp_route_rule_inference_pool_refs(
+                                &rns, rule,
                             )
                         {
                             ns_for_labels.insert(pns.clone());
@@ -1266,16 +1826,18 @@ pub async fn load_cluster_snapshot(
         gateway_addresses: gw
             .spec
             .addresses
+            .as_deref()
+            .unwrap_or_default()
             .iter()
             .map(|a| GatewayAddressSnap {
-                type_: a.type_.clone(),
-                value: a.value.clone(),
+                type_: a.r#type.clone(),
+                value: a.value.clone().unwrap_or_default(),
             })
             .collect(),
         gateway_infrastructure: gw.spec.infrastructure.as_ref().map(|inf| {
             GatewayInfrastructureSnap {
-                labels: inf.labels.clone(),
-                annotations: inf.annotations.clone(),
+                labels: inf.labels.clone().unwrap_or_default(),
+                annotations: inf.annotations.clone().unwrap_or_default(),
             }
         }),
         listeners,

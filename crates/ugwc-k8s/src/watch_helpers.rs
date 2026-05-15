@@ -2,66 +2,103 @@
 
 use std::collections::HashSet;
 
+use gateway_api::{
+    experimental::tcproutes::TcpRouteParentRefs, experimental::udproutes::UdpRouteParentRefs,
+    grpcroutes::GrpcRouteParentRefs, httproutes::HttpRouteParentRefs, listenersets::ListenerSetParentRef,
+    tlsroutes::TlsRouteParentRefs,
+};
 use kube::{Api, Client, ResourceExt};
 use kube::api::ListParams;
 
 use crate::resources::{
     backend_tls_policy_targets_inference_pool, backend_tls_policy_targets_service, BackendTLSPolicy,
-    GRPCRoute, HTTPRoute, ListenerSet, ParentReferenceSpec, TCPRoute, TLSRoute, UDPRoute,
+    GRPCRoute, HTTPRoute, ListenerSet, TCPRoute, TLSRoute, UDPRoute,
 };
 
-pub(crate) fn is_gateway_parent(p: &crate::resources::ParentReferenceSpec) -> bool {
-    let g = p.group.as_deref().unwrap_or("gateway.networking.k8s.io");
-    let k = p.kind.as_deref().unwrap_or("Gateway");
+/// Common accessors for Gateway API route `parentRefs` entries and [`ListenerSetParentRef`].
+pub(crate) trait ParentRefLike {
+    fn group(&self) -> Option<&str>;
+    fn kind(&self) -> Option<&str>;
+    fn name(&self) -> &str;
+    fn namespace(&self) -> Option<&str>;
+}
+
+macro_rules! impl_parent_ref_like {
+    ($($t:ty),* $(,)?) => {$(
+        impl ParentRefLike for $t {
+            fn group(&self) -> Option<&str> {
+                self.group.as_deref()
+            }
+            fn kind(&self) -> Option<&str> {
+                self.kind.as_deref()
+            }
+            fn name(&self) -> &str {
+                &self.name
+            }
+            fn namespace(&self) -> Option<&str> {
+                self.namespace.as_deref()
+            }
+        }
+    )*};
+}
+
+impl_parent_ref_like!(
+    HttpRouteParentRefs,
+    GrpcRouteParentRefs,
+    TlsRouteParentRefs,
+    TcpRouteParentRefs,
+    UdpRouteParentRefs,
+    ListenerSetParentRef,
+);
+
+pub(crate) fn is_gateway_parent<P: ParentRefLike + ?Sized>(p: &P) -> bool {
+    let g = p.group().unwrap_or("gateway.networking.k8s.io");
+    let k = p.kind().unwrap_or("Gateway");
     g == "gateway.networking.k8s.io" && k == "Gateway"
 }
 
-pub(crate) fn is_listenerset_parent(p: &crate::resources::ParentReferenceSpec) -> bool {
-    let g = p.group.as_deref().unwrap_or("gateway.networking.k8s.io");
-    let k = p.kind.as_deref().unwrap_or("ListenerSet");
+pub(crate) fn is_listenerset_parent<P: ParentRefLike + ?Sized>(p: &P) -> bool {
+    let g = p.group().unwrap_or("gateway.networking.k8s.io");
+    let k = p.kind().unwrap_or("ListenerSet");
     g == "gateway.networking.k8s.io" && k == "ListenerSet"
 }
 
-pub(crate) async fn gateway_targets_from_parent_refs(
+pub(crate) async fn gateway_targets_from_parent_refs<P: ParentRefLike>(
     client: &Client,
     route_namespace: Option<String>,
     route_log_name: &str,
-    parent_refs: &[ParentReferenceSpec],
+    parent_refs: &[P],
 ) -> HashSet<(String, String)> {
     let mut targets = HashSet::new();
     for p in parent_refs {
         if is_gateway_parent(p) {
             let pns = p
-                .namespace
-                .clone()
+                .namespace()
+                .map(str::to_owned)
                 .or_else(|| route_namespace.clone())
                 .unwrap_or_default();
-            targets.insert((pns, p.name.clone()));
+            targets.insert((pns, p.name().to_owned()));
             continue;
         }
         if !is_listenerset_parent(p) {
             continue;
         }
         let ls_ns = p
-            .namespace
-            .clone()
+            .namespace()
+            .map(str::to_owned)
             .or_else(|| route_namespace.clone())
             .unwrap_or_default();
         let ls_api: Api<ListenerSet> = Api::namespaced(client.clone(), &ls_ns);
-        match ls_api.get(&p.name).await {
+        match ls_api.get(p.name()).await {
             Ok(ls) => {
-                for pr in &ls.spec.parent_refs {
-                    let pg = pr.group.as_deref().unwrap_or("gateway.networking.k8s.io");
-                    let pk = pr.kind.as_deref().unwrap_or("Gateway");
-                    if pg != "gateway.networking.k8s.io" || pk != "Gateway" {
-                        continue;
-                    }
+                let pr = &ls.spec.parent_ref;
+                if is_gateway_parent(pr) {
                     let gwns = pr
-                        .namespace
-                        .clone()
+                        .namespace()
+                        .map(str::to_owned)
                         .or(ls.metadata.namespace.clone())
                         .unwrap_or_default();
-                    targets.insert((gwns, pr.name.clone()));
+                    targets.insert((gwns, pr.name().to_owned()));
                 }
             }
             Err(e) => {
@@ -84,7 +121,7 @@ pub(crate) async fn gateway_targets_for_route(
         client,
         route.metadata.namespace.clone(),
         route.name_any().as_ref(),
-        &route.spec.parent_refs,
+        route.spec.parent_refs.as_deref().unwrap_or(&[]),
     )
     .await
 }
@@ -97,7 +134,7 @@ pub(crate) async fn gateway_targets_for_grpc_route(
         client,
         route.metadata.namespace.clone(),
         route.name_any().as_ref(),
-        &route.spec.parent_refs,
+        route.spec.parent_refs.as_deref().unwrap_or(&[]),
     )
     .await
 }
@@ -110,7 +147,7 @@ pub(crate) async fn gateway_targets_for_tls_route(
         client,
         route.metadata.namespace.clone(),
         route.name_any().as_ref(),
-        &route.spec.parent_refs,
+        route.spec.parent_refs.as_deref().unwrap_or(&[]),
     )
     .await
 }
@@ -123,7 +160,7 @@ pub(crate) async fn gateway_targets_for_tcp_route(
         client,
         route.metadata.namespace.clone(),
         route.name_any().as_ref(),
-        &route.spec.parent_refs,
+        route.spec.parent_refs.as_deref().unwrap_or(&[]),
     )
     .await
 }
@@ -136,15 +173,15 @@ pub(crate) async fn gateway_targets_for_udp_route(
         client,
         route.metadata.namespace.clone(),
         route.name_any().as_ref(),
-        &route.spec.parent_refs,
+        route.spec.parent_refs.as_deref().unwrap_or(&[]),
     )
     .await
 }
 
 fn http_route_references_inference_pool(route: &HTTPRoute, pool_ns: &str, pool_name: &str) -> bool {
     let rns = route.metadata.namespace.as_deref().unwrap_or("");
-    for rule in &route.spec.rules {
-        for br in &rule.backend_refs {
+    for rule in route.spec.rules.as_deref().unwrap_or(&[]) {
+        for br in rule.backend_refs.as_deref().unwrap_or_default() {
             if !crate::resources::is_inference_pool_backend_ref(br) {
                 continue;
             }
@@ -159,9 +196,9 @@ fn http_route_references_inference_pool(route: &HTTPRoute, pool_ns: &str, pool_n
 
 fn grpc_route_references_inference_pool(route: &GRPCRoute, pool_ns: &str, pool_name: &str) -> bool {
     let rns = route.metadata.namespace.as_deref().unwrap_or("");
-    for rule in &route.spec.rules {
-        for br in &rule.backend_refs {
-            if !crate::resources::is_inference_pool_backend_ref(br) {
+    for rule in route.spec.rules.as_deref().unwrap_or(&[]) {
+        for br in rule.backend_refs.as_deref().unwrap_or_default() {
+            if !crate::resources::is_inference_pool_grpc_backend_ref(br) {
                 continue;
             }
             let pns = br.namespace.as_deref().unwrap_or(rns);
@@ -177,7 +214,7 @@ fn tls_route_references_inference_pool(route: &TLSRoute, pool_ns: &str, pool_nam
     let rns = route.metadata.namespace.as_deref().unwrap_or("");
     for rule in &route.spec.rules {
         for br in &rule.backend_refs {
-            if !crate::resources::is_inference_pool_backend_ref(br) {
+            if !crate::resources::is_inference_pool_tls_backend_ref(br) {
                 continue;
             }
             let pns = br.namespace.as_deref().unwrap_or(rns);
@@ -193,7 +230,7 @@ fn tcp_route_references_inference_pool(route: &TCPRoute, pool_ns: &str, pool_nam
     let rns = route.metadata.namespace.as_deref().unwrap_or("");
     for rule in &route.spec.rules {
         for br in &rule.backend_refs {
-            if !crate::resources::is_inference_pool_backend_ref(br) {
+            if !crate::resources::is_inference_pool_tcp_backend_ref(br) {
                 continue;
             }
             let pns = br.namespace.as_deref().unwrap_or(rns);
@@ -209,7 +246,7 @@ fn udp_route_references_inference_pool(route: &UDPRoute, pool_ns: &str, pool_nam
     let rns = route.metadata.namespace.as_deref().unwrap_or("");
     for rule in &route.spec.rules {
         for br in &rule.backend_refs {
-            if !crate::resources::is_inference_pool_backend_ref(br) {
+            if !crate::resources::is_inference_pool_udp_backend_ref(br) {
                 continue;
             }
             let pns = br.namespace.as_deref().unwrap_or(rns);
@@ -316,7 +353,7 @@ fn http_route_references_backend_tls_policy_target(
 ) -> bool {
     let pol_ns = pol.metadata.namespace.as_deref().unwrap_or("");
     let rns = route.metadata.namespace.as_deref().unwrap_or("");
-    for rule in &route.spec.rules {
+    for rule in route.spec.rules.as_deref().unwrap_or(&[]) {
         for (sns, sname) in crate::resources::collect_http_route_rule_service_refs(rns, rule) {
             if backend_tls_policy_targets_service(&pol.spec, pol_ns, &sns, &sname) {
                 return true;
@@ -338,7 +375,7 @@ fn grpc_route_references_backend_tls_policy_target(
 ) -> bool {
     let pol_ns = pol.metadata.namespace.as_deref().unwrap_or("");
     let rns = route.metadata.namespace.as_deref().unwrap_or("");
-    for rule in &route.spec.rules {
+    for rule in route.spec.rules.as_deref().unwrap_or(&[]) {
         for (sns, sname) in crate::resources::collect_grpc_route_rule_service_refs(rns, rule) {
             if backend_tls_policy_targets_service(&pol.spec, pol_ns, &sns, &sname) {
                 return true;
@@ -361,15 +398,13 @@ fn tls_route_references_backend_tls_policy_target(
     let pol_ns = pol.metadata.namespace.as_deref().unwrap_or("");
     let rns = route.metadata.namespace.as_deref().unwrap_or("");
     for rule in &route.spec.rules {
-        for (sns, sname) in
-            crate::resources::collect_backend_refs_service_refs(rns, &rule.backend_refs)
-        {
+        for (sns, sname) in crate::resources::collect_tls_route_rule_service_refs(rns, rule) {
             if backend_tls_policy_targets_service(&pol.spec, pol_ns, &sns, &sname) {
                 return true;
             }
         }
         for (pns, pname) in
-            crate::resources::collect_backend_refs_inference_pool_refs(rns, &rule.backend_refs)
+            crate::resources::collect_tls_route_rule_inference_pool_refs(rns, rule)
         {
             if backend_tls_policy_targets_inference_pool(&pol.spec, pol_ns, &pns, &pname) {
                 return true;
@@ -386,15 +421,13 @@ fn tcp_route_references_backend_tls_policy_target(
     let pol_ns = pol.metadata.namespace.as_deref().unwrap_or("");
     let rns = route.metadata.namespace.as_deref().unwrap_or("");
     for rule in &route.spec.rules {
-        for (sns, sname) in
-            crate::resources::collect_backend_refs_service_refs(rns, &rule.backend_refs)
-        {
+        for (sns, sname) in crate::resources::collect_tcp_route_rule_service_refs(rns, rule) {
             if backend_tls_policy_targets_service(&pol.spec, pol_ns, &sns, &sname) {
                 return true;
             }
         }
         for (pns, pname) in
-            crate::resources::collect_backend_refs_inference_pool_refs(rns, &rule.backend_refs)
+            crate::resources::collect_tcp_route_rule_inference_pool_refs(rns, rule)
         {
             if backend_tls_policy_targets_inference_pool(&pol.spec, pol_ns, &pns, &pname) {
                 return true;
@@ -411,15 +444,13 @@ fn udp_route_references_backend_tls_policy_target(
     let pol_ns = pol.metadata.namespace.as_deref().unwrap_or("");
     let rns = route.metadata.namespace.as_deref().unwrap_or("");
     for rule in &route.spec.rules {
-        for (sns, sname) in
-            crate::resources::collect_backend_refs_service_refs(rns, &rule.backend_refs)
-        {
+        for (sns, sname) in crate::resources::collect_udp_route_rule_service_refs(rns, rule) {
             if backend_tls_policy_targets_service(&pol.spec, pol_ns, &sns, &sname) {
                 return true;
             }
         }
         for (pns, pname) in
-            crate::resources::collect_backend_refs_inference_pool_refs(rns, &rule.backend_refs)
+            crate::resources::collect_udp_route_rule_inference_pool_refs(rns, rule)
         {
             if backend_tls_policy_targets_inference_pool(&pol.spec, pol_ns, &pns, &pname) {
                 return true;
