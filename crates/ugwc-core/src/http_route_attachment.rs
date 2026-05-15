@@ -610,7 +610,7 @@ pub(crate) fn gateway_parent_ref_has_relaxed_keys_non_empty(
 /// but the route kind is explicitly not accepted by any of those listeners.
 ///
 /// This distinguishes "kind not allowed" (`NotAllowedByListeners`) from generic
-/// "no attachment" (`NotAcceptedByListeners`) which also covers hostname intersection failures.
+/// "no attachment" (`NotAllowedByListeners`) which also covers hostname intersection failures.
 #[must_use]
 pub(crate) fn gateway_parent_ref_blocked_by_route_kind(
     route_ns: &str,

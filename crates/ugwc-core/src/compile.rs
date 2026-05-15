@@ -275,7 +275,7 @@ pub fn http_route_accepted_condition_for_parent(
         }
         return (
             "False",
-            "NotAcceptedByListeners",
+            "NotAllowedByListeners",
             "route not accepted by listener hostname intersection or allowedRoutes policy",
         );
     }
@@ -401,7 +401,7 @@ pub fn grpc_route_accepted_condition_for_parent(
         }
         return (
             "False",
-            "NotAcceptedByListeners",
+            "NotAllowedByListeners",
             "route not accepted by listener hostname intersection or allowedRoutes policy",
         );
     }
@@ -527,7 +527,7 @@ pub fn tls_route_accepted_condition_for_parent(
         }
         return (
             "False",
-            "NotAcceptedByListeners",
+            "NotAllowedByListeners",
             "route not accepted by listener hostname intersection or allowedRoutes policy",
         );
     }
@@ -653,7 +653,7 @@ pub fn tcp_route_accepted_condition_for_parent(
         }
         return (
             "False",
-            "NotAcceptedByListeners",
+            "NotAllowedByListeners",
             "route not accepted by listener policy or allowedRoutes",
         );
     }
@@ -687,7 +687,7 @@ pub fn tcp_route_accepted_condition_for_parent(
     } else {
         (
             "False",
-            "NotAcceptedByListeners",
+            "NotAllowedByListeners",
             "route not accepted by listener policy or allowedRoutes",
         )
     }
@@ -779,7 +779,7 @@ pub fn udp_route_accepted_condition_for_parent(
         }
         return (
             "False",
-            "NotAcceptedByListeners",
+            "NotAllowedByListeners",
             "route not accepted by listener policy or allowedRoutes",
         );
     }
@@ -813,7 +813,7 @@ pub fn udp_route_accepted_condition_for_parent(
     } else {
         (
             "False",
-            "NotAcceptedByListeners",
+            "NotAllowedByListeners",
             "route not accepted by listener policy or allowedRoutes",
         )
     }

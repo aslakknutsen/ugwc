@@ -63,6 +63,19 @@ fn gateway_compile_reports_invalid_certificate_ref(
     })
 }
 
+fn gateway_compile_reports_ref_not_permitted(
+    report: &CompileReport,
+    gw_ns: &str,
+    gw_name: &str,
+) -> bool {
+    report.errors.iter().any(|e| {
+        e.kind == "Gateway"
+            && e.namespace == gw_ns
+            && e.name == gw_name
+            && e.reason == "RefNotPermitted"
+    })
+}
+
 /// HTTPS listeners with structurally invalid `certificateRefs` (before Secret fetch).
 fn gateway_spec_https_certificate_ref_obviously_invalid(
     listener: &crate::resources::GatewayListenerSpec,
@@ -391,7 +404,21 @@ pub async fn apply_gateway_reconciled_status(
                     ) && e.section_name == *lname
                 })
             });
-            let supported = supported_kinds_json(eff);
+            let tls_mode_unsupported = spec_row
+                .map(|l| {
+                    let proto = l.protocol.trim().to_ascii_uppercase();
+                    if proto != "TLS" {
+                        return false;
+                    }
+                    let mode = l.tls.as_ref().and_then(|t| t.mode.as_deref()).unwrap_or("");
+                    mode.eq_ignore_ascii_case("Terminate")
+                })
+                .unwrap_or(false);
+            let supported = if tls_mode_unsupported {
+                Vec::new()
+            } else {
+                supported_kinds_json(eff)
+            };
 
             let (prog_status, prog_reason, prog_msg) = if programmed_ok && !conflicted {
                 (
@@ -408,7 +435,13 @@ pub async fn apply_gateway_reconciled_status(
             } else {
                 ("False", "Invalid", compile_err_detail.clone())
             };
-            let (acc_status, acc_reason, acc_msg) = if conflicted {
+            let (acc_status, acc_reason, acc_msg) = if tls_mode_unsupported {
+                (
+                    "False",
+                    "UnsupportedValue",
+                    "TLS listener mode Terminate is not supported",
+                )
+            } else if conflicted {
                 (
                     "False",
                     "ListenersConflicted",
@@ -433,7 +466,8 @@ pub async fn apply_gateway_reconciled_status(
                 .and_then(|e| e.tls_resolve_error.as_deref())
                 .map(|e| e.contains("RefNotPermitted"))
                 .unwrap_or(false)
-                || gateway_listener_cert_ref_not_permitted(spec_row, gw_ns, cluster);
+                || gateway_listener_cert_ref_not_permitted(spec_row, gw_ns, cluster)
+                || gateway_compile_reports_ref_not_permitted(&outcome.report, gw_ns, name);
             if ref_not_permitted {
                 cert_broken = true;
             }
