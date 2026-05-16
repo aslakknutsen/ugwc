@@ -426,32 +426,12 @@ pub async fn apply_gateway_reconciled_status(
             .unwrap_or(false)
     };
 
-    let inline_listener_conflicted = cluster
-        .map(|c| {
-            c.effective_listeners.iter().any(|e| {
-                matches!(
-                    e.parent,
-                    ugwc_core::snapshot::ListenerParentSnap::InlineGateway
-                ) && e.conflicted
-            })
-        })
-        .unwrap_or(false);
-
-    // Gateway-level `Accepted` / `Programmed` are summary conditions. Conformance
-    // `NamespacesMustBeReady` requires both True for every Gateway in
-    // `gateway-conformance-infra` without `gateway-api/skip-this-for-readiness`,
-    // including invalid-TLS fixtures — those tests only assert **listener**
-    // `ResolvedRefs` + `InvalidCertificateRef` (`gateway-invalid-tls-configuration.go`).
-    // TLS / cert / compile issues belong on listener rows (and on `Programmed` there).
-    let (gw_acc_status, gw_acc_reason, gw_acc_msg) = if inline_listener_conflicted {
-        (
-            "False",
-            "ListenersNotValid",
-            "one or more inline listeners are conflicted",
-        )
-    } else {
-        ("True", "Accepted", "ugwc reconciled gateway")
-    };
+    // Gateway-level `Accepted` / `Programmed` are summary conditions that reflect whether
+    // the controller accepts and programs the Gateway, not whether individual listeners are
+    // valid. Listener conflicts are reported on per-listener conditions (Accepted, Conflicted).
+    // Conformance `NamespacesMustBeReady` requires both True for every Gateway in
+    // `gateway-conformance-infra` without `gateway-api/skip-this-for-readiness`.
+    let (gw_acc_status, gw_acc_reason, gw_acc_msg) = ("True", "Accepted", "ugwc reconciled gateway");
 
     let listener_status: Vec<serde_json::Value> = listener_names
         .iter()
@@ -620,23 +600,16 @@ pub async fn apply_gateway_reconciled_status(
         })
         .collect();
 
-    let (gw_prog_status, gw_prog_reason, gw_prog_msg) = if !inline_listener_conflicted {
-        let msg = if programmed_ok {
-            "ugwc compile outcome".to_string()
-        } else {
-            format!(
-                "gateway reconciled; {} (details on listener conditions)",
-                compile_err_detail
-            )
-        };
-        (
-            "True",
-            "Programmed",
-            msg,
-        )
+    let gw_prog_msg = if programmed_ok {
+        "ugwc compile outcome".to_string()
     } else {
-        ("False", "Invalid", compile_err_detail.clone())
+        format!(
+            "gateway reconciled; {} (details on listener conditions)",
+            compile_err_detail
+        )
     };
+    let (gw_prog_status, gw_prog_reason, gw_prog_msg) =
+        ("True", "Programmed", gw_prog_msg);
 
     let attached_ls = cluster.map(|c| c.listener_sets.len()).unwrap_or(0) as i32;
 
@@ -1779,24 +1752,8 @@ pub async fn apply_listenerset_reconciled_status(
         })
         .collect();
 
-    let any_listener_conflicted = ls.spec.listeners.iter().any(|l| {
-        snapshot.effective_listeners.iter().any(|e| {
-            matches!(
-                &e.parent,
-                ugwc_core::snapshot::ListenerParentSnap::ListenerSet {
-                    namespace,
-                    name,
-                } if namespace == &ls_ns_name.0 && name == &ls_ns_name.1
-            ) && e.section_name == l.name
-                && e.conflicted
-        })
-    });
-    let (acc_g, acc_reason_g) = if any_listener_conflicted {
-        ("False", "ListenersNotValid")
-    } else {
-        ("True", "Accepted")
-    };
-    let (prog_g, prog_rs) = if ok && !any_listener_conflicted {
+    let (acc_g, acc_reason_g) = ("True", "Accepted");
+    let (prog_g, prog_rs) = if ok {
         ("True", "Programmed")
     } else {
         ("False", "Invalid")
