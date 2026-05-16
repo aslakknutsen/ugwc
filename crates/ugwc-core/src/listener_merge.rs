@@ -82,6 +82,11 @@ fn hostname_norm(h: &Option<String>) -> String {
 }
 
 /// Distinctness for HTTP-like listeners: duplicate `(port, protocol, hostname)` ⇒ conflicted.
+///
+/// Precedence: inline Gateway listeners beat ListenerSet listeners.  Within
+/// ListenerSets the order in `effective` (oldest-first) determines who wins.
+/// When ALL members of a collision group are `InlineGateway`, every member is
+/// conflicted (Gateway spec violation — no precedence rescue).
 fn mark_distinctness_conflicts(effective: &mut [EffectiveListenerSnap]) {
     let mut groups: HashMap<(u16, String, String), Vec<usize>> = HashMap::new();
     for (i, e) in effective.iter().enumerate() {
@@ -89,8 +94,32 @@ fn mark_distinctness_conflicts(effective: &mut [EffectiveListenerSnap]) {
         groups.entry(key).or_default().push(i);
     }
     for idxs in groups.values() {
-        if idxs.len() > 1 {
+        if idxs.len() <= 1 {
+            continue;
+        }
+        let inline_count = idxs
+            .iter()
+            .filter(|&&i| matches!(effective[i].parent, ListenerParentSnap::InlineGateway))
+            .count();
+        if inline_count >= 2 {
             for &i in idxs {
+                effective[i].conflicted = true;
+                if effective[i].conflict_reason.is_none() {
+                    effective[i].conflict_reason = Some("HostnameConflict".into());
+                }
+            }
+        } else if inline_count == 1 {
+            for &i in idxs {
+                if !matches!(effective[i].parent, ListenerParentSnap::InlineGateway) {
+                    effective[i].conflicted = true;
+                    if effective[i].conflict_reason.is_none() {
+                        effective[i].conflict_reason = Some("HostnameConflict".into());
+                    }
+                }
+            }
+        } else {
+            // All ListenerSet — first wins, rest conflicted.
+            for &i in &idxs[1..] {
                 effective[i].conflicted = true;
                 if effective[i].conflict_reason.is_none() {
                     effective[i].conflict_reason = Some("HostnameConflict".into());
@@ -101,6 +130,12 @@ fn mark_distinctness_conflicts(effective: &mut [EffectiveListenerSnap]) {
 }
 
 /// Gateway API: TCP listeners sharing a port with HTTP/HTTPS/TLS listeners are indistinct.
+///
+/// Precedence: if the Gateway's own (inline) listeners all belong to one protocol
+/// family and only ListenerSet listeners introduce the opposing family, the
+/// inline family wins and only the opposing listeners are conflicted.  When the
+/// Gateway itself has both families on the same port, *all* listeners on that
+/// port are conflicted.
 fn mark_tcp_layer7_port_conflicts(effective: &mut [EffectiveListenerSnap]) {
     let mut tcp_ports: HashSet<u16> = HashSet::new();
     let mut l7_ports: HashSet<u16> = HashSet::new();
@@ -119,12 +154,52 @@ fn mark_tcp_layer7_port_conflicts(effective: &mut [EffectiveListenerSnap]) {
     if conflict_ports.is_empty() {
         return;
     }
+    // Pre-compute per-port: does the Gateway itself have TCP / L7 inline,
+    // and what is the first protocol family (for all-ListenerSet fallback).
+    let mut port_info: HashMap<u16, (bool, bool, bool)> = HashMap::new(); // (inline_tcp, inline_l7, first_is_l7)
+    for &port in &conflict_ports {
+        let inline_has_tcp = effective.iter().any(|e| {
+            e.port == port
+                && e.protocol == "TCP"
+                && matches!(e.parent, ListenerParentSnap::InlineGateway)
+        });
+        let inline_has_l7 = effective.iter().any(|e| {
+            e.port == port
+                && matches!(e.protocol.as_str(), "HTTP" | "HTTPS" | "TLS")
+                && matches!(e.parent, ListenerParentSnap::InlineGateway)
+        });
+        let first_is_l7 = effective
+            .iter()
+            .find(|x| {
+                x.port == port
+                    && (x.protocol == "TCP"
+                        || matches!(x.protocol.as_str(), "HTTP" | "HTTPS" | "TLS"))
+            })
+            .map(|x| matches!(x.protocol.as_str(), "HTTP" | "HTTPS" | "TLS"))
+            .unwrap_or(true);
+        port_info.insert(port, (inline_has_tcp, inline_has_l7, first_is_l7));
+    }
     for e in effective.iter_mut() {
-        if !conflict_ports.contains(&e.port) {
+        let Some(&(inline_has_tcp, inline_has_l7, first_is_l7)) = port_info.get(&e.port) else {
+            continue;
+        };
+        let is_tcp = e.protocol == "TCP";
+        let is_l7 = matches!(e.protocol.as_str(), "HTTP" | "HTTPS" | "TLS");
+        if !is_tcp && !is_l7 {
             continue;
         }
-        let l7 = matches!(e.protocol.as_str(), "HTTP" | "HTTPS" | "TLS");
-        if e.protocol == "TCP" || l7 {
+        let mark = if inline_has_tcp && inline_has_l7 {
+            true
+        } else if inline_has_l7 && is_tcp {
+            true
+        } else if inline_has_tcp && is_l7 {
+            true
+        } else if !inline_has_tcp && !inline_has_l7 {
+            (first_is_l7 && is_tcp) || (!first_is_l7 && is_l7)
+        } else {
+            false
+        };
+        if mark {
             e.conflicted = true;
             e.conflict_reason = Some("ProtocolConflict".into());
         }
@@ -150,12 +225,50 @@ fn mark_udp_layer7_port_conflicts(effective: &mut [EffectiveListenerSnap]) {
     if conflict_ports.is_empty() {
         return;
     }
+    let mut port_info: HashMap<u16, (bool, bool, bool)> = HashMap::new();
+    for &port in &conflict_ports {
+        let inline_has_udp = effective.iter().any(|e| {
+            e.port == port
+                && e.protocol == "UDP"
+                && matches!(e.parent, ListenerParentSnap::InlineGateway)
+        });
+        let inline_has_l7 = effective.iter().any(|e| {
+            e.port == port
+                && matches!(e.protocol.as_str(), "HTTP" | "HTTPS" | "TLS")
+                && matches!(e.parent, ListenerParentSnap::InlineGateway)
+        });
+        let first_is_l7 = effective
+            .iter()
+            .find(|x| {
+                x.port == port
+                    && (x.protocol == "UDP"
+                        || matches!(x.protocol.as_str(), "HTTP" | "HTTPS" | "TLS"))
+            })
+            .map(|x| matches!(x.protocol.as_str(), "HTTP" | "HTTPS" | "TLS"))
+            .unwrap_or(true);
+        port_info.insert(port, (inline_has_udp, inline_has_l7, first_is_l7));
+    }
     for e in effective.iter_mut() {
-        if !conflict_ports.contains(&e.port) {
+        let Some(&(inline_has_udp, inline_has_l7, first_is_l7)) = port_info.get(&e.port) else {
+            continue;
+        };
+        let is_udp = e.protocol == "UDP";
+        let is_l7 = matches!(e.protocol.as_str(), "HTTP" | "HTTPS" | "TLS");
+        if !is_udp && !is_l7 {
             continue;
         }
-        let l7 = matches!(e.protocol.as_str(), "HTTP" | "HTTPS" | "TLS");
-        if e.protocol == "UDP" || l7 {
+        let mark = if inline_has_udp && inline_has_l7 {
+            true
+        } else if inline_has_l7 && is_udp {
+            true
+        } else if inline_has_udp && is_l7 {
+            true
+        } else if !inline_has_udp && !inline_has_l7 {
+            (first_is_l7 && is_udp) || (!first_is_l7 && is_l7)
+        } else {
+            false
+        };
+        if mark {
             e.conflicted = true;
             e.conflict_reason = Some("ProtocolConflict".into());
         }

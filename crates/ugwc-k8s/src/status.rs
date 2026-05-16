@@ -176,11 +176,12 @@ fn gateway_spec_https_certificate_ref_obviously_invalid(
     if refs.is_empty() {
         return true;
     }
-    let r = &refs[0];
-    let kind = r.kind.as_deref().unwrap_or("Secret");
-    let group = r.group.as_deref().unwrap_or("");
-    let secret_group_ok = group.is_empty() || group.eq_ignore_ascii_case("core");
-    !kind.eq_ignore_ascii_case("Secret") || !secret_group_ok
+    refs.iter().any(|r| {
+        let kind = r.kind.as_deref().unwrap_or("Secret");
+        let group = r.group.as_deref().unwrap_or("");
+        let secret_group_ok = group.is_empty() || group.eq_ignore_ascii_case("core");
+        !kind.eq_ignore_ascii_case("Secret") || !secret_group_ok
+    })
 }
 
 fn gateway_listener_https_cert_unresolved(
@@ -224,21 +225,22 @@ fn gateway_listener_cert_ref_not_permitted(
     if refs.is_empty() {
         return false;
     }
-    let r = &refs[0];
-    let kind = r.kind.as_deref().unwrap_or("Secret");
-    let group = r.group.as_deref().unwrap_or("");
-    let secret_group_ok = group.is_empty() || group.eq_ignore_ascii_case("core");
-    if !kind.eq_ignore_ascii_case("Secret") || !secret_group_ok {
-        return false;
-    }
-    let secret_ns = r.namespace.as_deref().unwrap_or(gw_ns);
-    if secret_ns == gw_ns {
-        return false;
-    }
     let grants = cluster
         .map(|c| c.reference_grants.as_slice())
         .unwrap_or(&[]);
-    !ugwc_core::reference_grant_permits_gateway_secret_ref(grants, gw_ns, secret_ns, &r.name)
+    refs.iter().any(|r| {
+        let kind = r.kind.as_deref().unwrap_or("Secret");
+        let group = r.group.as_deref().unwrap_or("");
+        let secret_group_ok = group.is_empty() || group.eq_ignore_ascii_case("core");
+        if !kind.eq_ignore_ascii_case("Secret") || !secret_group_ok {
+            return false;
+        }
+        let secret_ns = r.namespace.as_deref().unwrap_or(gw_ns);
+        if secret_ns == gw_ns {
+            return false;
+        }
+        !ugwc_core::reference_grant_permits_gateway_secret_ref(grants, gw_ns, secret_ns, &r.name)
+    })
 }
 
 fn gateway_ip_address_json(ip: &str) -> serde_json::Value {
@@ -483,9 +485,12 @@ pub async fn apply_gateway_reconciled_status(
                     "ugwc compile outcome".to_string(),
                 )
             } else if conflicted {
+                let cr = eff
+                    .and_then(|e| e.conflict_reason.as_deref())
+                    .unwrap_or("HostnameConflict");
                 (
                     "False",
-                    "Invalid",
+                    cr,
                     "listener not distinct after merge with ListenerSets".to_string(),
                 )
             } else {
@@ -498,9 +503,12 @@ pub async fn apply_gateway_reconciled_status(
                     "TLS listener mode Terminate is not supported",
                 )
             } else if conflicted {
+                let cr = eff
+                    .and_then(|e| e.conflict_reason.as_deref())
+                    .unwrap_or("HostnameConflict");
                 (
                     "False",
-                    "ListenersConflicted",
+                    cr,
                     "listener not distinct after merge with ListenerSets",
                 )
             } else {
@@ -611,7 +619,27 @@ pub async fn apply_gateway_reconciled_status(
     let (gw_prog_status, gw_prog_reason, gw_prog_msg) =
         ("True", "Programmed", gw_prog_msg);
 
-    let attached_ls = cluster.map(|c| c.listener_sets.len()).unwrap_or(0) as i32;
+    let attached_ls = cluster
+        .map(|c| {
+            c.listener_sets
+                .iter()
+                .filter(|ls| {
+                    !ls.listeners.iter().all(|l| {
+                        c.effective_listeners.iter().any(|e| {
+                            matches!(
+                                &e.parent,
+                                ugwc_core::snapshot::ListenerParentSnap::ListenerSet {
+                                    namespace,
+                                    name,
+                                } if namespace == &ls.namespace && name == &ls.name
+                            ) && e.section_name == l.name
+                                && e.conflicted
+                        })
+                    })
+                })
+                .count()
+        })
+        .unwrap_or(0) as i32;
 
     let status_doc = serde_json::json!({
         "conditions": [
@@ -1615,7 +1643,19 @@ pub async fn apply_listenerset_reconciled_status(
         outcome.report.errors.iter().any(|e| {
             e.kind == "ListenerSet" && e.namespace == ls_ns_name.0 && e.name == ls_ns_name.1
         });
-    let ok = programmed_ok && !ls_specific_err;
+    let all_conflicted = ls.spec.listeners.iter().all(|l| {
+        snapshot.effective_listeners.iter().any(|e| {
+            matches!(
+                &e.parent,
+                ugwc_core::snapshot::ListenerParentSnap::ListenerSet {
+                    namespace,
+                    name,
+                } if namespace == &ls_ns_name.0 && name == &ls_ns_name.1
+            ) && e.section_name == l.name
+                && e.conflicted
+        })
+    });
+    let ok = programmed_ok && !ls_specific_err && !all_conflicted;
 
     let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
 
@@ -1663,9 +1703,12 @@ pub async fn apply_listenerset_reconciled_status(
             let attached = outcome.report.attachment_count_for_listener_key(&lk);
 
             let (acc_s, acc_r, acc_m) = if conflicted {
+                let cr = eff
+                    .and_then(|e| e.conflict_reason.as_deref())
+                    .unwrap_or("HostnameConflict");
                 (
                     "False",
-                    "ListenersConflicted",
+                    cr,
                     "indistinct listener after merge",
                 )
             } else {
@@ -1673,6 +1716,11 @@ pub async fn apply_listenerset_reconciled_status(
             };
             let (prog_s, prog_r) = if ok && !conflicted {
                 ("True", "Programmed")
+            } else if conflicted {
+                let cr = eff
+                    .and_then(|e| e.conflict_reason.as_deref())
+                    .unwrap_or("HostnameConflict");
+                ("False", cr)
             } else {
                 ("False", "Invalid")
             };
@@ -1752,9 +1800,15 @@ pub async fn apply_listenerset_reconciled_status(
         })
         .collect();
 
-    let (acc_g, acc_reason_g) = ("True", "Accepted");
+    let (acc_g, acc_reason_g) = if all_conflicted {
+        ("False", "ListenersNotValid")
+    } else {
+        ("True", "Accepted")
+    };
     let (prog_g, prog_rs) = if ok {
         ("True", "Programmed")
+    } else if all_conflicted {
+        ("False", "ListenersNotValid")
     } else {
         ("False", "Invalid")
     };

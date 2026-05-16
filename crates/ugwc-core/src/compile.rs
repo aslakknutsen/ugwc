@@ -102,7 +102,7 @@ impl CompileReport {
             }
             if matches!(
                 e.kind.as_str(),
-                "Service" | "InferencePool"
+                "Service" | "InferencePool" | "ListenerSet"
             ) {
                 return false;
             }

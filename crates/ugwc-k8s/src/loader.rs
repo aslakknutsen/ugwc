@@ -9,7 +9,6 @@ use kube::api::ListParams;
 use kube::{Api, Client, ResourceExt};
 use thiserror::Error;
 use tracing::warn;
-use ugwc_core::http_route_attachment::reference_grant_permits_gateway_secret_ref;
 use ugwc_core::listener_merge::merge_effective_listeners;
 use ugwc_core::snapshot::{
     AllowedListenersSnap, AllowedRoutesNamespacesSnap, AllowedRoutesSnap, ClusterSnapshot,
@@ -20,10 +19,10 @@ use ugwc_core::snapshot::{
     HttpHeaderFilterSnap, HttpHeaderMatchSnap, HttpHeaderNameValueSnap, HttpPathMatchSnap,
     HttpPathModifierSnap, HttpRequestMatchSnap, HttpRequestRedirectFilterSnap, HttpRouteFilterSnap,
     HttpRouteRuleSnap, HttpRouteSnap, InferencePoolPortSnap, InferencePoolSelectorSnap,
-    InferencePoolSnap, ListenerNamespacesSnap, ListenerSetSnap, ParentRefSnap, RejectedListenerSetSnap,
-    ReferenceGrantFromSnap, ReferenceGrantSnap, ReferenceGrantToSnap, RouteGroupKindSnap,
-    SecretObjectReferenceSnap, ServicePortSnap, ServiceSnap, TcpRouteRuleSnap, TcpRouteSnap,
-    TlsRouteRuleSnap, TlsRouteSnap, UdpRouteRuleSnap, UdpRouteSnap,
+    InferencePoolSnap, ListenerNamespacesSnap, ListenerParentSnap, ListenerSetSnap, ParentRefSnap,
+    RejectedListenerSetSnap, ReferenceGrantFromSnap, ReferenceGrantSnap, ReferenceGrantToSnap,
+    RouteGroupKindSnap, SecretObjectReferenceSnap, ServicePortSnap, ServiceSnap, TcpRouteRuleSnap,
+    TcpRouteSnap, TlsRouteRuleSnap, TlsRouteSnap, UdpRouteRuleSnap, UdpRouteSnap,
 };
 
 use crate::crd_supervisor::{ActiveCrds, ManagedCrd};
@@ -486,22 +485,44 @@ async fn resolve_gateway_listener_tls(
                 Some("InvalidCertificateRef: HTTPS listener requires certificateRefs".into());
             continue;
         }
-        let r = &refs[0];
-        let kind = r.kind.as_deref().unwrap_or("Secret");
-        let group = r.group.as_deref().unwrap_or("");
-        // Core `Secret` refs use an empty group (or, rarely, "core"); anything else is invalid.
-        let secret_group_ok = group.is_empty() || group.eq_ignore_ascii_case("core");
-        if !kind.eq_ignore_ascii_case("Secret") || !secret_group_ok {
-            e.tls_resolve_error = Some(format!(
-                "InvalidCertificateRef: unsupported certificate ref {group}/{kind}"
-            ));
+        let mut bad_ref: Option<String> = None;
+        for r in refs.iter() {
+            let kind = r.kind.as_deref().unwrap_or("Secret");
+            let group = r.group.as_deref().unwrap_or("");
+            let secret_group_ok = group.is_empty() || group.eq_ignore_ascii_case("core");
+            if !kind.eq_ignore_ascii_case("Secret") || !secret_group_ok {
+                bad_ref = Some(format!(
+                    "InvalidCertificateRef: unsupported certificate ref {group}/{kind}"
+                ));
+                break;
+            }
+        }
+        if let Some(err) = bad_ref {
+            e.tls_resolve_error = Some(err);
             continue;
         }
-        let secret_ns = r.namespace.as_deref().unwrap_or(gateway_ns);
-        if !reference_grant_permits_gateway_secret_ref(grants, gateway_ns, secret_ns, &r.name) {
+        let (from_ns, from_kind) = match &e.parent {
+            ListenerParentSnap::InlineGateway => (gateway_ns.to_string(), "Gateway"),
+            ListenerParentSnap::ListenerSet { namespace, .. } => {
+                (namespace.clone(), "ListenerSet")
+            }
+        };
+        let mut grant_blocked = false;
+        for r in refs.iter() {
+            let secret_ns = r.namespace.as_deref().unwrap_or(&from_ns);
+            if !reference_grant_permits_listener_secret_ref(
+                grants, &from_ns, from_kind, secret_ns, &r.name,
+            ) {
+                grant_blocked = true;
+                break;
+            }
+        }
+        if grant_blocked {
             e.tls_resolve_error = Some("RefNotPermitted".into());
             continue;
         }
+        let r = &refs[0];
+        let secret_ns = r.namespace.as_deref().unwrap_or(&from_ns);
         let api: Api<Secret> = Api::namespaced(client.clone(), secret_ns);
         match api.get(&r.name).await {
             Ok(sec) => match extract_tls_pem_from_secret(&sec) {
@@ -526,6 +547,54 @@ async fn resolve_gateway_listener_tls(
         }
     }
     Ok(())
+}
+
+/// Check if a ReferenceGrant allows a listener (Gateway or ListenerSet) to
+/// reference a Secret in another namespace.
+fn reference_grant_permits_listener_secret_ref(
+    grants: &[ReferenceGrantSnap],
+    from_namespace: &str,
+    from_kind: &str,
+    secret_namespace: &str,
+    secret_name: &str,
+) -> bool {
+    if from_namespace == secret_namespace {
+        return true;
+    }
+    const G_FROM: &str = "gateway.networking.k8s.io";
+
+    for g in grants {
+        if g.namespace != secret_namespace {
+            continue;
+        }
+        let mut from_ok = false;
+        for fr in &g.from {
+            let fg = fr.group.as_deref().unwrap_or(G_FROM);
+            if fg == G_FROM && fr.kind == from_kind && fr.namespace == from_namespace {
+                from_ok = true;
+                break;
+            }
+        }
+        if !from_ok {
+            continue;
+        }
+        for to in &g.to {
+            if to.kind != "Secret" {
+                continue;
+            }
+            let tg = to.group.as_deref().unwrap_or("");
+            if !tg.is_empty() {
+                continue;
+            }
+            match &to.name {
+                None => return true,
+                Some(n) if n.is_empty() => return true,
+                Some(n) if n == secret_name => return true,
+                _ => {}
+            }
+        }
+    }
+    false
 }
 
 fn http_header_filter_snap(h: &HttpRouteRulesFiltersRequestHeaderModifier) -> HttpHeaderFilterSnap {
