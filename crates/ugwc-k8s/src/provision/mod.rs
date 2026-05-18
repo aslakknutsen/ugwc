@@ -109,7 +109,13 @@ fn sanitize_port_name(raw: &str, port: i32) -> String {
     } else {
         base.to_string()
     };
-    s.chars().take(15).collect()
+    let truncated: String = s.chars().take(15).collect();
+    let trimmed = truncated.trim_end_matches('-');
+    if trimmed.is_empty() {
+        format!("p{port}")
+    } else {
+        trimmed.to_string()
+    }
 }
 
 /// Ports from merged Gateway + ListenerSet listeners (conflicts / duplicates skipped).
@@ -309,5 +315,20 @@ mod tests {
     fn praxis_istiod_dial_url_empty() {
         assert_eq!(praxis_istiod_dial_url("", true), "");
         assert_eq!(praxis_istiod_dial_url("  ", true), "");
+    }
+
+    #[test]
+    fn sanitize_port_name_strips_trailing_hyphen_after_truncation() {
+        use super::sanitize_port_name;
+        // "listener-exact-hostname" truncated to 15 chars would be "listener-exact-"
+        assert_eq!(sanitize_port_name("listener-exact-hostname", 443), "listener-exact");
+        // "listener-empty-hostname" similarly
+        assert_eq!(sanitize_port_name("listener-empty-hostname", 443), "listener-empty");
+        // Short names stay unchanged
+        assert_eq!(sanitize_port_name("https", 443), "https");
+        // Names that fit exactly at 15 chars without trailing hyphen
+        assert_eq!(sanitize_port_name("listener-wildca", 443), "listener-wildca");
+        // All-hyphen input (after trim) falls back to port-based name
+        assert_eq!(sanitize_port_name("---", 8080), "p8080");
     }
 }

@@ -1,5 +1,6 @@
 //! Multi-watch controller graph: CRD-gated `Gateway`, routes, policies, classes, pools (via
-//! [`crate::crd_supervisor`]); always-on `EndpointSlice`, `Secret`, `ConfigMap` (BackendTLS CA).
+//! [`crate::crd_supervisor`]); always-on `EndpointSlice`, `Secret`, `ConfigMap` (BackendTLS CA),
+//! and managed `Service` (for LoadBalancer IP propagation to `Gateway.status.addresses`).
 
 use std::collections::HashSet;
 use std::future::Future;
@@ -8,7 +9,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use futures::StreamExt;
-use k8s_openapi::api::core::v1::{ConfigMap, Secret};
+use k8s_openapi::api::core::v1::{ConfigMap, Secret, Service};
 use k8s_openapi::api::discovery::v1::EndpointSlice;
 use kube::api::ListParams;
 use kube::runtime::watcher::{watcher, Config as WatcherConfig};
@@ -88,6 +89,47 @@ pub async fn run_gateway_controller(
             }
         }
         info!("endpointslice watcher shutdown");
+    });
+
+    // Watch managed dataplane Services so that when a LoadBalancer IP is assigned,
+    // the owning Gateway gets re-reconciled to propagate the address to status.
+    let sd_svc = shutdown.clone();
+    let tx_svc = tx.clone();
+    let c_svc = client.clone();
+    tokio::spawn(async move {
+        let api: Api<Service> = Api::all(c_svc);
+        let cfg = WatcherConfig::default()
+            .any_semantic()
+            .labels("gateway.ugwc.io/managed=ugwc-per-gateway");
+        let mut stream = Box::pin(watcher(api, cfg).applied_objects());
+        loop {
+            tokio::select! {
+                _ = sd_svc.cancelled() => break,
+                ev = stream.next() => {
+                    match ev {
+                        None => break,
+                        Some(Err(e)) => warn!(error = %e, "service watch stream"),
+                        Some(Ok(svc)) => {
+                            let labels = svc.metadata.labels.as_ref();
+                            let gw_ns = labels
+                                .and_then(|l| l.get("gateway.ugwc.io/gateway-namespace"))
+                                .cloned()
+                                .unwrap_or_default();
+                            let gw_name = labels
+                                .and_then(|l| l.get("gateway.ugwc.io/gateway-name"))
+                                .cloned()
+                                .unwrap_or_default();
+                            if !gw_ns.is_empty() && !gw_name.is_empty() {
+                                if tx_svc.send((gw_ns, gw_name)).await.is_err() {
+                                    return;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        info!("service watcher shutdown");
     });
 
     let sd_sec = shutdown.clone();
