@@ -257,56 +257,19 @@ pub fn reference_grant_permits_route_to_listener_set_parent(
 
 /// True when a route is denied attachment to this reconcile scope solely because of a missing cross-namespace [`ReferenceGrant`] on the parent ref.
 ///
-/// Note: `ReferenceGrant` does **not** apply to cross-namespace attachment of routes to a `Gateway`
-/// parent (listener `allowedRoutes` / hostname rules decide); it **does** apply to `ListenerSet`
-/// parents and to other cross-namespace object refs (e.g. backends, Secrets).
+/// `ReferenceGrant` does **not** govern cross-namespace attachment of routes
+/// to `Gateway` or `ListenerSet` parents — that is controlled by each
+/// listener's `allowedRoutes.namespaces`.  `ReferenceGrant` applies to
+/// cross-namespace *object* refs such as backends and Secrets.
 #[must_use]
 pub fn route_parent_attachment_ref_not_permitted(
-    snapshot: &ClusterSnapshot,
-    route_namespace: &str,
-    route_kind: &str,
-    parent: &ParentRefSnap,
-    attached_ls: &HashSet<(String, String)>,
+    _snapshot: &ClusterSnapshot,
+    _route_namespace: &str,
+    _route_kind: &str,
+    _parent: &ParentRefSnap,
+    _attached_ls: &HashSet<(String, String)>,
 ) -> bool {
-    let g = parent
-        .group
-        .as_deref()
-        .unwrap_or("gateway.networking.k8s.io");
-    let k = parent.kind.as_deref().unwrap_or("Gateway");
-    if !gateway_api_group(&Some(g.to_string())) {
-        return false;
-    }
-    match k {
-        "Gateway" => {
-            let pns = parent_namespace(parent, route_namespace);
-            if pns != snapshot.gateway_namespace || parent.name != snapshot.gateway_name {
-                return false;
-            }
-            false
-        }
-        "ListenerSet" => {
-            let ls_ns = parent_namespace(parent, route_namespace);
-            if !attached_ls.contains(&(ls_ns.clone(), parent.name.clone())) {
-                return false;
-            }
-            route_namespace != ls_ns.as_str()
-                && listener_set_any_listener_accepts_route(
-                    snapshot,
-                    &ls_ns,
-                    &parent.name,
-                    route_namespace,
-                    route_kind,
-                )
-                && !reference_grant_permits_route_to_listener_set_parent(
-                    &snapshot.reference_grants,
-                    route_namespace,
-                    route_kind,
-                    &ls_ns,
-                    &parent.name,
-                )
-        }
-        _ => false,
-    }
+    false
 }
 
 /// Cross-namespace `Secret` certificate ref from a `Gateway` requires a [`ReferenceGrant`] in the Secret namespace.
@@ -788,25 +751,16 @@ pub(crate) fn attachment_keys_for_parent_ref_ns(
         if !attached_ls.contains(&(ls_ns.clone(), p.name.clone())) {
             return keys;
         }
-        if route_ns != ls_ns.as_str() {
-            if !listener_set_any_listener_accepts_route(
+        if route_ns != ls_ns.as_str()
+            && !listener_set_any_listener_accepts_route(
                 snapshot,
                 &ls_ns,
                 &p.name,
                 route_ns,
                 route_kind,
-            ) {
-                return keys;
-            }
-            if !reference_grant_permits_route_to_listener_set_parent(
-                &snapshot.reference_grants,
-                route_ns,
-                route_kind,
-                &ls_ns,
-                &p.name,
-            ) {
-                return keys;
-            }
+            )
+        {
+            return keys;
         }
         for e in &snapshot.effective_listeners {
             let ListenerParentSnap::ListenerSet {

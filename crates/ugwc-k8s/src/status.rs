@@ -625,7 +625,7 @@ pub async fn apply_gateway_reconciled_status(
                 .iter()
                 .filter(|ls| {
                     !ls.listeners.iter().all(|l| {
-                        c.effective_listeners.iter().any(|e| {
+                        let eff = c.effective_listeners.iter().find(|e| {
                             matches!(
                                 &e.parent,
                                 ugwc_core::snapshot::ListenerParentSnap::ListenerSet {
@@ -633,8 +633,18 @@ pub async fn apply_gateway_reconciled_status(
                                     name,
                                 } if namespace == &ls.namespace && name == &ls.name
                             ) && e.section_name == l.name
-                                && e.conflicted
-                        })
+                        });
+                        match eff {
+                            Some(e) if e.conflicted => true,
+                            Some(e) => {
+                                let proto = e.protocol.trim().to_ascii_uppercase();
+                                proto == "HTTPS"
+                                    && (e.tls_resolve_error.is_some()
+                                        || e.tls_cert_pem.is_empty()
+                                        || e.tls_key_pem.is_empty())
+                            }
+                            None => true,
+                        }
                     })
                 })
                 .count()
@@ -1643,8 +1653,8 @@ pub async fn apply_listenerset_reconciled_status(
         outcome.report.errors.iter().any(|e| {
             e.kind == "ListenerSet" && e.namespace == ls_ns_name.0 && e.name == ls_ns_name.1
         });
-    let all_conflicted = ls.spec.listeners.iter().all(|l| {
-        snapshot.effective_listeners.iter().any(|e| {
+    let all_listeners_invalid = ls.spec.listeners.iter().all(|l| {
+        let eff = snapshot.effective_listeners.iter().find(|e| {
             matches!(
                 &e.parent,
                 ugwc_core::snapshot::ListenerParentSnap::ListenerSet {
@@ -1652,10 +1662,22 @@ pub async fn apply_listenerset_reconciled_status(
                     name,
                 } if namespace == &ls_ns_name.0 && name == &ls_ns_name.1
             ) && e.section_name == l.name
-                && e.conflicted
-        })
+        });
+        match eff {
+            Some(e) if e.conflicted => true,
+            Some(e) => {
+                let proto = e.protocol.trim().to_ascii_uppercase();
+                let cert_broken = proto == "HTTPS"
+                    && (e.tls_resolve_error.is_some()
+                        || e.tls_cert_pem.is_empty()
+                        || e.tls_key_pem.is_empty());
+                let route_kinds_broken = listener_route_kinds_broken_for_status(Some(e), Some(l));
+                cert_broken || route_kinds_broken
+            }
+            None => true,
+        }
     });
-    let ok = programmed_ok && !ls_specific_err && !all_conflicted;
+    let ok = programmed_ok && !ls_specific_err && !all_listeners_invalid;
 
     let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
 
@@ -1800,14 +1822,14 @@ pub async fn apply_listenerset_reconciled_status(
         })
         .collect();
 
-    let (acc_g, acc_reason_g) = if all_conflicted {
+    let (acc_g, acc_reason_g) = if all_listeners_invalid {
         ("False", "ListenersNotValid")
     } else {
         ("True", "Accepted")
     };
     let (prog_g, prog_rs) = if ok {
         ("True", "Programmed")
-    } else if all_conflicted {
+    } else if all_listeners_invalid {
         ("False", "ListenersNotValid")
     } else {
         ("False", "Invalid")
