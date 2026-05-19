@@ -83,6 +83,36 @@ impl PartialOrd for RouteSortMeta {
     }
 }
 
+/// Gateway API match specificity score (GEP-1713). Higher = more specific = should sort earlier.
+/// Computed per match clause; for a rule with multiple OR'd matches, use the maximum.
+fn match_specificity(m: &RouteMatchIr) -> (u8, usize, usize, usize, u8) {
+    let path_type_score = if m.path_exact.is_some() {
+        3u8
+    } else if m.path_prefix.is_some() {
+        2
+    } else {
+        1
+    };
+    let path_len = m
+        .path_exact
+        .as_ref()
+        .or(m.path_prefix.as_ref())
+        .map_or(0, |p| p.len());
+    let header_count = m.headers_exact.len();
+    let query_count = m.query_params_exact.len();
+    let method_score = if m.method.is_some() { 1u8 } else { 0 };
+    (path_type_score, path_len, header_count, query_count, method_score)
+}
+
+/// Max specificity across all match clauses in a rule (higher = more specific).
+fn rule_specificity(matches: &[RouteMatchIr]) -> (u8, usize, usize, usize, u8) {
+    matches
+        .iter()
+        .map(match_specificity)
+        .max()
+        .unwrap_or((1, 1, 0, 0, 0))
+}
+
 fn normalize_protocol(p: &str) -> String {
     let t = p.trim();
     if t.is_empty() {
@@ -2668,7 +2698,12 @@ pub fn ir_from_cluster(snapshot: &ClusterSnapshot) -> (IrSnapshot, CompileReport
     report.listener_route_attachment_counts =
         compute_listener_route_attachment_counts(snapshot, &attached_ls, &report);
 
-    staged.sort_by(|a, b| a.0.cmp(&b.0));
+    staged.sort_by(|a, b| {
+        let spec_a = rule_specificity(&a.1.matches);
+        let spec_b = rule_specificity(&b.1.matches);
+        // More specific first (reverse order for specificity), then RouteSortMeta for ties.
+        spec_b.cmp(&spec_a).then_with(|| a.0.cmp(&b.0))
+    });
     let routes: Vec<RouteRuleIr> = staged.into_iter().map(|(_, r)| r).collect();
 
     let mut backends: BTreeMap<String, Vec<BackendEndpointIr>> = BTreeMap::new();
