@@ -266,6 +266,9 @@ pub fn encode_ir(ir: &IrSnapshot) -> Vec<Resource> {
                         });
                         continue;
                     }
+                    if wb.backend.backend_tls.as_ref().is_some_and(|t| t.invalid) {
+                        continue;
+                    }
                     // `host` is a Service DNS name; dial its declared `port` (kube-proxy maps targetPort).
                     let host =
                         qualify_host(&wb.backend.service_namespace, &wb.backend.service_name);
@@ -956,6 +959,30 @@ mod tests {
         assert!(
             r[0].routes[0].invalid_backend_ref,
             "route with empty backends should have invalid_backend_ref=true"
+        );
+    }
+
+    #[test]
+    fn encode_invalid_backend_tls_becomes_invalid_backend_ref() {
+        let mut f = HttpCompileFixture::minimal_http();
+        f.routes[0].backends[0].backend.backend_tls = Some(ugwc_core::ir::BackendTlsIr {
+            ca_cert_pem: vec![],
+            hostname: "svc.internal".into(),
+            sans: vec![],
+            trust_system_ca: false,
+            client_cert_pem: vec![],
+            client_key_pem: vec![],
+            invalid: true,
+        });
+        let ir = ugwc_core::http_ir::build_http_ir_from_fixture(&f);
+        let r = encode_ir(&ir);
+        assert!(
+            r[0].routes[0].backends.is_empty(),
+            "backend with invalid TLS should be excluded"
+        );
+        assert!(
+            r[0].routes[0].invalid_backend_ref,
+            "route whose only backend has invalid TLS should have invalid_backend_ref=true"
         );
     }
 

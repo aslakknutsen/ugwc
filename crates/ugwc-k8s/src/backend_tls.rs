@@ -34,6 +34,11 @@ fn inference_pool_backend_tls_key(pool_ns: &str, pool_name: &str, port: u16) -> 
     format!("inferencepool/{pool_ns}/{pool_name}:{port}")
 }
 
+pub(crate) fn ca_pem_looks_valid(pem: &[u8]) -> bool {
+    pem.windows(b"CERTIFICATE".len())
+        .any(|w| w == b"CERTIFICATE")
+}
+
 pub(crate) fn backend_tls_section_applies(section: Option<&str>, service_port_name: &str) -> bool {
     section.map_or(true, |sn| sn == service_port_name)
 }
@@ -104,7 +109,11 @@ async fn fetch_configmap_ca_pem(
         .map_err(|_| "InvalidCACertificateRef")?;
     let data = cm.data.as_ref().ok_or("InvalidCACertificateRef")?;
     let pem = data.get("ca.crt").ok_or("InvalidCACertificateRef")?;
-    Ok(pem.as_bytes().to_vec())
+    let pem_bytes = pem.as_bytes().to_vec();
+    if !ca_pem_looks_valid(&pem_bytes) {
+        return Err("InvalidCACertificateRef");
+    }
+    Ok(pem_bytes)
 }
 
 async fn fetch_secret_ca_pem(
@@ -133,10 +142,16 @@ async fn fetch_secret_ca_pem(
         .map_err(|_| "InvalidCACertificateRef")?;
     let data = sec.data.as_ref().ok_or("InvalidCACertificateRef")?;
     if let Some(b) = data.get("ca.crt") {
-        return Ok(b.0.clone());
+        if ca_pem_looks_valid(&b.0) {
+            return Ok(b.0.clone());
+        }
+        return Err("InvalidCACertificateRef");
     }
     if let Some(b) = data.get("tls.crt") {
-        return Ok(b.0.clone());
+        if ca_pem_looks_valid(&b.0) {
+            return Ok(b.0.clone());
+        }
+        return Err("InvalidCACertificateRef");
     }
     Err("InvalidCACertificateRef")
 }
