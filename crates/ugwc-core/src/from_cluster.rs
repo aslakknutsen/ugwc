@@ -2698,43 +2698,17 @@ pub fn ir_from_cluster(snapshot: &ClusterSnapshot) -> (IrSnapshot, CompileReport
     report.listener_route_attachment_counts =
         compute_listener_route_attachment_counts(snapshot, &attached_ls, &report);
 
-    // Gateway API spec: within a single Route, rules are evaluated in declaration
-    // order (first matching rule wins). Across Routes, the most specific match
-    // wins. To honour both constraints in a flat list we sort by *route-level*
-    // max specificity (so more-specific routes come first), then fall through to
-    // RouteSortMeta which preserves rule_idx within each route.
+    // GEP-1713 match precedence: per-rule specificity determines order, with
+    // route metadata (creation timestamp, namespace/name) and rule index as
+    // tie-breakers.  Header matches outrank query-param matches even within
+    // the same HTTPRoute, so we sort by each rule's own specificity rather
+    // than a route-level aggregate.
     type SpecTuple = (u8, usize, usize, usize, u8);
-    let route_max_spec: std::collections::HashMap<(String, String, String, u8), SpecTuple> = {
-        let mut m = std::collections::HashMap::new();
-        for (meta, rule) in &staged {
-            let key = (
-                meta.ts.clone(),
-                meta.route_ns.clone(),
-                meta.route_name.clone(),
-                meta.route_kind_order,
-            );
-            let spec = rule_specificity(&rule.matches);
-            m.entry(key)
-                .and_modify(|e: &mut SpecTuple| {
-                    if spec > *e {
-                        *e = spec;
-                    }
-                })
-                .or_insert(spec);
-        }
-        m
-    };
     let mut augmented: Vec<(SpecTuple, RouteSortMeta, RouteRuleIr)> = staged
         .into_iter()
         .map(|(meta, rule)| {
-            let key = (
-                meta.ts.clone(),
-                meta.route_ns.clone(),
-                meta.route_name.clone(),
-                meta.route_kind_order,
-            );
-            let rspec = route_max_spec[&key];
-            (rspec, meta, rule)
+            let spec = rule_specificity(&rule.matches);
+            (spec, meta, rule)
         })
         .collect();
     augmented.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
@@ -2825,11 +2799,11 @@ mod tests {
     use crate::snapshot::{
         AllowedRoutesNamespacesSnap, AllowedRoutesSnap, BackendTlsEffectiveSnap, EndpointPortSnap,
         EndpointSliceSnap, EndpointSnap, GatewayListenerSnap, GatewayListenerTlsSnap,
-        GrpcRouteRuleSnap, GrpcRouteSnap, HttpBackendRefSnap, HttpPathMatchSnap, HttpRouteRuleSnap,
-        ListenerSetSnap, ParentRefSnap, ReferenceGrantFromSnap, ReferenceGrantSnap,
-        ReferenceGrantToSnap, RouteGroupKindSnap, ServicePortSnap, ServiceSnap,
-        TcpRouteRuleSnap, TcpRouteSnap, TlsRouteRuleSnap, TlsRouteSnap, UdpRouteRuleSnap,
-        UdpRouteSnap,
+        GrpcRouteRuleSnap, GrpcRouteSnap, HttpBackendRefSnap, HttpHeaderMatchSnap,
+        HttpPathMatchSnap, HttpQueryParamMatchSnap, HttpRouteRuleSnap, ListenerSetSnap,
+        ParentRefSnap, ReferenceGrantFromSnap, ReferenceGrantSnap, ReferenceGrantToSnap,
+        RouteGroupKindSnap, ServicePortSnap, ServiceSnap, TcpRouteRuleSnap, TcpRouteSnap,
+        TlsRouteRuleSnap, TlsRouteSnap, UdpRouteRuleSnap, UdpRouteSnap,
     };
 
     fn minimal_cluster() -> ClusterSnapshot {
@@ -4382,5 +4356,97 @@ mod tests {
             .tls_route_conflict_losers
             .iter()
             .any(|l| { l.route_kind == "TLSRoute" && l.route_name == "tr-new" }));
+    }
+
+    #[test]
+    fn header_match_rule_sorts_before_query_param_rule_in_same_route() {
+        let mut c = minimal_cluster();
+        c.http_routes[0].rules = vec![
+            HttpRouteRuleSnap {
+                matches: vec![HttpRequestMatchSnap {
+                    query_params: vec![HttpQueryParamMatchSnap {
+                        name: "animal".into(),
+                        value: "hydra".into(),
+                        match_type: Some("Exact".into()),
+                    }],
+                    ..Default::default()
+                }],
+                backend_refs: vec![HttpBackendRefSnap {
+                    group: None,
+                    kind: Some("Service".into()),
+                    namespace: None,
+                    name: "svc-qp".into(),
+                    port: Some(80),
+                    port_name: None,
+                    weight: None,
+                }],
+                ..Default::default()
+            },
+            HttpRouteRuleSnap {
+                matches: vec![HttpRequestMatchSnap {
+                    headers: vec![HttpHeaderMatchSnap {
+                        match_type: Some("Exact".into()),
+                        name: "version".into(),
+                        value: "four".into(),
+                    }],
+                    ..Default::default()
+                }],
+                backend_refs: vec![HttpBackendRefSnap {
+                    group: None,
+                    kind: Some("Service".into()),
+                    namespace: None,
+                    name: "svc-hdr".into(),
+                    port: Some(80),
+                    port_name: None,
+                    weight: None,
+                }],
+                ..Default::default()
+            },
+        ];
+        for svc_name in &["svc-qp", "svc-hdr"] {
+            c.services.push(ServiceSnap {
+                namespace: "default".into(),
+                name: svc_name.to_string(),
+                ports: vec![ServicePortSnap {
+                    name: "http".into(),
+                    port: 80,
+                    target_port: Some(8080),
+                }],
+                cluster_ip: None,
+            });
+            c.endpoint_slices.push(EndpointSliceSnap {
+                namespace: "default".into(),
+                name: format!("{svc_name}-1"),
+                service_name: Some(svc_name.to_string()),
+                endpoints: vec![EndpointSnap {
+                    addresses: vec!["10.0.0.2".into()],
+                    ports: vec![EndpointPortSnap {
+                        name: Some("http".into()),
+                        port: 8080,
+                    }],
+                }],
+            });
+        }
+
+        let (ir, rep) = ir_from_cluster(&c);
+        assert!(!rep.has_errors(), "{:?}", rep.errors);
+        let http_routes: Vec<&RouteRuleIr> = ir
+            .routes
+            .iter()
+            .filter(|r| r.route_family == RouteFamily::Http)
+            .collect();
+        assert!(
+            http_routes.len() >= 2,
+            "expected at least 2 HTTP rules, got {}",
+            http_routes.len()
+        );
+        assert!(
+            http_routes[0]
+                .backends
+                .iter()
+                .any(|b| b.backend.service_name == "svc-hdr"),
+            "header-match rule should sort first (GEP-1713); got {:?}",
+            http_routes[0].backends,
+        );
     }
 }
