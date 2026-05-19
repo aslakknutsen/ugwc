@@ -2698,13 +2698,47 @@ pub fn ir_from_cluster(snapshot: &ClusterSnapshot) -> (IrSnapshot, CompileReport
     report.listener_route_attachment_counts =
         compute_listener_route_attachment_counts(snapshot, &attached_ls, &report);
 
-    staged.sort_by(|a, b| {
-        let spec_a = rule_specificity(&a.1.matches);
-        let spec_b = rule_specificity(&b.1.matches);
-        // More specific first (reverse order for specificity), then RouteSortMeta for ties.
-        spec_b.cmp(&spec_a).then_with(|| a.0.cmp(&b.0))
-    });
-    let routes: Vec<RouteRuleIr> = staged.into_iter().map(|(_, r)| r).collect();
+    // Gateway API spec: within a single Route, rules are evaluated in declaration
+    // order (first matching rule wins). Across Routes, the most specific match
+    // wins. To honour both constraints in a flat list we sort by *route-level*
+    // max specificity (so more-specific routes come first), then fall through to
+    // RouteSortMeta which preserves rule_idx within each route.
+    type SpecTuple = (u8, usize, usize, usize, u8);
+    let route_max_spec: std::collections::HashMap<(String, String, String, u8), SpecTuple> = {
+        let mut m = std::collections::HashMap::new();
+        for (meta, rule) in &staged {
+            let key = (
+                meta.ts.clone(),
+                meta.route_ns.clone(),
+                meta.route_name.clone(),
+                meta.route_kind_order,
+            );
+            let spec = rule_specificity(&rule.matches);
+            m.entry(key)
+                .and_modify(|e: &mut SpecTuple| {
+                    if spec > *e {
+                        *e = spec;
+                    }
+                })
+                .or_insert(spec);
+        }
+        m
+    };
+    let mut augmented: Vec<(SpecTuple, RouteSortMeta, RouteRuleIr)> = staged
+        .into_iter()
+        .map(|(meta, rule)| {
+            let key = (
+                meta.ts.clone(),
+                meta.route_ns.clone(),
+                meta.route_name.clone(),
+                meta.route_kind_order,
+            );
+            let rspec = route_max_spec[&key];
+            (rspec, meta, rule)
+        })
+        .collect();
+    augmented.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
+    let routes: Vec<RouteRuleIr> = augmented.into_iter().map(|(_, _, r)| r).collect();
 
     let mut backends: BTreeMap<String, Vec<BackendEndpointIr>> = BTreeMap::new();
     for r in &routes {
