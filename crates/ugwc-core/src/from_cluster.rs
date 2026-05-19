@@ -85,7 +85,14 @@ impl PartialOrd for RouteSortMeta {
 
 /// Gateway API match specificity score (GEP-1713). Higher = more specific = should sort earlier.
 /// Computed per match clause; for a rule with multiple OR'd matches, use the maximum.
-fn match_specificity(m: &RouteMatchIr) -> (u8, usize, usize, usize, u8) {
+///
+/// The tuple order matches the spec's precedence list:
+///   1. Exact path > Prefix path
+///   2. Longest path value
+///   3. Method match
+///   4. Largest number of header matches
+///   5. Largest number of query param matches
+fn match_specificity(m: &RouteMatchIr) -> (u8, usize, u8, usize, usize) {
     let path_type_score = if m.path_exact.is_some() {
         3u8
     } else if m.path_prefix.is_some() {
@@ -98,14 +105,14 @@ fn match_specificity(m: &RouteMatchIr) -> (u8, usize, usize, usize, u8) {
         .as_ref()
         .or(m.path_prefix.as_ref())
         .map_or(0, |p| p.len());
+    let method_score = if m.method.is_some() { 1u8 } else { 0 };
     let header_count = m.headers_exact.len();
     let query_count = m.query_params_exact.len();
-    let method_score = if m.method.is_some() { 1u8 } else { 0 };
-    (path_type_score, path_len, header_count, query_count, method_score)
+    (path_type_score, path_len, method_score, header_count, query_count)
 }
 
 /// Max specificity across all match clauses in a rule (higher = more specific).
-fn rule_specificity(matches: &[RouteMatchIr]) -> (u8, usize, usize, usize, u8) {
+fn rule_specificity(matches: &[RouteMatchIr]) -> (u8, usize, u8, usize, usize) {
     matches
         .iter()
         .map(match_specificity)
@@ -2700,10 +2707,9 @@ pub fn ir_from_cluster(snapshot: &ClusterSnapshot) -> (IrSnapshot, CompileReport
 
     // GEP-1713 match precedence: per-rule specificity determines order, with
     // route metadata (creation timestamp, namespace/name) and rule index as
-    // tie-breakers.  Header matches outrank query-param matches even within
-    // the same HTTPRoute, so we sort by each rule's own specificity rather
-    // than a route-level aggregate.
-    type SpecTuple = (u8, usize, usize, usize, u8);
+    // tie-breakers.  Specificity tuple: (path_type, path_len, method,
+    // header_count, query_count) — method outranks header count per spec.
+    type SpecTuple = (u8, usize, u8, usize, usize);
     let mut augmented: Vec<(SpecTuple, RouteSortMeta, RouteRuleIr)> = staged
         .into_iter()
         .map(|(meta, rule)| {
@@ -4446,6 +4452,94 @@ mod tests {
                 .iter()
                 .any(|b| b.backend.service_name == "svc-hdr"),
             "header-match rule should sort first (GEP-1713); got {:?}",
+            http_routes[0].backends,
+        );
+    }
+
+    #[test]
+    fn method_match_rule_sorts_before_header_match_rule_in_same_route() {
+        let mut c = minimal_cluster();
+        c.http_routes[0].rules = vec![
+            HttpRouteRuleSnap {
+                matches: vec![HttpRequestMatchSnap {
+                    method: Some("PATCH".into()),
+                    ..Default::default()
+                }],
+                backend_refs: vec![HttpBackendRefSnap {
+                    group: None,
+                    kind: Some("Service".into()),
+                    namespace: None,
+                    name: "svc-method".into(),
+                    port: Some(80),
+                    port_name: None,
+                    weight: None,
+                }],
+                ..Default::default()
+            },
+            HttpRouteRuleSnap {
+                matches: vec![HttpRequestMatchSnap {
+                    headers: vec![HttpHeaderMatchSnap {
+                        match_type: Some("Exact".into()),
+                        name: "version".into(),
+                        value: "four".into(),
+                    }],
+                    ..Default::default()
+                }],
+                backend_refs: vec![HttpBackendRefSnap {
+                    group: None,
+                    kind: Some("Service".into()),
+                    namespace: None,
+                    name: "svc-hdr".into(),
+                    port: Some(80),
+                    port_name: None,
+                    weight: None,
+                }],
+                ..Default::default()
+            },
+        ];
+        for svc_name in &["svc-method", "svc-hdr"] {
+            c.services.push(ServiceSnap {
+                namespace: "default".into(),
+                name: svc_name.to_string(),
+                ports: vec![ServicePortSnap {
+                    name: "http".into(),
+                    port: 80,
+                    target_port: Some(8080),
+                }],
+                cluster_ip: None,
+            });
+            c.endpoint_slices.push(EndpointSliceSnap {
+                namespace: "default".into(),
+                name: format!("{svc_name}-1"),
+                service_name: Some(svc_name.to_string()),
+                endpoints: vec![EndpointSnap {
+                    addresses: vec!["10.0.0.2".into()],
+                    ports: vec![EndpointPortSnap {
+                        name: Some("http".into()),
+                        port: 8080,
+                    }],
+                }],
+            });
+        }
+
+        let (ir, rep) = ir_from_cluster(&c);
+        assert!(!rep.has_errors(), "{:?}", rep.errors);
+        let http_routes: Vec<&RouteRuleIr> = ir
+            .routes
+            .iter()
+            .filter(|r| r.route_family == RouteFamily::Http)
+            .collect();
+        assert!(
+            http_routes.len() >= 2,
+            "expected at least 2 HTTP rules, got {}",
+            http_routes.len()
+        );
+        assert!(
+            http_routes[0]
+                .backends
+                .iter()
+                .any(|b| b.backend.service_name == "svc-method"),
+            "method-match rule should sort before header-match rule (spec: method > headers); got {:?}",
             http_routes[0].backends,
         );
     }
