@@ -332,6 +332,7 @@ pub async fn load_backend_tls_for_gateway(
         policy_ns: String,
         policy_name: String,
         tls_ir: BackendTlsIr,
+        has_section: bool,
     }
 
     let mut conflicted: HashSet<(String, String)> = HashSet::new();
@@ -354,6 +355,7 @@ pub async fn load_backend_tls_for_gateway(
                             policy_ns: lp.policy_ns.clone(),
                             policy_name: lp.policy_name.clone(),
                             tls_ir: lp.tls_ir.clone(),
+                            has_section: section.is_some(),
                         });
                     }
                 }
@@ -367,24 +369,32 @@ pub async fn load_backend_tls_for_gateway(
                     uniq.push(c);
                 }
             }
-            let mut candidates = uniq;
-
-            candidates.sort_by(|a, b| {
-                a.created_rfc3339.cmp(&b.created_rfc3339).then_with(|| {
-                    (&a.policy_ns, &a.policy_name).cmp(&(&b.policy_ns, &b.policy_name))
-                })
-            });
+            let candidates = uniq;
 
             if candidates.is_empty() {
                 continue;
             }
 
-            let winner = candidates[0].clone();
-            if candidates.len() > 1 {
-                for c in candidates.iter().skip(1) {
-                    conflicted.insert((c.policy_ns.clone(), c.policy_name.clone()));
-                }
+            let has_sectioned = candidates.iter().any(|c| c.has_section);
+            let (mut effective_candidates, broad_candidates): (Vec<_>, Vec<_>) = if has_sectioned {
+                candidates.into_iter().partition(|c| c.has_section)
+            } else {
+                (candidates, Vec::new())
+            };
+
+            effective_candidates.sort_by(|a, b| {
+                a.created_rfc3339.cmp(&b.created_rfc3339).then_with(|| {
+                    (&a.policy_ns, &a.policy_name).cmp(&(&b.policy_ns, &b.policy_name))
+                })
+            });
+
+            let winner = effective_candidates[0].clone();
+            for c in effective_candidates.iter().skip(1) {
+                conflicted.insert((c.policy_ns.clone(), c.policy_name.clone()));
             }
+            // Section-agnostic policies that lose to a section-specific one
+            // are NOT conflicted — they still apply to other ports.
+            let _ = broad_candidates;
 
             effective.insert(backend_k, BackendTlsEffectiveSnap { tls: winner.tls_ir });
         }
@@ -405,6 +415,7 @@ pub async fn load_backend_tls_for_gateway(
                             policy_ns: lp.policy_ns.clone(),
                             policy_name: lp.policy_name.clone(),
                             tls_ir: lp.tls_ir.clone(),
+                            has_section: section.is_some(),
                         });
                     }
                 }
@@ -417,20 +428,27 @@ pub async fn load_backend_tls_for_gateway(
                     uniq.push(c);
                 }
             }
-            let mut candidates = uniq;
-            candidates.sort_by(|a, b| {
+            let candidates = uniq;
+            if candidates.is_empty() {
+                continue;
+            }
+
+            let has_sectioned = candidates.iter().any(|c| c.has_section);
+            let (mut effective_candidates, _broad): (Vec<_>, Vec<_>) = if has_sectioned {
+                candidates.into_iter().partition(|c| c.has_section)
+            } else {
+                (candidates, Vec::new())
+            };
+
+            effective_candidates.sort_by(|a, b| {
                 a.created_rfc3339.cmp(&b.created_rfc3339).then_with(|| {
                     (&a.policy_ns, &a.policy_name).cmp(&(&b.policy_ns, &b.policy_name))
                 })
             });
-            if candidates.is_empty() {
-                continue;
-            }
-            let winner = candidates[0].clone();
-            if candidates.len() > 1 {
-                for c in candidates.iter().skip(1) {
-                    conflicted.insert((c.policy_ns.clone(), c.policy_name.clone()));
-                }
+
+            let winner = effective_candidates[0].clone();
+            for c in effective_candidates.iter().skip(1) {
+                conflicted.insert((c.policy_ns.clone(), c.policy_name.clone()));
             }
             effective.insert(backend_k, BackendTlsEffectiveSnap { tls: winner.tls_ir });
         }
@@ -451,11 +469,7 @@ pub async fn load_backend_tls_for_gateway(
         let acc_reason = if is_conflicted {
             "Conflicted".to_string()
         } else if !resolved_ok {
-            if rr_reason == "NoValidCACertificate" {
-                "NoValidCACertificate".to_string()
-            } else {
-                "Invalid".to_string()
-            }
+            "NoValidCACertificate".to_string()
         } else {
             "Accepted".to_string()
         };
