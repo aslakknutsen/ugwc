@@ -9,9 +9,9 @@ pub mod istio {
 }
 
 use istio::gwxds::{
-    Backend, BackendRef, BackendTls, FailureMode, HeaderNameValue,
+    Backend, BackendRef, BackendTls, CorsFilter, FailureMode, HeaderNameValue,
     InferencePool as InferencePoolPb, Listener, Protocol, RequestHeaderModifier, RequestRedirect,
-    Resource, Route, RouteMatch, TlsConfig,
+    Resource, Route, RouteMatch, TlsConfig, UrlRewrite,
 };
 use ugwc_core::ir::{RouteFamily, TlsMode};
 use ugwc_core::IrSnapshot;
@@ -36,17 +36,39 @@ fn qualify_host(service_ns: &str, host: &str) -> String {
 }
 
 fn redirect_proto(r: &ugwc_core::ir::RequestRedirectIr) -> RequestRedirect {
-    let path = r
-        .path_replace_full
-        .clone()
-        .or_else(|| r.path_replace_prefix.clone())
-        .unwrap_or_default();
+    let (path, prefix_path) = if let Some(full) = &r.path_replace_full {
+        (full.clone(), String::new())
+    } else if let Some(prefix) = &r.path_replace_prefix {
+        (String::new(), prefix.clone())
+    } else {
+        (String::new(), String::new())
+    };
     RequestRedirect {
         hostname: r.hostname.clone().unwrap_or_default(),
         path,
         port: u32::from(r.port.unwrap_or(0)),
         scheme: r.scheme.clone().unwrap_or_default(),
         status_code: r.status_code.unwrap_or(302),
+        prefix_path,
+    }
+}
+
+fn url_rewrite_proto(r: &ugwc_core::ir::UrlRewriteIr) -> UrlRewrite {
+    UrlRewrite {
+        hostname: r.hostname.clone().unwrap_or_default(),
+        path_replace_full: r.path_replace_full.clone().unwrap_or_default(),
+        path_replace_prefix: r.path_replace_prefix.clone().unwrap_or_default(),
+    }
+}
+
+fn cors_proto(c: &ugwc_core::ir::CorsFilterIr) -> CorsFilter {
+    CorsFilter {
+        allow_origins: c.allow_origins.clone(),
+        allow_methods: c.allow_methods.clone(),
+        allow_headers: c.allow_headers.clone(),
+        expose_headers: c.expose_headers.clone(),
+        max_age: c.max_age,
+        allow_credentials: c.allow_credentials,
     }
 }
 
@@ -88,42 +110,22 @@ fn route_matches_proto(
     matches: &[ugwc_core::ir::RouteMatchIr],
 ) -> Vec<RouteMatch> {
     let src: Vec<ugwc_core::ir::RouteMatchIr> = if matches.is_empty() {
+        let base = || ugwc_core::ir::RouteMatchIr {
+            path_prefix: None,
+            path_exact: None,
+            headers_exact: Default::default(),
+            method: None,
+            query_params_exact: Default::default(),
+            grpc_service: None,
+            grpc_method: None,
+        };
         match family {
-            RouteFamily::Grpc => vec![ugwc_core::ir::RouteMatchIr {
-                path_prefix: None,
-                path_exact: None,
-                headers_exact: Default::default(),
-                grpc_service: None,
-                grpc_method: None,
-            }],
+            RouteFamily::Grpc => vec![base()],
             RouteFamily::Http => vec![ugwc_core::ir::RouteMatchIr {
                 path_prefix: Some("/".into()),
-                path_exact: None,
-                headers_exact: Default::default(),
-                grpc_service: None,
-                grpc_method: None,
+                ..base()
             }],
-            RouteFamily::Tls => vec![ugwc_core::ir::RouteMatchIr {
-                path_prefix: None,
-                path_exact: None,
-                headers_exact: Default::default(),
-                grpc_service: None,
-                grpc_method: None,
-            }],
-            RouteFamily::Tcp => vec![ugwc_core::ir::RouteMatchIr {
-                path_prefix: None,
-                path_exact: None,
-                headers_exact: Default::default(),
-                grpc_service: None,
-                grpc_method: None,
-            }],
-            RouteFamily::Udp => vec![ugwc_core::ir::RouteMatchIr {
-                path_prefix: None,
-                path_exact: None,
-                headers_exact: Default::default(),
-                grpc_service: None,
-                grpc_method: None,
-            }],
+            RouteFamily::Tls | RouteFamily::Tcp | RouteFamily::Udp => vec![base()],
         }
     } else {
         matches.to_vec()
@@ -138,9 +140,14 @@ fn route_matches_proto(
                 .iter()
                 .map(|(k, v)| (k.clone(), v.clone()))
                 .collect(),
-            methods: vec![],
+            methods: m.method.iter().cloned().collect(),
             grpc_service: m.grpc_service.clone().unwrap_or_default(),
             grpc_method: m.grpc_method.clone().unwrap_or_default(),
+            query_params: m
+                .query_params_exact
+                .iter()
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect(),
         })
         .collect()
 }
@@ -297,6 +304,8 @@ pub fn encode_ir(ir: &IrSnapshot) -> Vec<Resource> {
                 .response_header_modifier
                 .as_ref()
                 .map(header_modifier_proto);
+            let url_rewrite = r.url_rewrite.as_ref().map(url_rewrite_proto);
+            let cors = r.cors.as_ref().map(cors_proto);
             let grpc_route = matches!(r.route_family, RouteFamily::Grpc);
             let tls_route = matches!(r.route_family, RouteFamily::Tls);
             let tcp_route = matches!(r.route_family, RouteFamily::Tcp);
@@ -316,6 +325,10 @@ pub fn encode_ir(ir: &IrSnapshot) -> Vec<Resource> {
                 tls_route,
                 tcp_route,
                 udp_route,
+                url_rewrite,
+                request_timeout_ms: r.request_timeout_ms.unwrap_or(0),
+                backend_timeout_ms: r.backend_timeout_ms.unwrap_or(0),
+                cors,
             });
         }
 
@@ -433,6 +446,8 @@ mod tests {
                     path_prefix: None,
                     path_exact: None,
                     headers_exact: BTreeMap::new(),
+                    method: None,
+                    query_params_exact: BTreeMap::new(),
                     grpc_service: Some("hello.Greeter".into()),
                     grpc_method: Some("SayHello".into()),
                 }],
@@ -451,6 +466,10 @@ mod tests {
                 request_redirect: None,
                 request_header_modifier: None,
                 response_header_modifier: None,
+                url_rewrite: None,
+                request_timeout_ms: None,
+                backend_timeout_ms: None,
+                cors: None,
                 listener: Some(attach),
             }],
             backends: backends_map,
@@ -536,6 +555,10 @@ mod tests {
                 request_redirect: None,
                 request_header_modifier: None,
                 response_header_modifier: None,
+                url_rewrite: None,
+                request_timeout_ms: None,
+                backend_timeout_ms: None,
+                cors: None,
                 listener: Some(attach),
             }],
             backends: backends_map,
@@ -622,6 +645,10 @@ mod tests {
                 request_redirect: None,
                 request_header_modifier: None,
                 response_header_modifier: None,
+                url_rewrite: None,
+                request_timeout_ms: None,
+                backend_timeout_ms: None,
+                cors: None,
                 listener: Some(attach),
             }],
             backends: backends_map,
@@ -707,6 +734,10 @@ mod tests {
                 request_redirect: None,
                 request_header_modifier: None,
                 response_header_modifier: None,
+                url_rewrite: None,
+                request_timeout_ms: None,
+                backend_timeout_ms: None,
+                cors: None,
                 listener: Some(attach),
             }],
             backends: backends_map,
@@ -781,6 +812,8 @@ mod tests {
                     path_prefix: Some("/".into()),
                     path_exact: None,
                     headers_exact: BTreeMap::new(),
+                    method: None,
+                    query_params_exact: BTreeMap::new(),
                     grpc_service: None,
                     grpc_method: None,
                 }],
@@ -807,6 +840,10 @@ mod tests {
                 request_redirect: None,
                 request_header_modifier: None,
                 response_header_modifier: None,
+                url_rewrite: None,
+                request_timeout_ms: None,
+                backend_timeout_ms: None,
+                cors: None,
                 listener: Some(attach),
             }],
             backends: backends_map,
@@ -873,6 +910,8 @@ mod tests {
                     path_prefix: Some("/".into()),
                     path_exact: None,
                     headers_exact: BTreeMap::new(),
+                    method: None,
+                    query_params_exact: BTreeMap::new(),
                     grpc_service: None,
                     grpc_method: None,
                 }],
@@ -897,6 +936,10 @@ mod tests {
                 request_redirect: None,
                 request_header_modifier: None,
                 response_header_modifier: None,
+                url_rewrite: None,
+                request_timeout_ms: None,
+                backend_timeout_ms: None,
+                cors: None,
                 listener: Some(attach),
             }],
             backends: BTreeMap::new(),

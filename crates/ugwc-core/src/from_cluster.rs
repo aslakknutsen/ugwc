@@ -33,6 +33,27 @@ use crate::snapshot::{
     TlsRouteSnap, UdpRouteRuleSnap, UdpRouteSnap,
 };
 
+/// Parse a Gateway API duration string (GEP-2257: e.g. `"10s"`, `"500ms"`, `"1h"`) to milliseconds.
+fn parse_gateway_duration_ms(s: &str) -> Option<u64> {
+    let s = s.trim();
+    if s == "0s" || s == "0" {
+        return Some(0);
+    }
+    if let Some(rest) = s.strip_suffix("ms") {
+        return rest.parse::<u64>().ok();
+    }
+    if let Some(rest) = s.strip_suffix('s') {
+        return rest.parse::<u64>().ok().map(|v| v * 1000);
+    }
+    if let Some(rest) = s.strip_suffix('m') {
+        return rest.parse::<u64>().ok().map(|v| v * 60_000);
+    }
+    if let Some(rest) = s.strip_suffix('h') {
+        return rest.parse::<u64>().ok().map(|v| v * 3_600_000);
+    }
+    None
+}
+
 #[derive(Clone, Eq, PartialEq)]
 struct RouteSortMeta {
     ts: String,
@@ -448,10 +469,27 @@ fn validate_and_convert_matches(
                 }
             }
         };
+        let mut query_params_exact = BTreeMap::new();
+        for qp in &m.query_params {
+            let mt = qp.match_type.as_deref().unwrap_or("Exact");
+            if mt != "Exact" {
+                report.errors.push(httproute_obj_err(
+                    route,
+                    format!(
+                        "UnsupportedValue: query param match type {mt} (rule {rule_idx} match {mi})"
+                    ),
+                ));
+                return None;
+            }
+            query_params_exact.insert(qp.name.clone(), qp.value.clone());
+        }
+
         out.push(RouteMatchIr {
             path_prefix,
             path_exact,
             headers_exact,
+            method: m.method.clone(),
+            query_params_exact,
             grpc_service: None,
             grpc_method: None,
         });
@@ -459,14 +497,47 @@ fn validate_and_convert_matches(
     Some(out)
 }
 
+struct HttpRuleFilters {
+    redirect: Option<RequestRedirectIr>,
+    request_header_modifier: Option<RequestHeaderModifierIr>,
+    response_header_modifier: Option<RequestHeaderModifierIr>,
+    url_rewrite: Option<crate::ir::UrlRewriteIr>,
+    cors: Option<crate::ir::CorsFilterIr>,
+}
+
+fn header_filter_snap_to_ir(hm: &crate::snapshot::HttpHeaderFilterSnap) -> RequestHeaderModifierIr {
+    RequestHeaderModifierIr {
+        set: hm
+            .set
+            .iter()
+            .map(|x| NamedHeaderIr {
+                name: x.name.clone(),
+                value: x.value.clone(),
+            })
+            .collect(),
+        add: hm
+            .add
+            .iter()
+            .map(|x| NamedHeaderIr {
+                name: x.name.clone(),
+                value: x.value.clone(),
+            })
+            .collect(),
+        remove: hm.remove.clone(),
+    }
+}
+
 fn extract_rule_filters(
     route: &HttpRouteSnap,
     rule: &HttpRouteRuleSnap,
     rule_idx: usize,
     report: &mut CompileReport,
-) -> (Option<RequestRedirectIr>, Option<RequestHeaderModifierIr>) {
+) -> HttpRuleFilters {
     let mut redirect: Option<RequestRedirectIr> = None;
     let mut hdr_mod: Option<RequestHeaderModifierIr> = None;
+    let mut resp_hdr: Option<RequestHeaderModifierIr> = None;
+    let mut url_rewrite: Option<crate::ir::UrlRewriteIr> = None;
+    let mut cors: Option<crate::ir::CorsFilterIr> = None;
 
     for (fi, f) in rule.filters.iter().enumerate() {
         match f.filter_type.as_str() {
@@ -514,25 +585,75 @@ fn extract_rule_filters(
                     ));
                     continue;
                 };
-                hdr_mod = Some(RequestHeaderModifierIr {
-                    set: hm
-                        .set
-                        .iter()
-                        .map(|x| NamedHeaderIr {
-                            name: x.name.clone(),
-                            value: x.value.clone(),
-                        })
-                        .collect(),
-                    add: hm
-                        .add
-                        .iter()
-                        .map(|x| NamedHeaderIr {
-                            name: x.name.clone(),
-                            value: x.value.clone(),
-                        })
-                        .collect(),
-                    remove: hm.remove.clone(),
+                hdr_mod = Some(header_filter_snap_to_ir(hm));
+            }
+            "ResponseHeaderModifier" => {
+                let Some(hm) = f.response_header_modifier.as_ref() else {
+                    report.errors.push(httproute_obj_err(
+                        route,
+                        format!(
+                            "InvalidReference: ResponseHeaderModifier missing body (rule {rule_idx} filter {fi})"
+                        ),
+                    ));
+                    continue;
+                };
+                resp_hdr = Some(header_filter_snap_to_ir(hm));
+            }
+            "URLRewrite" => {
+                let Some(uw) = f.url_rewrite.as_ref() else {
+                    report.errors.push(httproute_obj_err(
+                        route,
+                        format!(
+                            "InvalidReference: URLRewrite filter missing body (rule {rule_idx} filter {fi})"
+                        ),
+                    ));
+                    continue;
+                };
+                let (path_replace_full, path_replace_prefix) = match &uw.path {
+                    None => (None, None),
+                    Some(pm) => match pm.modifier_type.as_str() {
+                        "ReplaceFullPath" => (pm.replace_full_path.clone(), None),
+                        "ReplacePrefixMatch" => (None, pm.replace_prefix_match.clone()),
+                        _ => {
+                            report.errors.push(httproute_obj_err(
+                                route,
+                                format!(
+                                    "UnsupportedValue: url rewrite path modifier {} (rule {rule_idx})",
+                                    pm.modifier_type
+                                ),
+                            ));
+                            (None, None)
+                        }
+                    },
+                };
+                url_rewrite = Some(crate::ir::UrlRewriteIr {
+                    hostname: uw.hostname.clone(),
+                    path_replace_full,
+                    path_replace_prefix,
                 });
+            }
+            "CORS" => {
+                let Some(c) = f.cors.as_ref() else {
+                    report.errors.push(httproute_obj_err(
+                        route,
+                        format!("InvalidReference: CORS filter missing body (rule {rule_idx} filter {fi})"),
+                    ));
+                    continue;
+                };
+                cors = Some(crate::ir::CorsFilterIr {
+                    allow_origins: c.allow_origins.clone(),
+                    allow_methods: c.allow_methods.clone(),
+                    allow_headers: c.allow_headers.clone(),
+                    expose_headers: c.expose_headers.clone(),
+                    max_age: c.max_age.map(|v| v.max(0) as u32).unwrap_or(5),
+                    allow_credentials: c.allow_credentials,
+                });
+            }
+            "RequestMirror" | "ExtensionRef" => {
+                report.errors.push(httproute_obj_err(
+                    route,
+                    format!("UnsupportedValue: filter type {} (rule {rule_idx} filter {fi})", f.filter_type),
+                ));
             }
             other => {
                 report.errors.push(httproute_obj_err(
@@ -542,7 +663,13 @@ fn extract_rule_filters(
             }
         }
     }
-    (redirect, hdr_mod)
+    HttpRuleFilters {
+        redirect,
+        request_header_modifier: hdr_mod,
+        response_header_modifier: resp_hdr,
+        url_rewrite,
+        cors,
+    }
 }
 
 fn resolve_service_port(svc: &ServiceSnap, br: &HttpBackendRefSnap) -> Result<u16, String> {
@@ -710,6 +837,8 @@ fn validate_and_convert_grpc_matches(
             path_prefix: None,
             path_exact: None,
             headers_exact,
+            method: None,
+            query_params_exact: BTreeMap::new(),
             grpc_service,
             grpc_method,
         });
@@ -2126,13 +2255,12 @@ pub fn ir_from_cluster(snapshot: &ClusterSnapshot) -> (IrSnapshot, CompileReport
                 continue;
             };
 
-            let (redirect_ir, hdr_mod_ir) =
-                extract_rule_filters(route, rule, rule_idx, &mut report);
+            let filters = extract_rule_filters(route, rule, rule_idx, &mut report);
 
             let backends_ir =
                 resolve_weighted_backends(route, rule, rule_idx, snapshot, &mut report);
 
-            if redirect_ir.is_some() && !rule.backend_refs.is_empty() {
+            if filters.redirect.is_some() && !rule.backend_refs.is_empty() {
                 report.errors.push(httproute_obj_err(
                     route,
                     format!(
@@ -2142,7 +2270,7 @@ pub fn ir_from_cluster(snapshot: &ClusterSnapshot) -> (IrSnapshot, CompileReport
                 continue;
             }
 
-            if redirect_ir.is_none()
+            if filters.redirect.is_none()
                 && backends_ir.is_empty()
                 && rule.backend_refs.is_empty()
                 && rule.filters.is_empty()
@@ -2150,7 +2278,7 @@ pub fn ir_from_cluster(snapshot: &ClusterSnapshot) -> (IrSnapshot, CompileReport
                 continue;
             }
 
-            if redirect_ir.is_none() && backends_ir.is_empty() && !rule.backend_refs.is_empty() {
+            if filters.redirect.is_none() && backends_ir.is_empty() && !rule.backend_refs.is_empty() {
                 report.errors.push(httproute_obj_err(
                     route,
                     format!("Invalid: rule {rule_idx} has no valid backends"),
@@ -2184,6 +2312,14 @@ pub fn ir_from_cluster(snapshot: &ClusterSnapshot) -> (IrSnapshot, CompileReport
                     route.namespace, route.name, rule_idx, lk.section_name
                 );
 
+                let (request_timeout_ms, backend_timeout_ms) = match &rule.timeouts {
+                    Some(t) => (
+                        t.request.as_deref().and_then(parse_gateway_duration_ms),
+                        t.backend_request.as_deref().and_then(parse_gateway_duration_ms),
+                    ),
+                    None => (None, None),
+                };
+
                 staged.push((
                     RouteSortMeta {
                         ts: meta_ts.clone(),
@@ -2199,9 +2335,13 @@ pub fn ir_from_cluster(snapshot: &ClusterSnapshot) -> (IrSnapshot, CompileReport
                         hosts,
                         matches: matches_ir.clone(),
                         backends: backends_ir.clone(),
-                        request_redirect: redirect_ir.clone(),
-                        request_header_modifier: hdr_mod_ir.clone(),
-                        response_header_modifier: None,
+                        request_redirect: filters.redirect.clone(),
+                        request_header_modifier: filters.request_header_modifier.clone(),
+                        response_header_modifier: filters.response_header_modifier.clone(),
+                        url_rewrite: filters.url_rewrite.clone(),
+                        request_timeout_ms,
+                        backend_timeout_ms,
+                        cors: filters.cors.clone(),
                         listener: Some(lk.clone()),
                     },
                 ));
@@ -2287,6 +2427,10 @@ pub fn ir_from_cluster(snapshot: &ClusterSnapshot) -> (IrSnapshot, CompileReport
                         request_redirect: None,
                         request_header_modifier: hdr_mod_ir.clone(),
                         response_header_modifier: resp_hdr_ir.clone(),
+                        url_rewrite: None,
+                        request_timeout_ms: None,
+                        backend_timeout_ms: None,
+                        cors: None,
                         listener: Some(lk.clone()),
                     },
                 ));
@@ -2360,6 +2504,10 @@ pub fn ir_from_cluster(snapshot: &ClusterSnapshot) -> (IrSnapshot, CompileReport
                     request_redirect: None,
                     request_header_modifier: None,
                     response_header_modifier: None,
+                    url_rewrite: None,
+                    request_timeout_ms: None,
+                    backend_timeout_ms: None,
+                    cors: None,
                     listener: Some(lk.clone()),
                 },
             ));
@@ -2431,6 +2579,10 @@ pub fn ir_from_cluster(snapshot: &ClusterSnapshot) -> (IrSnapshot, CompileReport
                     request_redirect: None,
                     request_header_modifier: None,
                     response_header_modifier: None,
+                    url_rewrite: None,
+                    request_timeout_ms: None,
+                    backend_timeout_ms: None,
+                    cors: None,
                     listener: Some(lk.clone()),
                 },
             ));
@@ -2502,6 +2654,10 @@ pub fn ir_from_cluster(snapshot: &ClusterSnapshot) -> (IrSnapshot, CompileReport
                     request_redirect: None,
                     request_header_modifier: None,
                     response_header_modifier: None,
+                    url_rewrite: None,
+                    request_timeout_ms: None,
+                    backend_timeout_ms: None,
+                    cors: None,
                     listener: Some(lk.clone()),
                 },
             ));
@@ -2650,6 +2806,7 @@ mod tests {
                             value: Some("/".into()),
                         }),
                         headers: vec![],
+                        ..Default::default()
                     }],
                     filters: vec![],
                     backend_refs: vec![HttpBackendRefSnap {
@@ -2661,6 +2818,7 @@ mod tests {
                         port_name: None,
                         weight: None,
                     }],
+                    ..Default::default()
                 }],
             }],
             grpc_routes: vec![],
@@ -2839,6 +2997,7 @@ mod tests {
                     weight: Some(1),
                 },
             ],
+            ..Default::default()
         }];
         let (ir, rep) = ir_from_cluster(&snap);
         assert!(!rep.has_errors(), "{:?}", rep.errors);
@@ -2911,6 +3070,7 @@ mod tests {
                             value: Some("/".into()),
                         }),
                         headers: vec![],
+                        ..Default::default()
                     }],
                     filters: vec![],
                     backend_refs: vec![HttpBackendRefSnap {
@@ -2922,6 +3082,7 @@ mod tests {
                         port_name: None,
                         weight: None,
                     }],
+                    ..Default::default()
                 }],
             }],
             grpc_routes: vec![],
@@ -3239,6 +3400,7 @@ mod tests {
                             value: Some("/v2".into()),
                         }),
                         headers: vec![],
+                        ..Default::default()
                     }],
                     filters: vec![],
                     backend_refs: vec![HttpBackendRefSnap {
@@ -3250,6 +3412,7 @@ mod tests {
                         port_name: None,
                         weight: None,
                     }],
+                    ..Default::default()
                 },
                 HttpRouteRuleSnap {
                     matches: vec![],
@@ -3263,6 +3426,7 @@ mod tests {
                         port_name: None,
                         weight: None,
                     }],
+                    ..Default::default()
                 },
             ],
         }];
@@ -3365,6 +3529,9 @@ mod tests {
                     status_code: Some(302),
                 }),
                 request_header_modifier: None,
+                response_header_modifier: None,
+                url_rewrite: None,
+                cors: None,
             });
         let (ir, rep) = ir_from_cluster(&c);
         assert!(!rep.has_errors(), "{:?}", rep.errors);

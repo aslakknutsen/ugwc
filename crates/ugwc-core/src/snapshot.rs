@@ -173,21 +173,53 @@ pub struct HttpHeaderMatchSnap {
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+pub struct HttpQueryParamMatchSnap {
+    pub name: String,
+    pub value: String,
+    #[serde(rename = "type", default)]
+    pub match_type: Option<String>,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
 pub struct HttpRequestMatchSnap {
     #[serde(default)]
     pub path: Option<HttpPathMatchSnap>,
     #[serde(default)]
     pub headers: Vec<HttpHeaderMatchSnap>,
+    #[serde(default)]
+    pub method: Option<String>,
+    #[serde(rename = "queryParams", default)]
+    pub query_params: Vec<HttpQueryParamMatchSnap>,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+pub struct HttpRouteTimeoutsSnap {
+    #[serde(default)]
+    pub request: Option<String>,
+    #[serde(rename = "backendRequest", default)]
+    pub backend_request: Option<String>,
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
 pub struct HttpRouteRuleSnap {
+    #[serde(default)]
+    pub name: Option<String>,
     #[serde(default)]
     pub matches: Vec<HttpRequestMatchSnap>,
     #[serde(default)]
     pub filters: Vec<HttpRouteFilterSnap>,
     #[serde(rename = "backendRefs", default)]
     pub backend_refs: Vec<HttpBackendRefSnap>,
+    #[serde(default)]
+    pub timeouts: Option<HttpRouteTimeoutsSnap>,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+pub struct HttpUrlRewriteFilterSnap {
+    #[serde(default)]
+    pub hostname: Option<String>,
+    #[serde(default)]
+    pub path: Option<HttpPathModifierSnap>,
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
@@ -198,6 +230,28 @@ pub struct HttpRouteFilterSnap {
     pub request_redirect: Option<HttpRequestRedirectFilterSnap>,
     #[serde(rename = "requestHeaderModifier", default)]
     pub request_header_modifier: Option<HttpHeaderFilterSnap>,
+    #[serde(rename = "responseHeaderModifier", default)]
+    pub response_header_modifier: Option<HttpHeaderFilterSnap>,
+    #[serde(rename = "urlRewrite", default)]
+    pub url_rewrite: Option<HttpUrlRewriteFilterSnap>,
+    #[serde(default)]
+    pub cors: Option<HttpCorsFilterSnap>,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+pub struct HttpCorsFilterSnap {
+    #[serde(rename = "allowOrigins", default)]
+    pub allow_origins: Vec<String>,
+    #[serde(rename = "allowMethods", default)]
+    pub allow_methods: Vec<String>,
+    #[serde(rename = "allowHeaders", default)]
+    pub allow_headers: Vec<String>,
+    #[serde(rename = "exposeHeaders", default)]
+    pub expose_headers: Vec<String>,
+    #[serde(rename = "maxAge", default)]
+    pub max_age: Option<i32>,
+    #[serde(rename = "allowCredentials", default)]
+    pub allow_credentials: bool,
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]

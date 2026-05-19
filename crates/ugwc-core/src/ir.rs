@@ -5,7 +5,7 @@ use std::collections::BTreeMap;
 use uuid::Uuid;
 
 /// Schema version embedded on every snapshot (bump when wire/IR changes).
-pub const IR_VERSION: u32 = 8;
+pub const IR_VERSION: u32 = 9;
 
 /// Per-dataplane scope identity for sharded xDS versions (see module docs).
 #[derive(Clone, Debug, Eq, Hash, PartialEq, Ord, PartialOrd)]
@@ -114,6 +114,12 @@ pub struct RouteMatchIr {
     /// Lowercase header name → exact value.
     #[serde(default)]
     pub headers_exact: BTreeMap<String, String>,
+    /// HTTP method constraint (e.g. `GET`, `POST`); unset = any method.
+    #[serde(default)]
+    pub method: Option<String>,
+    /// Query parameter name → exact value.
+    #[serde(default)]
+    pub query_params_exact: BTreeMap<String, String>,
     /// gRPC full service name (e.g. `helloworld.Greeter`); unset = wildcard for GRPCRoute matches.
     #[serde(default)]
     pub grpc_service: Option<String>,
@@ -166,6 +172,34 @@ pub struct RequestHeaderModifierIr {
     pub remove: Vec<String>,
 }
 
+/// URL rewrite action from Gateway API `URLRewrite` filter.
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct UrlRewriteIr {
+    #[serde(default)]
+    pub hostname: Option<String>,
+    #[serde(default)]
+    pub path_replace_full: Option<String>,
+    #[serde(default)]
+    pub path_replace_prefix: Option<String>,
+}
+
+/// CORS filter from Gateway API `CORS` inline filter.
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct CorsFilterIr {
+    #[serde(default)]
+    pub allow_origins: Vec<String>,
+    #[serde(default)]
+    pub allow_methods: Vec<String>,
+    #[serde(default)]
+    pub allow_headers: Vec<String>,
+    #[serde(default)]
+    pub expose_headers: Vec<String>,
+    #[serde(default)]
+    pub max_age: u32,
+    #[serde(default)]
+    pub allow_credentials: bool,
+}
+
 /// Normalized Gateway API route rule (HTTPRoute or GRPCRoute).
 #[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct RouteRuleIr {
@@ -185,6 +219,14 @@ pub struct RouteRuleIr {
     pub request_header_modifier: Option<RequestHeaderModifierIr>,
     #[serde(default)]
     pub response_header_modifier: Option<RequestHeaderModifierIr>,
+    #[serde(default)]
+    pub url_rewrite: Option<UrlRewriteIr>,
+    #[serde(default)]
+    pub request_timeout_ms: Option<u64>,
+    #[serde(default)]
+    pub backend_timeout_ms: Option<u64>,
+    #[serde(default)]
+    pub cors: Option<CorsFilterIr>,
     #[serde(default)]
     pub listener: Option<ListenerAttachmentIr>,
 }

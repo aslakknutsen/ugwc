@@ -16,13 +16,15 @@ use ugwc_core::snapshot::{
     EndpointSnap, GatewayAddressSnap, GatewayClassSnap, GatewayInfrastructureSnap,
     GatewayListenerSnap, GatewayListenerTlsSnap, GrpcHeaderMatchSnap, GrpcMethodMatchSnap,
     GrpcRouteFilterSnap, GrpcRouteMatchSnap, GrpcRouteRuleSnap, GrpcRouteSnap, HttpBackendRefSnap,
-    HttpHeaderFilterSnap, HttpHeaderMatchSnap, HttpHeaderNameValueSnap, HttpPathMatchSnap,
-    HttpPathModifierSnap, HttpRequestMatchSnap, HttpRequestRedirectFilterSnap, HttpRouteFilterSnap,
-    HttpRouteRuleSnap, HttpRouteSnap, InferencePoolPortSnap, InferencePoolSelectorSnap,
-    InferencePoolSnap, ListenerNamespacesSnap, ListenerParentSnap, ListenerSetSnap, ParentRefSnap,
-    RejectedListenerSetSnap, ReferenceGrantFromSnap, ReferenceGrantSnap, ReferenceGrantToSnap,
-    RouteGroupKindSnap, SecretObjectReferenceSnap, ServicePortSnap, ServiceSnap, TcpRouteRuleSnap,
-    TcpRouteSnap, TlsRouteRuleSnap, TlsRouteSnap, UdpRouteRuleSnap, UdpRouteSnap,
+    HttpCorsFilterSnap, HttpHeaderFilterSnap, HttpHeaderMatchSnap, HttpHeaderNameValueSnap,
+    HttpPathMatchSnap, HttpPathModifierSnap, HttpQueryParamMatchSnap, HttpRequestMatchSnap,
+    HttpRequestRedirectFilterSnap, HttpRouteFilterSnap, HttpRouteRuleSnap, HttpRouteSnap,
+    HttpRouteTimeoutsSnap, HttpUrlRewriteFilterSnap, InferencePoolPortSnap,
+    InferencePoolSelectorSnap, InferencePoolSnap, ListenerNamespacesSnap, ListenerParentSnap,
+    ListenerSetSnap, ParentRefSnap, RejectedListenerSetSnap, ReferenceGrantFromSnap,
+    ReferenceGrantSnap, ReferenceGrantToSnap, RouteGroupKindSnap, SecretObjectReferenceSnap,
+    ServicePortSnap, ServiceSnap, TcpRouteRuleSnap, TcpRouteSnap, TlsRouteRuleSnap, TlsRouteSnap,
+    UdpRouteRuleSnap, UdpRouteSnap,
 };
 
 use crate::crd_supervisor::{ActiveCrds, ManagedCrd};
@@ -38,9 +40,13 @@ use crate::resources::{
     HttpRouteParentRefs, HttpRouteRules, HttpRouteRulesBackendRefs, HttpRouteRulesFilters,
     HttpRouteRulesFiltersRequestHeaderModifier, HttpRouteRulesFiltersRequestRedirectPath,
     HttpRouteRulesFiltersRequestRedirectPathType, HttpRouteRulesFiltersRequestRedirectScheme,
-    HttpRouteRulesFiltersType,
+    HttpRouteRulesFiltersResponseHeaderModifier, HttpRouteRulesFiltersType,
+    HttpRouteRulesFiltersUrlRewritePath,
+    HttpRouteRulesFiltersUrlRewritePathType,
     HttpRouteRulesMatches, HttpRouteRulesMatchesHeaders, HttpRouteRulesMatchesHeadersType,
-    HttpRouteRulesMatchesPathType, InferencePool, ListenerSet, ListenerSetListeners,
+    HttpRouteRulesMatchesMethod, HttpRouteRulesMatchesPathType, HttpRouteRulesMatchesQueryParams,
+    HttpRouteRulesTimeouts,
+    InferencePool, ListenerSet, ListenerSetListeners,
     ListenerSetListenersAllowedRoutes, ListenerSetListenersAllowedRoutesKinds,
     ListenerSetListenersAllowedRoutesNamespaces, ListenerSetListenersTls,
     ListenerSetListenersTlsCertificateRefs, ListenerSetListenersTlsMode, ListenerSetParentRef,
@@ -708,6 +714,59 @@ fn http_path_modifier_snap(p: &HttpRouteRulesFiltersRequestRedirectPath) -> Http
     }
 }
 
+fn url_rewrite_path_modifier_snap(p: &HttpRouteRulesFiltersUrlRewritePath) -> HttpPathModifierSnap {
+    let modifier_type = match p.r#type {
+        HttpRouteRulesFiltersUrlRewritePathType::ReplaceFullPath => "ReplaceFullPath",
+        HttpRouteRulesFiltersUrlRewritePathType::ReplacePrefixMatch => "ReplacePrefixMatch",
+    };
+    HttpPathModifierSnap {
+        modifier_type: modifier_type.to_string(),
+        replace_full_path: p.replace_full_path.clone(),
+        replace_prefix_match: p.replace_prefix_match.clone(),
+    }
+}
+
+fn resp_header_filter_snap(h: &HttpRouteRulesFiltersResponseHeaderModifier) -> HttpHeaderFilterSnap {
+    HttpHeaderFilterSnap {
+        set: h
+            .set
+            .as_deref()
+            .unwrap_or_default()
+            .iter()
+            .map(|x| HttpHeaderNameValueSnap {
+                name: x.name.clone(),
+                value: x.value.clone(),
+            })
+            .collect(),
+        add: h
+            .add
+            .as_deref()
+            .unwrap_or_default()
+            .iter()
+            .map(|x| HttpHeaderNameValueSnap {
+                name: x.name.clone(),
+                value: x.value.clone(),
+            })
+            .collect(),
+        remove: h.remove.as_deref().unwrap_or_default().to_vec(),
+    }
+}
+
+fn http_method_str(m: &HttpRouteRulesMatchesMethod) -> String {
+    match m {
+        HttpRouteRulesMatchesMethod::Get => "GET",
+        HttpRouteRulesMatchesMethod::Head => "HEAD",
+        HttpRouteRulesMatchesMethod::Post => "POST",
+        HttpRouteRulesMatchesMethod::Put => "PUT",
+        HttpRouteRulesMatchesMethod::Delete => "DELETE",
+        HttpRouteRulesMatchesMethod::Connect => "CONNECT",
+        HttpRouteRulesMatchesMethod::Options => "OPTIONS",
+        HttpRouteRulesMatchesMethod::Trace => "TRACE",
+        HttpRouteRulesMatchesMethod::Patch => "PATCH",
+    }
+    .to_string()
+}
+
 fn http_route_filter_snap(f: &HttpRouteRulesFilters) -> HttpRouteFilterSnap {
     HttpRouteFilterSnap {
         filter_type: http_route_filters_type_str(&f.r#type).to_string(),
@@ -724,6 +783,22 @@ fn http_route_filter_snap(f: &HttpRouteRulesFilters) -> HttpRouteFilterSnap {
             .request_header_modifier
             .as_ref()
             .map(http_header_filter_snap),
+        response_header_modifier: f
+            .response_header_modifier
+            .as_ref()
+            .map(resp_header_filter_snap),
+        url_rewrite: f.url_rewrite.as_ref().map(|uw| HttpUrlRewriteFilterSnap {
+            hostname: uw.hostname.clone(),
+            path: uw.path.as_ref().map(url_rewrite_path_modifier_snap),
+        }),
+        cors: f.cors.as_ref().map(|c| HttpCorsFilterSnap {
+            allow_origins: c.allow_origins.clone().unwrap_or_default(),
+            allow_methods: c.allow_methods.clone().unwrap_or_default(),
+            allow_headers: c.allow_headers.clone().unwrap_or_default(),
+            expose_headers: c.expose_headers.clone().unwrap_or_default(),
+            max_age: c.max_age,
+            allow_credentials: c.allow_credentials.unwrap_or(false),
+        }),
     }
 }
 
@@ -1182,6 +1257,7 @@ fn http_route_to_snap(route: &HTTPRoute) -> HttpRouteSnap {
         .unwrap_or_default()
         .iter()
         .map(|r: &HttpRouteRules| HttpRouteRuleSnap {
+            name: r.name.clone(),
             matches: r
                 .matches
                 .as_deref()
@@ -1203,6 +1279,18 @@ fn http_route_to_snap(route: &HTTPRoute) -> HttpRouteSnap {
                             value: h.value.clone(),
                         })
                         .collect(),
+                    method: m.method.as_ref().map(http_method_str),
+                    query_params: m
+                        .query_params
+                        .as_deref()
+                        .unwrap_or_default()
+                        .iter()
+                        .map(|qp: &HttpRouteRulesMatchesQueryParams| HttpQueryParamMatchSnap {
+                            name: qp.name.clone(),
+                            value: qp.value.clone(),
+                            match_type: qp.r#type.as_ref().map(|t| format!("{t:?}")),
+                        })
+                        .collect(),
                 })
                 .collect(),
             filters: r
@@ -1219,6 +1307,10 @@ fn http_route_to_snap(route: &HTTPRoute) -> HttpRouteSnap {
                 .iter()
                 .map(http_backend_ref_to_snap)
                 .collect(),
+            timeouts: r.timeouts.as_ref().map(|t: &HttpRouteRulesTimeouts| HttpRouteTimeoutsSnap {
+                request: t.request.clone(),
+                backend_request: t.backend_request.clone(),
+            }),
         })
         .collect();
 

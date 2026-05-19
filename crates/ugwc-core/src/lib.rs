@@ -34,8 +34,8 @@ pub use http_route_attachment::{
 pub use ir::{
     backend_endpoints_map_key, BackendEndpointIr, BackendIr, BackendTlsIr, IrRevision, IrScopeId,
     IrSnapshot, ListenerAttachmentIr, ListenerIr, NamedHeaderIr, RequestHeaderModifierIr,
-    RequestRedirectIr, RouteMatchIr, RouteRuleIr, SnapshotMeta, TlsMode, WeightedBackendIr,
-    IR_VERSION,
+    CorsFilterIr, RequestRedirectIr, RouteMatchIr, RouteRuleIr, SnapshotMeta, TlsMode, UrlRewriteIr,
+    WeightedBackendIr, IR_VERSION,
 };
 pub use listener_merge::merge_effective_listeners;
 pub use listener_route_kinds::{
