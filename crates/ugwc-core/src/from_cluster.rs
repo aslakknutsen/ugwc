@@ -3157,6 +3157,151 @@ mod tests {
     }
 
     #[test]
+    fn partially_invalid_reference_grant_keeps_valid_rule_marks_invalid() {
+        let mut c = minimal_cluster();
+        c.gateway_namespace = "infra".into();
+        c.gateway_name = "gw".into();
+        c.listeners[0].allowed_routes = Some(AllowedRoutesSnap {
+            namespaces: Some(AllowedRoutesNamespacesSnap {
+                from: Some("Same".into()),
+                selector_match_labels: BTreeMap::new(),
+            }),
+            kinds: vec![],
+        });
+        c.effective_listeners =
+            merge_effective_listeners(&c.listeners, &[]);
+
+        c.services.push(ServiceSnap {
+            namespace: "app-backend".into(),
+            name: "v1".into(),
+            ports: vec![ServicePortSnap { name: "http".into(), port: 8080, target_port: Some(3000) }],
+            cluster_ip: None,
+        });
+        c.services.push(ServiceSnap {
+            namespace: "app-backend".into(),
+            name: "v2".into(),
+            ports: vec![ServicePortSnap { name: "http".into(), port: 8080, target_port: Some(3000) }],
+            cluster_ip: None,
+        });
+        c.endpoint_slices.push(EndpointSliceSnap {
+            namespace: "app-backend".into(),
+            name: "v1-eps".into(),
+            service_name: Some("v1".into()),
+            endpoints: vec![EndpointSnap {
+                addresses: vec!["10.0.1.1".into()],
+                ports: vec![EndpointPortSnap { name: Some("http".into()), port: 3000 }],
+            }],
+        });
+        c.endpoint_slices.push(EndpointSliceSnap {
+            namespace: "app-backend".into(),
+            name: "v2-eps".into(),
+            service_name: Some("v2".into()),
+            endpoints: vec![EndpointSnap {
+                addresses: vec!["10.0.1.2".into()],
+                ports: vec![EndpointPortSnap { name: Some("http".into()), port: 3000 }],
+            }],
+        });
+
+        c.reference_grants.push(crate::snapshot::ReferenceGrantSnap {
+            namespace: "app-backend".into(),
+            name: "g".into(),
+            from: vec![crate::snapshot::ReferenceGrantFromSnap {
+                group: Some("gateway.networking.k8s.io".into()),
+                kind: "HTTPRoute".into(),
+                namespace: "infra".into(),
+            }],
+            to: vec![crate::snapshot::ReferenceGrantToSnap {
+                group: Some("".into()),
+                kind: "Service".into(),
+                name: Some("v1".into()),
+            }],
+        });
+
+        c.http_routes = vec![HttpRouteSnap {
+            namespace: "infra".into(),
+            name: "partial-grant".into(),
+            generation: 1,
+            creation_timestamp_rfc3339: None,
+            parent_refs: vec![ParentRefSnap {
+                group: Some("gateway.networking.k8s.io".into()),
+                kind: Some("Gateway".into()),
+                namespace: None,
+                name: "gw".into(),
+                section_name: None,
+                port: None,
+            }],
+            hostnames: vec![],
+            rules: vec![
+                HttpRouteRuleSnap {
+                    matches: vec![HttpRequestMatchSnap {
+                        path: Some(HttpPathMatchSnap {
+                            path_type: Some("PathPrefix".into()),
+                            value: Some("/v2".into()),
+                        }),
+                        headers: vec![],
+                    }],
+                    filters: vec![],
+                    backend_refs: vec![HttpBackendRefSnap {
+                        group: None,
+                        kind: Some("Service".into()),
+                        namespace: Some("app-backend".into()),
+                        name: "v2".into(),
+                        port: Some(8080),
+                        port_name: None,
+                        weight: None,
+                    }],
+                },
+                HttpRouteRuleSnap {
+                    matches: vec![],
+                    filters: vec![],
+                    backend_refs: vec![HttpBackendRefSnap {
+                        group: None,
+                        kind: Some("Service".into()),
+                        namespace: Some("app-backend".into()),
+                        name: "v1".into(),
+                        port: Some(8080),
+                        port_name: None,
+                        weight: None,
+                    }],
+                },
+            ],
+        }];
+
+        let (ir, rep) = ir_from_cluster(&c);
+
+        assert!(
+            rep.errors.iter().any(|e| e.reason == "RefNotPermitted"),
+            "expected RefNotPermitted error for v2, got: {:?}",
+            rep.errors
+        );
+
+        assert_eq!(ir.routes.len(), 2, "both rules must appear in the IR");
+
+        let v2_rule = ir.routes.iter().find(|r| {
+            r.matches.iter().any(|m| m.path_prefix.as_deref() == Some("/v2"))
+        });
+        assert!(v2_rule.is_some(), "must have a /v2 rule in IR");
+        assert!(
+            v2_rule.unwrap().backends.is_empty(),
+            "/v2 rule must have no backends (denied by grant)"
+        );
+
+        let catchall = ir.routes.iter().find(|r| {
+            r.matches.iter().any(|m| m.path_prefix.as_deref() == Some("/"))
+        });
+        assert!(catchall.is_some(), "must have a catch-all rule in IR");
+        assert!(
+            !catchall.unwrap().backends.is_empty(),
+            "catch-all rule must have backends (v1 allowed by grant)"
+        );
+        assert_eq!(
+            catchall.unwrap().backends[0].backend.service_name, "v1",
+            "catch-all backend must be v1"
+        );
+
+    }
+
+    #[test]
     fn cross_namespace_route_parent_attaches_without_reference_grant_when_listener_allows() {
         let mut c = minimal_cluster();
         c.gateway_namespace = "infra".into();

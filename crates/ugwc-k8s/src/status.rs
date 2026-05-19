@@ -1649,16 +1649,10 @@ pub async fn apply_listenerset_reconciled_status(
         .filter(|&g| g > 0)
         .unwrap_or(1);
     let ls_ns_name = (ns.to_string(), name.to_string());
-    // Per-listener conflicts and cert errors are surfaced on individual listener
-    // conditions (Accepted, ResolvedRefs, Conflicted). The ListenerSet object-level
-    // Programmed condition mirrors the Gateway: True when the controller processed
-    // the ListenerSet, regardless of per-listener issues (consistent with Gateway
-    // API conformance expectations).
-    let _ = outcome.report.errors.iter().any(|e| {
-        e.kind == "ListenerSet" && e.namespace == ls_ns_name.0 && e.name == ls_ns_name.1
-    });
 
     let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+
+    let mut any_listener_valid = false;
 
     let listeners_json: Vec<serde_json::Value> = ls
         .spec
@@ -1702,6 +1696,11 @@ pub async fn apply_listenerset_reconciled_status(
                 port: u16::try_from(l.port).unwrap_or(0),
             };
             let attached = outcome.report.attachment_count_for_listener_key(&lk);
+
+            let listener_invalid = eff.is_none() || conflicted || cert_broken || route_kinds_broken;
+            if !listener_invalid {
+                any_listener_valid = true;
+            }
 
             let (acc_s, acc_r, acc_m) = if conflicted {
                 let cr = eff
@@ -1801,8 +1800,16 @@ pub async fn apply_listenerset_reconciled_status(
         })
         .collect();
 
-    let (acc_g, acc_reason_g) = ("True", "Accepted");
-    let (prog_g, prog_rs) = ("True", "Programmed");
+    let (acc_g, acc_reason_g) = if any_listener_valid {
+        ("True", "Accepted")
+    } else {
+        ("False", "ListenersNotValid")
+    };
+    let (prog_g, prog_rs) = if any_listener_valid {
+        ("True", "Programmed")
+    } else {
+        ("False", "ListenersNotValid")
+    };
 
     let status_doc = serde_json::json!({
         "conditions": [
