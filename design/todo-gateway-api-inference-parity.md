@@ -18,7 +18,7 @@ Primary crates: `crates/ugwc-k8s` (watches, loader, status), `crates/ugwc-core` 
 | **Status** | Gateway/listeners; HTTPRoute / GRPCRoute / TLSRoute / TCPRoute / UDPRoute parents; ListenerSet; BackendTLSPolicy ancestors (reasons prefer loader outcome fields); InferencePool parents |
 | **xDS** | `gwxds.proto`: GRPC routes, TLS/TCP/UDP route bits, listener `protocol` / `allowed_routes`, `Backend.tls` (CA, hostname, SANs, invalid, **client_cert / client_key** from IR) / `Backend.inference_pool`, EPP Service host/port |
 
-**Explicitly not implemented:** `InferenceObjective` (and related `inference.networking.x-k8s.io` CRDs), BackendTLS `targetRefs` kinds beyond **core Service** and **`InferencePool`** (same-namespace policy/target as coded), forwarding **`spec.options`** to the dataplane, arbitrary HTTP/GRPC extended filters (many surfaces still return `UnsupportedValue` / reject).
+**Explicitly not implemented:** `InferenceObjective` (and related `inference.networking.x-k8s.io` CRDs), BackendTLS `targetRefs` kinds beyond **core Service** and **`InferencePool`** (same-namespace policy/target as coded), forwarding **`spec.options`** to the dataplane, request mirroring filters, backend request header modification, backend protocol negotiation (H2C/WebSocket).
 
 **`UDPRoute`:** experimental Gateway API CRD `gateway.networking.k8s.io/v1alpha2` — same bundle requirement as TCPRoute; TCPRoute-shaped pipeline (snapshot → compile → status → `gwxds` `Protocol::UDP` / `Route.udp_route`). First rule only; UDP-vs-UDP precedence mirrors TCP; UDP+L7 same-port conflicts merged like TCP+L7.
 
@@ -81,8 +81,12 @@ Use this as the “done” ledger; keep **Remaining work** for gaps only.
 
 ### HTTP / GRPC API completeness
 
-- [ ] **Audit `UnsupportedValue` / unsupported filter paths** — produce a matrix doc (Gateway API field → ugwc support level) or shrink gap intentionally.
-- [ ] **TLS listener modes** — close gaps called out in compile path (e.g. TLS terminate + TLSRoute interactions if still partial).
+- [x] **HTTPRoute extended features** — 19 of 25 standard extended features now pass conformance (method matching, query params, redirects, rewrites, timeouts, CORS, response headers, etc.). See [`TODO-httproute-extended-features.md`](TODO-httproute-extended-features.md) for remaining 6.
+- [ ] **HTTPRoute request mirror** — `HTTPRouteRequestMirror`, `HTTPRouteRequestMultipleMirrors`, `HTTPRouteRequestPercentageMirror` (3 standard features, ~5 tests). Requires praxis mirror filter.
+- [ ] **HTTPRoute backend request header modifier** — `HTTPRouteBackendRequestHeaderModification` (standard, 2 tests). Per-backendRef header mod in compile.rs.
+- [ ] **HTTPRoute backend protocols** — `HTTPRouteBackendProtocolH2C`, `HTTPRouteBackendProtocolWebSocket` (standard, 2 tests). Praxis upstream connection changes.
+- [ ] **GRPCRouteNamedRouteRule** — standard extended feature, 1 test. Named rule support for GRPCRoute (HTTPRoute equivalent already passes).
+- [ ] **TLS listener modes** — `TLSRouteModeTerminate` (standard extended, 4 tests). TLS terminate mode in passthrough listeners.
 
 ### Controller hygiene (verify or improve)
 
