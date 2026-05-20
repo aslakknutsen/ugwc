@@ -1,0 +1,36 @@
+# Slim kube-prometheus-stack profile for local kind (hack/setup.sh --install-prometheus).
+# Not for production — use your cluster's observability stack instead.
+
+alertmanager:
+  enabled: false
+
+kubeStateMetrics:
+  enabled: false
+
+nodeExporter:
+  enabled: false
+
+defaultRules:
+  create: false
+
+prometheus:
+  prometheusSpec:
+    # Discover ServiceMonitors/PrometheusRules cluster-wide (do not use `{}` here —
+    # empty maps break helm template on chart versions before the hasKey fix).
+    serviceMonitorSelectorNilUsesHelmValues: false
+    ruleSelectorNilUsesHelmValues: false
+    retention: 2d
+    resources:
+      requests:
+        memory: 400Mi
+      limits:
+        memory: 1Gi
+
+grafana:
+  enabled: true
+  defaultDashboardsEnabled: false
+  sidecar:
+    dashboards:
+      enabled: true
+      label: grafana_dashboard
+      labelValue: "1"

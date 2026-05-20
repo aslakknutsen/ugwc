@@ -65,7 +65,14 @@ make hack-setup    # or: ./hack/setup.sh
 make conformance   # or: ./hack/conformance.sh
 ```
 
-Details, environment variables, and dataplane image notes: [docs/operations.md](docs/operations.md#gateway-api-conformance-local-kind).
+Optional local metrics (Prometheus + Grafana on kind):
+
+```bash
+./hack/setup.sh --install-prometheus
+# or: INSTALL_PROMETHEUS=1 make hack-setup
+```
+
+Details, environment variables, observability, and dataplane image notes: [docs/operations.md](docs/operations.md#gateway-api-conformance-local-kind).
 
 ## License
 

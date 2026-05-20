@@ -184,3 +184,45 @@ On SIGTERM or Ctrl-C:
 7. Exit 0
 
 `terminationGracePeriodSeconds` in the Helm chart is 60s, which exceeds the 30s drain + 10s join budget.
+
+## Gateway API conformance (local kind)
+
+Prerequisites and defaults: [README.md](../README.md#gateway-api-conformance-local-kind). Script: `hack/setup.sh`.
+
+```bash
+./hack/setup.sh
+./hack/conformance.sh
+```
+
+## Local kind observability (optional)
+
+By default, `hack/setup.sh` does **not** install a metrics backend. The ugwc Helm chart still creates a `ServiceMonitor` and `PrometheusRule`; they are inactive until Prometheus Operator exists.
+
+Enable a slim **kube-prometheus-stack** (Prometheus + Grafana) for local scraping:
+
+```bash
+./hack/setup.sh --install-prometheus
+# or: INSTALL_PROMETHEUS=1 ./hack/setup.sh
+```
+
+Environment overrides:
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `INSTALL_PROMETHEUS` | `0` | Set `1` to install the monitoring stack |
+| `PROMETHEUS_NAMESPACE` | `monitoring` | Namespace for kube-prometheus-stack |
+| `PROMETHEUS_RELEASE` | `kube-prometheus` | Helm release name |
+| `PROMETHEUS_CHART_VERSION` | `67.11.0` | Pinned chart version |
+
+Values file: `hack/prometheus-values.yaml` (disables Alertmanager, node-exporter, kube-state-metrics, and default cluster rules to reduce kind footprint).
+
+After setup, the script prints port-forward commands. Verify scraping:
+
+```bash
+# Prometheus UI (after port-forward to 9090)
+curl -sG 'http://127.0.0.1:9090/api/v1/query' --data-urlencode 'query=ugwc_reconcile_runs_total'
+```
+
+Grafana imports the **ugwc Controller Overview** dashboard from `hack/grafana-ugwc-dashboard.yaml` (UID `ugwc-overview`, sourced from `charts/ugwc/dashboards/ugwc-overview.json`).
+
+Metrics scraped include all `ugwc_*` and `gatewayapi_*` series documented in [Metrics reference](#metrics-reference) above.

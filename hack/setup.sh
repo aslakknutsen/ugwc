@@ -6,8 +6,9 @@
 # For image build: same engine as Makefile.
 #
 # Usage:
-#   ./hack/setup.sh               # build image, load into kind, helm install
-#   ./hack/setup.sh --skip-build  # reuse existing local image (must match IMAGE_REPO:IMAGE_TAG)
+#   ./hack/setup.sh                      # build image, load into kind, helm install
+#   ./hack/setup.sh --skip-build         # reuse existing local image (must match IMAGE_REPO:IMAGE_TAG)
+#   ./hack/setup.sh --install-prometheus # also install kube-prometheus-stack (Prometheus + Grafana)
 #
 # Environment (see also hack/conformance_defaults.sh):
 #   CLUSTER_NAME            kind cluster name (default: ugwc-dev)
@@ -19,6 +20,10 @@
 #   METALLB_IP_POOL         optional "start-end" override for L2 pool
 #   INSTALL_INFERENCE_CRDS  set to 0 to skip Gateway API inference extension CRDs
 #   GATEWAY_API_REF         Gateway API CRD bundle version (default from conformance_defaults.sh)
+#   INSTALL_PROMETHEUS      set to 1 to install kube-prometheus-stack (default: 0)
+#   PROMETHEUS_NAMESPACE    monitoring stack namespace (default: monitoring)
+#   PROMETHEUS_RELEASE      helm release name (default: kube-prometheus)
+#   PROMETHEUS_CHART_VERSION  kube-prometheus-stack chart version (default: 67.11.0)
 #
 set -euo pipefail
 
@@ -40,11 +45,18 @@ HELM_NAMESPACE="${HELM_NAMESPACE:-ugwc-system}"
 METALLB_VERSION="${METALLB_VERSION:-v0.14.9}"
 KIND_DOCKER_NETWORK="${KIND_DOCKER_NETWORK:-kind}"
 INSTALL_INFERENCE_CRDS="${INSTALL_INFERENCE_CRDS:-1}"
+INSTALL_PROMETHEUS="${INSTALL_PROMETHEUS:-0}"
+PROMETHEUS_NAMESPACE="${PROMETHEUS_NAMESPACE:-monitoring}"
+PROMETHEUS_RELEASE="${PROMETHEUS_RELEASE:-kube-prometheus}"
+PROMETHEUS_CHART_VERSION="${PROMETHEUS_CHART_VERSION:-67.11.0}"
 UGWC_GIT_COMMIT="${UGWC_GIT_COMMIT:-$(cd "$REPO_ROOT" && git rev-parse --short HEAD 2>/dev/null || echo unknown)}"
 
 SKIP_BUILD=false
 for arg in "$@"; do
-  [[ "$arg" == "--skip-build" ]] && SKIP_BUILD=true
+  case "$arg" in
+    --skip-build) SKIP_BUILD=true ;;
+    --install-prometheus) INSTALL_PROMETHEUS=1 ;;
+  esac
 done
 
 require() {
@@ -74,6 +86,57 @@ if len(hosts) < 4:
 n = min(50, len(hosts) - 1)
 print(f"{hosts[-n]}-{hosts[-1]}")
 PY
+}
+
+install_prometheus() {
+  info "Installing kube-prometheus-stack ${PROMETHEUS_CHART_VERSION} (${PROMETHEUS_RELEASE} in ${PROMETHEUS_NAMESPACE})"
+  if ! helm repo list 2>/dev/null | grep -qE '^prometheus-community[[:space:]]'; then
+    helm repo add prometheus-community https://prometheus-community.github.io/helm-charts
+  fi
+  helm repo update prometheus-community
+  helm upgrade --install "$PROMETHEUS_RELEASE" prometheus-community/kube-prometheus-stack \
+    --namespace "$PROMETHEUS_NAMESPACE" \
+    --create-namespace \
+    --version "$PROMETHEUS_CHART_VERSION" \
+    -f "$SCRIPT_DIR/prometheus-values.yaml" \
+    --wait --timeout=10m
+
+  info "Waiting for Prometheus Operator"
+  kubectl rollout status deployment -n "$PROMETHEUS_NAMESPACE" \
+    -l app.kubernetes.io/name=prometheus-operator --timeout=300s
+
+  info "Waiting for Prometheus"
+  kubectl rollout status statefulset -n "$PROMETHEUS_NAMESPACE" \
+    -l app.kubernetes.io/name=prometheus --timeout=300s
+
+  info "Waiting for Grafana"
+  kubectl rollout status deployment -n "$PROMETHEUS_NAMESPACE" \
+    -l app.kubernetes.io/name=grafana --timeout=300s
+
+  info "Applying ugwc Grafana dashboard ConfigMap"
+  kubectl apply -f "$SCRIPT_DIR/grafana-ugwc-dashboard.yaml"
+}
+
+prometheus_access_hints() {
+  local prom_svc grafana_svc
+  prom_svc="$(kubectl get svc -n "$PROMETHEUS_NAMESPACE" -l app.kubernetes.io/name=prometheus -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)"
+  grafana_svc="$(kubectl get svc -n "$PROMETHEUS_NAMESPACE" -l app.kubernetes.io/name=grafana -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)"
+  [[ -n "$prom_svc" ]] || prom_svc="${PROMETHEUS_RELEASE}-kube-prome-prometheus"
+  [[ -n "$grafana_svc" ]] || grafana_svc="${PROMETHEUS_RELEASE}-grafana"
+
+  cat <<EOF
+
+Observability (Prometheus + Grafana in ${PROMETHEUS_NAMESPACE}):
+
+  kubectl port-forward -n ${PROMETHEUS_NAMESPACE} svc/${prom_svc} 9090:9090
+  # PromQL: ugwc_reconcile_runs_total
+
+  kubectl port-forward -n ${PROMETHEUS_NAMESPACE} svc/${grafana_svc} 3000:80
+  # Grafana admin password (secret name matches release):
+  kubectl get secret -n ${PROMETHEUS_NAMESPACE} ${PROMETHEUS_RELEASE}-grafana -o jsonpath='{.data.admin-password}' | base64 -d; echo
+  # Dashboard UID: ugwc-overview
+
+EOF
 }
 
 require kind kubectl helm python3 "$CONTAINER_ENGINE"
@@ -141,6 +204,12 @@ else
   info "Skipping inference extension CRDs (INSTALL_INFERENCE_CRDS=0)"
 fi
 
+if [[ "$INSTALL_PROMETHEUS" == "1" ]]; then
+  install_prometheus
+else
+  info "Skipping Prometheus/Grafana (use --install-prometheus or INSTALL_PROMETHEUS=1)"
+fi
+
 FULL_IMAGE="${IMAGE_REPO}:${IMAGE_TAG}"
 if [[ "$SKIP_BUILD" == false ]]; then
   info "Building ${FULL_IMAGE} (${CONTAINER_ENGINE})"
@@ -187,3 +256,7 @@ Run Gateway API conformance:
   # or: make conformance
 
 EOF
+
+if [[ "$INSTALL_PROMETHEUS" == "1" ]]; then
+  prometheus_access_hints
+fi
