@@ -38,6 +38,28 @@ ugwc:
 
 podAnnotations: {}
 
+# Prometheus Operator ServiceMonitor (requires monitoring.coreos.com CRDs).
+serviceMonitor:
+  enabled: false
+  interval: 30s
+  scrapeTimeout: 10s
+  labels: {}
+
+# Legacy annotation-based scrape when serviceMonitor.enabled is false.
+prometheusAnnotations: false
+
+terminationGracePeriodSeconds: 60
+
+readinessProbe:
+  initialDelaySeconds: 5
+  periodSeconds: 5
+  failureThreshold: 3
+
+livenessProbe:
+  initialDelaySeconds: 10
+  periodSeconds: 10
+  failureThreshold: 3
+
 resources: {}
 
 # Additional container env (literal names, e.g. UGWC_FOO).
