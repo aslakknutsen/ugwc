@@ -12,8 +12,6 @@ use futures::StreamExt;
 use k8s_openapi::api::core::v1::{ConfigMap, Secret, Service};
 use k8s_openapi::api::discovery::v1::EndpointSlice;
 use kube::api::ListParams;
-use kube::runtime::watcher::{watcher, Config as WatcherConfig};
-use kube::runtime::WatchStreamExt;
 use kube::{Api, Client, ResourceExt};
 use tracing::{info, instrument, warn};
 
@@ -26,6 +24,7 @@ use crate::resources::{
     ListenerSet,
 };
 use crate::watch_helpers::gateway_targets_for_backend_tls_policy;
+use crate::watch_stream::{self, watcher_config};
 
 pub type ReconcileFuture = Pin<Box<dyn Future<Output = Result<(), String>> + Send>>;
 pub type ReconcileFn = Arc<dyn Fn(String, String) -> ReconcileFuture + Send + Sync>;
@@ -49,7 +48,7 @@ pub async fn run_gateway_controller(
     if let Some(gate) = sync_gate.clone() {
         let c_list = client.clone();
         let sd_list = shutdown.clone();
-        tokio::spawn(async move {
+        crate::spawn::spawn_with_trace_context(async move {
             let gw_api: Api<Gateway> = Api::all(c_list.clone());
             match gw_api.list(&ListParams::default()).await {
                 Ok(_) => gate.mark_gateway_list(),
@@ -78,18 +77,17 @@ pub async fn run_gateway_controller(
     let owned_sup = owned_controller_names.clone();
     let active_sup = active_crds.clone();
     let gate_sup = sync_gate.clone();
-    tokio::spawn(async move {
+    crate::spawn::spawn_with_trace_context(async move {
         run_crd_supervisor(c_sup, sd_sup, tx_sup, owned_sup, active_sup, gate_sup).await;
     });
 
     let sd_ep = shutdown.clone();
     let c_ep = client.clone();
     let tx_ep = tx.clone();
-    tokio::spawn(async move {
+    crate::spawn::spawn_with_trace_context(async move {
         let api: Api<EndpointSlice> = Api::all(c_ep.clone());
         let gw_api: Api<Gateway> = Api::all(c_ep);
-        let cfg = WatcherConfig::default().any_semantic();
-        let mut stream = Box::pin(watcher(api, cfg).applied_objects());
+        let mut stream = watch_stream::full_applied_stream(api, watcher_config());
         loop {
             tokio::select! {
                 _ = sd_ep.cancelled() => break,
@@ -127,12 +125,10 @@ pub async fn run_gateway_controller(
     let sd_svc = shutdown.clone();
     let tx_svc = tx.clone();
     let c_svc = client.clone();
-    tokio::spawn(async move {
+    crate::spawn::spawn_with_trace_context(async move {
         let api: Api<Service> = Api::all(c_svc);
-        let cfg = WatcherConfig::default()
-            .any_semantic()
-            .labels("gateway.ugwc.io/managed=ugwc-per-gateway");
-        let mut stream = Box::pin(watcher(api, cfg).applied_objects());
+        let cfg = watcher_config().labels("gateway.ugwc.io/managed=ugwc-per-gateway");
+        let mut stream = watch_stream::full_applied_stream(api, cfg);
         loop {
             tokio::select! {
                 _ = sd_svc.cancelled() => break,
@@ -166,10 +162,9 @@ pub async fn run_gateway_controller(
     let sd_sec = shutdown.clone();
     let c_sec = client.clone();
     let tx_sec = tx.clone();
-    tokio::spawn(async move {
+    crate::spawn::spawn_with_trace_context(async move {
         let api: Api<Secret> = Api::all(c_sec.clone());
-        let cfg = WatcherConfig::default().any_semantic();
-        let mut stream = Box::pin(watcher(api, cfg).applied_objects());
+        let mut stream = watch_stream::full_applied_stream(api, watcher_config());
         loop {
             tokio::select! {
                 _ = sd_sec.cancelled() => break,
@@ -256,10 +251,9 @@ pub async fn run_gateway_controller(
     let sd_cm = shutdown.clone();
     let c_cm = client.clone();
     let tx_cm = tx.clone();
-    tokio::spawn(async move {
+    crate::spawn::spawn_with_trace_context(async move {
         let api: Api<ConfigMap> = Api::all(c_cm.clone());
-        let cfg = WatcherConfig::default().any_semantic();
-        let mut stream = Box::pin(watcher(api, cfg).applied_objects());
+        let mut stream = watch_stream::full_applied_stream(api, watcher_config());
         loop {
             tokio::select! {
                 _ = sd_cm.cancelled() => break,

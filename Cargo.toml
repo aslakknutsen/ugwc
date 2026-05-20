@@ -31,9 +31,10 @@ serde_yaml = "0.9"
 thiserror = "1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json", "fmt"] }
+tracing-opentelemetry = "0.28"
 axum = "0.7"
 tower = "0.5"
-tower-http = { version = "0.5", features = ["trace"] }
+tower-http = { version = "0.5", features = ["trace", "timeout"] }
 clap = { version = "4", features = ["derive"] }
 envy = "0.4"
 regex = "1"
@@ -69,4 +70,4 @@ hyper-util = { version = "0.1", features = ["client", "client-legacy", "tokio"] 
 tokio-metrics = "0.4"
 opentelemetry = "0.27"
 opentelemetry_sdk = { version = "0.27", features = ["rt-tokio"] }
-opentelemetry-otlp = { version = "0.27", features = ["grpc-tonic", "metrics"] }
+opentelemetry-otlp = { version = "0.27", features = ["grpc-tonic", "metrics", "trace"] }

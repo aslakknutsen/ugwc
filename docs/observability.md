@@ -6,9 +6,11 @@ ugwc exposes Prometheus metrics on the admin HTTP server. Gateway API **resource
 
 | Method | When to use |
 |--------|-------------|
-| Helm `observability.serviceMonitor.enabled=true` | Clusters with Prometheus Operator |
+| Helm `observability.serviceMonitor.enabled=true` (default in chart) | Clusters with Prometheus Operator |
 | `prometheusAnnotations=true` | Annotation-based scrapers without Operator |
 | Direct | `curl http://127.0.0.1:8080/metrics` (default `UGWC_ADMIN_LISTEN_ADDR`) |
+
+**Dual export:** Prometheus pull via `/metrics` is the SLO source of truth. Optional OTLP metrics push (`UGWC_OTLP_ENDPOINT`, `otlp-metrics` feature) complements pull for collector-centric fleets. Admin HTTP also exposes `PUT /log-level` for runtime tracing filters — see [operations.md](operations.md).
 
 ## Controller-owned metrics
 
@@ -38,6 +40,7 @@ Emitted per reconcile for the gateway snapshot (owned `controllerName` fan-out):
 
 | Metric | Labels |
 |--------|--------|
+| `gatewayapi_gateway_created` | `namespace`, `name`, `source` |
 | `gatewayapi_gateway_status` | `namespace`, `name`, `status`, `source` |
 | `gatewayapi_httproute_attached_gateways` | `namespace`, `name`, `source` |
 | `gatewayapi_grpcroute_attached_gateways` | … |

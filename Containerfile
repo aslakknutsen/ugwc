@@ -43,7 +43,7 @@ RUN mkdir -p crates/ugwc-core/src \
 RUN --mount=type=cache,target=/root/.cargo/registry \
     --mount=type=cache,target=/root/.cargo/git \
     --mount=type=cache,target=/src/target \
-    cargo build --release --locked -p ugwc
+    RUSTFLAGS='--cfg tokio_unstable' cargo build --release --locked -p ugwc --features tokio-metrics
 
 COPY crates/ugwc-core/src crates/ugwc-core/src
 COPY crates/ugwc-gwxds/src crates/ugwc-gwxds/src
@@ -60,7 +60,7 @@ RUN find crates/ugwc-core/src crates/ugwc-gwxds/src \
 RUN --mount=type=cache,target=/root/.cargo/registry \
     --mount=type=cache,target=/root/.cargo/git \
     --mount=type=cache,target=/src/target \
-    cargo build --release --locked -p ugwc \
+    RUSTFLAGS='--cfg tokio_unstable' cargo build --release --locked -p ugwc --features tokio-metrics \
     && install -m 0555 target/release/ugwc /usr/local/bin/ugwc
 
 # CA bundle for TLS clients (kube API, xDS) — ubi-micro has no package manager.

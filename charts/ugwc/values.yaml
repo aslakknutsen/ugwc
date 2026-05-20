@@ -24,24 +24,26 @@ service:
 ugwc:
   kubeEnable: true
   controllerNames: "ugwc.io/default-controller"
-  runProfile: dev
-  xdsInsecure: true
-  logJson: false
+  runProfile: prod
+  xdsInsecure: false
+  logJson: true
   xdsWire: gwxds
-  leaderElection: false
+  leaderElection: true
   # When true: sets UGWC_DATAPLANE_ENABLE and adds ClusterRole rules for per-gateway Praxis
-  # (Deployments, Services, ServiceAccounts). Keep off unless you use that dataplane mode.
-  dataplaneEnable: true
+  # (Deployments, Services, ServiceAccounts). Enable only when using per-gateway Praxis mode.
+  dataplaneEnable: false
   endpointDebounceMs: 200
   # If empty, the chart sets bootstrap to <fullname>.<namespace>.svc.cluster.local:<xds port>.
   controlPlaneXdsBootstrapAddr: ""
+  # Optional OTLP endpoint (metrics/traces when built with otlp features).
+  otlpEndpoint: ""
 
 podAnnotations: {}
 
 # Observability (Prometheus pull on admin port; optional Operator CRs).
 observability:
   serviceMonitor:
-    enabled: false
+    enabled: true
     interval: 30s
     scrapeTimeout: 10s
     labels: {}

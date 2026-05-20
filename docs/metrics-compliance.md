@@ -1,28 +1,28 @@
-# Metrics compliance checklist (L4)
+# Metrics compliance checklist
 
 Maps [reference.md](../.cursor/skills/gateway-api-metrics-audit/reference.md) domains to ugwc implementation.
 
 | Domain | Status | Implementation |
 |--------|--------|----------------|
-| 1 Delivery | Compliant | Pull `/metrics`; Helm `observability.serviceMonitor`; optional `otlp-metrics` feature |
+| 1 Delivery | Compliant | Pull `/metrics`; Helm `observability.serviceMonitor` (default on); optional `otlp-metrics` / `otlp-traces` |
 | 2 Control plane | Compliant | `ugwc_workqueue_*`, `ugwc_reconcile_*`, `ugwc_rest_client_*`; `etcd_*` N/A |
-| 3 Gateway state | Compliant | In-controller `gatewayapi_*` with `source="ugwc"`; `ugwc_ungranted_reference_total` |
+| 3 Gateway state | Compliant | In-controller `gatewayapi_*` including `gatewayapi_gateway_created`; `ugwc_ungranted_reference_total` |
 | 4 Rust instrumentation | Compliant | `metrics` + `metrics-prometheus-client` → `prometheus-client` registry |
-| 5 Runtime / admin | Partial | `process_*` via legacy collector; Tokio via feature `tokio-metrics`; xDS gauges |
+| 5 Runtime / admin | Compliant | `process_*`; xDS gauges in `ugwc-xds`; Tokio via `tokio-metrics` in release image; admin `/log-level` + Tower trace/timeout |
 | 6 K8s ops | Compliant | `InitialSyncGate`, ordered shutdown, probes, `terminationGracePeriodSeconds` |
-| 7 Documentation | Compliant | [observability.md](observability.md), this file |
+| 7 Documentation | Compliant | [observability.md](observability.md), [operations.md](operations.md), this file |
 
-## Maturity: L4
+## Maturity: L4 (metrics)
 
-For ugwc-owned Gateway API reconciliation. Multi-controller fleets may still deploy an external `gatewayapi_*` exporter for non-owned objects.
+Logging/tracing L4 requires building with `--features otlp-traces` and setting `UGWC_OTLP_ENDPOINT`.
 
 ## Environment
 
 | Variable | Purpose |
 |----------|---------|
-| `UGWC_ADMIN_LISTEN_ADDR` | Admin HTTP (metrics, health) |
-| `UGWC_OTLP_ENDPOINT` | OTLP push (requires `--features otlp-metrics` build) |
-| `UGWC_OTLP_PUSH_INTERVAL_MS` | OTLP flush interval (default 15000) |
+| `UGWC_ADMIN_LISTEN_ADDR` | Admin HTTP (metrics, health, log-level) |
+| `UGWC_OTLP_ENDPOINT` | OTLP push (requires `otlp-metrics` and/or `otlp-traces` features) |
+| `UGWC_OTLP_PUSH_INTERVAL_MS` | OTLP metrics flush interval (default 15000) |
 
 ## Shutdown timing
 

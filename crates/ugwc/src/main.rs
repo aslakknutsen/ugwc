@@ -9,6 +9,7 @@ mod implementation_profiles;
 mod leader;
 mod leader_election;
 mod logging;
+mod reconcile;
 mod metrics;
 mod otlp;
 mod readiness;
@@ -54,7 +55,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         return Ok(());
     }
 
-    logging::init(cfg.log_json);
+    let _log_filter = logging::init(cfg.log_json, cfg.otlp_endpoint.as_deref());
+    logging::store_filter_handle(_log_filter);
     tracing::info!(summary = %cfg.log_summary(), commit = env!("UGWC_BUILD_COMMIT"), "startup");
     if cfg.xds_insecure {
         tracing::warn!("UGWC_XDS_INSECURE is set — plaintext xDS (prototype only)");

@@ -10,6 +10,14 @@ const SOURCE: &str = "ugwc";
 
 /// Update `gatewayapi_*` gauges after a successful compile for `snap`.
 pub fn record_from_reconcile(snap: &ClusterSnapshot, programmed_ok: bool) {
+    gauge!(
+        "gatewayapi_gateway_created",
+        "namespace" => snap.gateway_namespace.clone(),
+        "name" => snap.gateway_name.clone(),
+        "source" => SOURCE.to_string()
+    )
+    .set(1.0);
+
     let gw_status = if programmed_ok {
         "Programmed"
     } else {

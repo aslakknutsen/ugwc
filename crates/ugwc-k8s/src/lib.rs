@@ -1,8 +1,11 @@
 //! Kubernetes watches, mappers, and status patches for Gateway API+.
 
+mod events;
 mod crd_supervisor;
 mod gateway_watchers;
 mod initial_sync;
+mod spawn;
+mod watch_stream;
 mod kube_metrics;
 mod reconcile_queue;
 mod watch_helpers;
@@ -20,7 +23,12 @@ pub use reconcile_queue::{
     ReconcileSender, GATEWAY_RECONCILE_QUEUE,
 };
 pub use crd_supervisor::{ActiveCrds, ManagedCrd};
+pub use events::{
+    GatewayEvents, REASON_COMPILE_BLOCKED, REASON_DATAPLANE_MISCONFIGURED,
+    REASON_PROVISION_FAILED, REASON_TLS_MATERIAL_MISSING,
+};
 pub use initial_sync::InitialSyncGate;
+pub use spawn::spawn_with_trace_context;
 pub use kube_metrics::{instrumented_client, try_default_instrumented};
 pub use loader::{load_cluster_snapshot, parent_reference_to_snap, LoaderError};
 pub use mappers::{mapped_gateway_key, GatewayKey, WatchEventCause};

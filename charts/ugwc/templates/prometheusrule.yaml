@@ -1,5 +1,6 @@
 {{- $sm := .Values.observability.serviceMonitor }}
-{{- if and $sm.enabled .Values.observability.prometheusRule.enabled }}
+{{- $legacy := .Values.serviceMonitor }}
+{{- if and (or $sm.enabled $legacy.enabled) .Values.observability.prometheusRule.enabled }}
 apiVersion: monitoring.coreos.com/v1
 kind: PrometheusRule
 metadata:

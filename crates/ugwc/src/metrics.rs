@@ -77,6 +77,8 @@ pub fn record_reconcile_run(controller_name: &str, success: bool) {
     .increment(1);
 }
 
+/// Reconcile latency histogram. With `otlp-traces`, correlate to traces via JSON log
+/// `trace_id` on the `reconcile_gateway` span (Prometheus exemplars need a native histogram).
 pub fn observe_reconcile_duration_seconds(controller_name: &str, seconds: f64) {
     histogram!(
         "ugwc_reconcile_duration_seconds",

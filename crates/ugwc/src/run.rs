@@ -4,21 +4,13 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Instant;
 
-use kube::api::Api;
 use tracing::{info, warn};
-use ugwc_core::publish::plan_publish;
-use ugwc_core::{
-    grpc_route_resolved_refs_row, http_route_resolved_refs_row, tcp_route_resolved_refs_row,
-    tls_route_resolved_refs_row, udp_route_resolved_refs_row, CompileInput, FailurePolicy,
-    PublishAction,
-};
-use ugwc_k8s::resources::{Gateway, ListenerSet};
+use ugwc_core::{CompileInput, FailurePolicy};
 use ugwc_xds::{
     serve as serve_xds, MultiScopeSnapshot, XdsSecurityConfig, XdsServerConfig, XdsSnapshotSource,
 };
 
 use crate::config::Config;
-use crate::implementation_profiles::{self, DataPlaneKind};
 use crate::leader::LeaderState;
 use crate::leader_election::LeaseElectionHandle;
 use crate::metrics;
@@ -29,7 +21,7 @@ pub async fn run(cfg: Config) -> Result<(), Box<dyn std::error::Error + Send + S
     crate::tokio_runtime_metrics::spawn();
     if let Some(ref ep) = cfg.otlp_endpoint {
         if !ep.trim().is_empty() {
-            crate::otlp::init(
+            crate::otlp::init_metrics(
                 ep,
                 std::time::Duration::from_millis(cfg.otlp_push_interval_ms),
             )
@@ -58,7 +50,7 @@ pub async fn run(cfg: Config) -> Result<(), Box<dyn std::error::Error + Send + S
 
     let admin_addr: SocketAddr = cfg.admin_listen_addr.parse()?;
     let readiness_admin = readiness.clone();
-    let admin_task = tokio::spawn(crate::admin::serve(
+    let admin_task = ugwc_k8s::spawn_with_trace_context(crate::admin::serve(
         admin_addr,
         admin_sd,
         readiness_admin,
@@ -79,7 +71,7 @@ pub async fn run(cfg: Config) -> Result<(), Box<dyn std::error::Error + Send + S
 
     let cache_xds: Arc<dyn XdsSnapshotSource> = cache.clone();
     let revision_tx = Some(cache.revision_sender());
-    let xds_task = tokio::spawn(async move {
+    let xds_task = ugwc_k8s::spawn_with_trace_context(async move {
         if let Err(e) = serve_xds(xds_cfg, cache_xds, revision_tx, xds_sd).await {
             tracing::error!(error = %e, "xds server exited");
         }
@@ -152,12 +144,13 @@ pub async fn run(cfg: Config) -> Result<(), Box<dyn std::error::Error + Send + S
         ));
         let active_crds_reconcile = active_crds.clone();
         let status_cache_k = status_cache.clone();
+        let gateway_events = ugwc_k8s::GatewayEvents::new(client.clone());
         let (reconcile_tx, work_queue, queue_metrics) = ugwc_k8s::new_reconcile_queue(256);
         let sync_gate = Arc::new(ugwc_k8s::InitialSyncGate::new(Some(
             Readiness::on_cache_synced_callback(readiness.clone()),
         )));
         let reconcile_tx_shutdown = reconcile_tx.clone();
-        let kube_task = tokio::spawn(async move {
+        let kube_task = ugwc_k8s::spawn_with_trace_context(async move {
             let rfn: ugwc_k8s::ReconcileFn = Arc::new(move |ns: String, name: String| {
                 let fp_k = fp_k.clone();
                 let cache_k = cache_k.clone();
@@ -172,358 +165,28 @@ pub async fn run(cfg: Config) -> Result<(), Box<dyn std::error::Error + Send + S
                 let xds_wire = xds_wire.clone();
                 let active_crds = active_crds_reconcile.clone();
                 let controller_name = primary_controller.clone();
+                let gateway_events = gateway_events.clone();
                 Box::pin(async move {
                     let reconcile_started = Instant::now();
-                    let outcome: Result<(), String> = async {
-                    let api: Api<Gateway> = Api::namespaced(client_inner.clone(), &ns);
-                    let latest = api.get(&name).await.map_err(|e| e.to_string())?;
-
-                    let t_load = Instant::now();
-                    let cluster =
-                        match ugwc_k8s::load_cluster_snapshot(&client_inner, &ns, &name, &active_crds).await {
-                            Ok(c) => Some(c),
-                            Err(e) => {
-                                warn!(error = %e, %ns, %name, "cluster snapshot load");
-                                None
-                            }
-                        };
-                    metrics::observe_snapshot_load_seconds(t_load.elapsed().as_secs_f64());
-
-                    let input = CompileInput {
-                        reconcile_gateway: Some((ns.clone(), name.clone())),
-                        cluster,
-                        ..Default::default()
-                    };
-                    let t_compile = Instant::now();
-                    let co = ugwc_core::compile(&fp_k, &input).map_err(|e| e.to_string())?;
-                    metrics::observe_compile_seconds(t_compile.elapsed().as_secs_f64());
-                    metrics::record_ungranted_references(&co.report);
-
-                    if co.report.has_errors() {
-                        metrics::record_compile_error();
-                    }
-
-                    let programmed_ok =
-                        !co.report.has_blocking_errors() && !co.snapshot.meta.has_errors;
-                    if let Some(ref snap) = input.cluster {
-                        crate::gateway_state_metrics::record_from_reconcile(snap, programmed_ok);
-                    }
-
-                    if let Err(e) = ugwc_k8s::apply_gateway_reconciled_status(
-                        &client_inner,
-                        &api,
-                        &latest,
-                        &co,
-                        input.cluster.as_ref(),
-                        Some(status_cache.clone()),
+                    let outcome = crate::reconcile::reconcile_gateway(
+                        crate::reconcile::ReconcileCtx {
+                            fp: fp_k,
+                            cache: cache_k,
+                            leader: leader_k,
+                            client: client_inner,
+                            primary_controller,
+                            status_cache,
+                            impl_profiles,
+                            dataplane_enable,
+                            control_plane_xds,
+                            xds_insecure,
+                            xds_wire,
+                            active_crds,
+                            events: Some(gateway_events.clone()),
+                        },
+                        ns,
+                        name,
                     )
-                    .await
-                    {
-                        warn!(error = %e, %ns, %name, "gateway status patch");
-                    }
-
-                    if let Some(ref snap) = input.cluster {
-                        for r in &snap.http_routes {
-                            let (rs, rr, rm) = http_route_resolved_refs_row(&co.report, r);
-                            if let Err(e) = ugwc_k8s::apply_http_route_merged_parent_status(
-                                ugwc_k8s::HttpRouteMergedParentStatusArgs {
-                                    client: &client_inner,
-                                    route_ns: &r.namespace,
-                                    route_name: &r.name,
-                                    controller_name: &primary_controller,
-                                    route_generation: r.generation,
-                                    programmed_ok,
-                                    resolved_refs_status: rs,
-                                    resolved_refs_reason: rr,
-                                    resolved_refs_message: rm,
-                                    reconciled_gateway_ns: &ns,
-                                    reconciled_gateway_name: &name,
-                                    snapshot: snap,
-                                    compile_report: &co.report,
-                                    status_cache: Some(status_cache.clone()),
-                                },
-                            )
-                            .await
-                            {
-                                warn!(error = %e, route = %r.name, "httproute status patch");
-                            }
-                        }
-
-                        for r in &snap.grpc_routes {
-                            let (rs, rr, rm) = grpc_route_resolved_refs_row(&co.report, r);
-                            if let Err(e) = ugwc_k8s::apply_grpc_route_merged_parent_status(
-                                ugwc_k8s::GrpcRouteMergedParentStatusArgs {
-                                    client: &client_inner,
-                                    route_ns: &r.namespace,
-                                    route_name: &r.name,
-                                    controller_name: &primary_controller,
-                                    route_generation: r.generation,
-                                    programmed_ok,
-                                    resolved_refs_status: rs,
-                                    resolved_refs_reason: rr,
-                                    resolved_refs_message: rm,
-                                    reconciled_gateway_ns: &ns,
-                                    reconciled_gateway_name: &name,
-                                    snapshot: snap,
-                                    compile_report: &co.report,
-                                    status_cache: Some(status_cache.clone()),
-                                },
-                            )
-                            .await
-                            {
-                                warn!(error = %e, route = %r.name, "grpcroute status patch");
-                            }
-                        }
-
-                        for r in &snap.tls_routes {
-                            let (rs, rr, rm) = tls_route_resolved_refs_row(&co.report, r);
-                            if let Err(e) = ugwc_k8s::apply_tls_route_merged_parent_status(
-                                ugwc_k8s::TlsRouteMergedParentStatusArgs {
-                                    client: &client_inner,
-                                    route_ns: &r.namespace,
-                                    route_name: &r.name,
-                                    controller_name: &primary_controller,
-                                    route_generation: r.generation,
-                                    programmed_ok,
-                                    resolved_refs_status: rs,
-                                    resolved_refs_reason: rr,
-                                    resolved_refs_message: rm,
-                                    reconciled_gateway_ns: &ns,
-                                    reconciled_gateway_name: &name,
-                                    snapshot: snap,
-                                    compile_report: &co.report,
-                                    status_cache: Some(status_cache.clone()),
-                                },
-                            )
-                            .await
-                            {
-                                warn!(error = %e, route = %r.name, "tlsroute status patch");
-                            }
-                        }
-
-                        for r in &snap.tcp_routes {
-                            let (rs, rr, rm) = tcp_route_resolved_refs_row(&co.report, r);
-                            if let Err(e) = ugwc_k8s::apply_tcp_route_merged_parent_status(
-                                ugwc_k8s::TcpRouteMergedParentStatusArgs {
-                                    client: &client_inner,
-                                    route_ns: &r.namespace,
-                                    route_name: &r.name,
-                                    controller_name: &primary_controller,
-                                    route_generation: r.generation,
-                                    programmed_ok,
-                                    resolved_refs_status: rs,
-                                    resolved_refs_reason: rr,
-                                    resolved_refs_message: rm,
-                                    reconciled_gateway_ns: &ns,
-                                    reconciled_gateway_name: &name,
-                                    snapshot: snap,
-                                    compile_report: &co.report,
-                                    status_cache: Some(status_cache.clone()),
-                                },
-                            )
-                            .await
-                            {
-                                warn!(error = %e, route = %r.name, "tcproute status patch");
-                            }
-                        }
-
-                        for r in &snap.udp_routes {
-                            let (rs, rr, rm) = udp_route_resolved_refs_row(&co.report, r);
-                            if let Err(e) = ugwc_k8s::apply_udp_route_merged_parent_status(
-                                ugwc_k8s::UdpRouteMergedParentStatusArgs {
-                                    client: &client_inner,
-                                    route_ns: &r.namespace,
-                                    route_name: &r.name,
-                                    controller_name: &primary_controller,
-                                    route_generation: r.generation,
-                                    programmed_ok,
-                                    resolved_refs_status: rs,
-                                    resolved_refs_reason: rr,
-                                    resolved_refs_message: rm,
-                                    reconciled_gateway_ns: &ns,
-                                    reconciled_gateway_name: &name,
-                                    snapshot: snap,
-                                    compile_report: &co.report,
-                                    status_cache: Some(status_cache.clone()),
-                                },
-                            )
-                            .await
-                            {
-                                warn!(error = %e, route = %r.name, "udproute status patch");
-                            }
-                        }
-
-                        for ls_snap in &snap.listener_sets {
-                            let ls_api: Api<ListenerSet> =
-                                Api::namespaced(client_inner.clone(), &ls_snap.namespace);
-                            match ls_api.get(&ls_snap.name).await {
-                                Ok(ls) => {
-                                    if let Err(e) = ugwc_k8s::apply_listenerset_reconciled_status(
-                                        &client_inner,
-                                        &ls,
-                                        snap,
-                                        programmed_ok,
-                                        &co,
-                                        Some(status_cache.clone()),
-                                    )
-                                    .await
-                                    {
-                                        warn!(
-                                            error = %e,
-                                            listenerset = %ls_snap.name,
-                                            "listenerset status patch"
-                                        );
-                                    }
-                                }
-                                Err(e) => warn!(
-                                    error = %e,
-                                    listenerset = %ls_snap.name,
-                                    "get listenerset for status"
-                                ),
-                            }
-                        }
-
-                        for rej in &snap.rejected_listener_sets {
-                            let ls_api: Api<ListenerSet> =
-                                Api::namespaced(client_inner.clone(), &rej.namespace);
-                            match ls_api.get(&rej.name).await {
-                                Ok(ls) => {
-                                    if let Err(e) =
-                                        ugwc_k8s::apply_listenerset_rejected_status(
-                                            &client_inner,
-                                            &ls,
-                                            &rej.reason,
-                                            Some(status_cache.clone()),
-                                        )
-                                        .await
-                                    {
-                                        warn!(
-                                            error = %e,
-                                            listenerset = %rej.name,
-                                            "rejected listenerset status patch"
-                                        );
-                                    }
-                                }
-                                Err(e) => warn!(
-                                    error = %e,
-                                    listenerset = %rej.name,
-                                    "get rejected listenerset for status"
-                                ),
-                            }
-                        }
-
-                        if let Err(e) = ugwc_k8s::apply_backend_tls_policies_for_gateway(
-                            &client_inner,
-                            &ns,
-                            &name,
-                            &primary_controller,
-                            snap,
-                            Some(status_cache.clone()),
-                        )
-                        .await
-                        {
-                            warn!(error = %e, "backend TLS policy status patch");
-                        }
-
-                        if let Err(e) = ugwc_k8s::apply_inference_pools_for_gateway(
-                            &client_inner,
-                            &ns,
-                            &name,
-                            &primary_controller,
-                            snap,
-                            programmed_ok,
-                            &co.report,
-                            Some(status_cache.clone()),
-                        )
-                        .await
-                        {
-                            warn!(error = %e, "inferencepool status patch");
-                        }
-                    }
-
-                    if !leader_k.is_leader() {
-                        metrics::record_publish_skipped();
-                        return Ok(());
-                    }
-
-                    let prev = cache_k.previous_for_scope(&co.snapshot.scope);
-                    let plan = plan_publish(prev.as_deref(), &co.snapshot, &fp_k);
-
-                    match plan.action {
-                        PublishAction::Skip => metrics::record_publish_skipped(),
-                        PublishAction::FullReplace => {
-                            cache_k.store_scoped(co.snapshot.clone());
-                            metrics::record_publish_applied();
-                        }
-                        PublishAction::Delta => {}
-                        _ => {}
-                    }
-
-                    let controller_name = input
-                        .cluster
-                        .as_ref()
-                        .and_then(|c| c.gateway_class.as_ref())
-                        .map(|gc| gc.controller_name.as_str());
-                    let profile = implementation_profiles::resolve_for_controller(
-                        &impl_profiles,
-                        controller_name,
-                    );
-
-                    match &profile.data_plane {
-                        DataPlaneKind::External => {}
-                        DataPlaneKind::SharedDeployment => {
-                            ugwc_k8s::reconcile_shared_deployment_stub(&name);
-                        }
-                        DataPlaneKind::PerGatewayPraxis => {
-                            if !dataplane_enable {
-                                ugwc_k8s::warn_per_gateway_without_enable(&name);
-                            } else if programmed_ok {
-                                let Some(img) = profile.proxy_image.as_deref() else {
-                                    warn!(%name, "per_gateway_praxis missing proxy_image");
-                                    metrics::record_dataplane_error();
-                                    return Ok(());
-                                };
-                                if control_plane_xds.trim().is_empty() {
-                                    warn!(%name, "dataplane enabled but bootstrap xDS addr empty");
-                                    metrics::record_dataplane_error();
-                                    return Ok(());
-                                }
-                                let scope = format!("{ns}/{name}");
-                                let args = ugwc_k8s::PraxisProvisionArgs {
-                                    proxy_image: img.to_string(),
-                                    xds_bootstrap_addr: ugwc_k8s::praxis_istiod_dial_url(
-                                        &control_plane_xds,
-                                        xds_insecure,
-                                    ),
-                                    xds_insecure,
-                                    xds_wire: xds_wire.clone(),
-                                    gateway_scope: scope,
-                                    gateway_class_name: latest.spec.gateway_class_name.clone(),
-                                };
-                                let listener_ports = input
-                                    .cluster
-                                    .as_ref()
-                                    .map(ugwc_k8s::collect_effective_listener_ports);
-                                match ugwc_k8s::reconcile_per_gateway_praxis(
-                                    &client_inner,
-                                    &latest,
-                                    &args,
-                                    listener_ports.as_deref(),
-                                )
-                                .await
-                                {
-                                    Ok(()) => metrics::record_dataplane_apply(),
-                                    Err(e) => {
-                                        warn!(error = %e, %ns, %name, "dataplane provision");
-                                        metrics::record_dataplane_error();
-                                    }
-                                }
-                            }
-                        }
-                    }
-
-                    Ok(())
-                    }
                     .await;
                     metrics::record_reconcile_run(&controller_name, outcome.is_ok());
                     metrics::observe_reconcile_duration_seconds(
@@ -620,6 +283,7 @@ async fn wait_shutdown(
         let _ = tokio::time::timeout(join, k).await;
     }
     crate::otlp::flush();
+    crate::otlp::shutdown_traces();
 }
 
 async fn wait_for_shutdown_signal() {

@@ -27,6 +27,8 @@ serde_json.workspace = true
 envy.workspace = true
 clap.workspace = true
 axum.workspace = true
+tower.workspace = true
+tower-http.workspace = true
 arc-swap.workspace = true
 metrics.workspace = true
 prometheus.workspace = true
@@ -44,8 +46,16 @@ tokio-metrics = { workspace = true, optional = true }
 opentelemetry = { workspace = true, optional = true }
 opentelemetry_sdk = { workspace = true, optional = true }
 opentelemetry-otlp = { workspace = true, optional = true }
+tracing-opentelemetry = { workspace = true, optional = true, features = ["metrics"] }
 
 [features]
 default = []
 tokio-metrics = ["dep:tokio-metrics"]
 otlp-metrics = ["dep:opentelemetry", "dep:opentelemetry_sdk", "dep:opentelemetry-otlp"]
+otlp-traces = [
+    "dep:opentelemetry",
+    "dep:opentelemetry_sdk",
+    "dep:opentelemetry-otlp",
+    "dep:tracing-opentelemetry",
+]
+otlp = ["otlp-metrics", "otlp-traces"]

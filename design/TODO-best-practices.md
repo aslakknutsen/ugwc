@@ -91,15 +91,15 @@ Rationale is one line each; primary symbols/paths in the last column.
 | 20 | Backpressure visible | Partial | Bounded channels; reconcile backpressure blocks producers. | `controller.rs`, `server.rs` |
 | 21 | CPU-heavy work off runtime | Missing | `compile` runs in async reconcile closure. | `crates/ugwc/src/run.rs` |
 | 22 | `controller::Config` / concurrency | Missing | Custom single-consumer `mpsc` loop. | `crates/ugwc-k8s/src/controller.rs` |
-| 23 | Management HTTP + Tower | Partial | Axum routes only; no timeout/trace/rate-limit stack. | `crates/ugwc/src/admin.rs` |
-| 24 | Graceful shutdown | Partial | Cancellation + graceful serve; no SIGTERM. | `run.rs`, `ugwc-xds/server.rs` |
+| 23 | Management HTTP + Tower | Met | Trace + timeout layers; `PUT /log-level`. | `crates/ugwc/src/admin.rs` |
+| 24 | Graceful shutdown | Met | SIGTERM/ctrl-c, drain, OTLP flush. | `run.rs`, `ugwc-xds/server.rs` |
 | 25 | `serde` strictness policy | Partial | Env `Config` without `deny_unknown_fields`. | `crates/ugwc/src/config.rs` |
 | 26 | Secrets handling | Partial | PEM as `Vec<u8>`; no `zeroize`; redact helper mostly unused. | `ir.rs`, `logging.rs` |
 | 27 | Structured domain errors | Partial | `thiserror` in core/config; reconcile uses `String`. | `compile.rs`, `run.rs` |
-| 28 | `tracing` on hot paths | Partial | One `instrument` on controller entry; sparse elsewhere. | `controller.rs` |
-| 29 | JSON log option | Met | `log_json` / subscriber JSON layer. | `logging.rs`, `config.rs` |
-| 30 | Distributed tracing | N/A | Not integrated. | — |
-| 31 | `/metrics`, health, xDS health | Partial | Prometheus + `/healthz` `/readyz`; shallow ready; limited xDS metrics. | `admin.rs`, `metrics.rs`, `cache.rs` |
+| 28 | `tracing` on hot paths | Met | `reconcile_gateway` span + controller entry. | `reconcile.rs`, `controller.rs` |
+| 29 | JSON log option | Met | `log_json` / subscriber JSON layer (Helm default true). | `logging.rs`, `config.rs` |
+| 30 | Distributed tracing | Partial | OTLP traces via `otlp-traces` feature + `UGWC_OTLP_ENDPOINT`. | `logging.rs`, `otlp.rs` |
+| 31 | `/metrics`, health, xDS health | Met | Prometheus + probes; xDS metrics; generation watch filters. | `admin.rs`, `metrics.rs`, `ugwc-xds/server.rs`, `watch_stream.rs` |
 | 32 | `cargo audit` in CI | Missing | CI is fmt, clippy, test, build. | `.github/workflows/ci.yml` |
 | 33 | `cargo-deny` in CI | Partial | `deny.toml` + `make deny`; not in CI. | `deny.toml`, `Makefile` |
 | 34 | `cargo vet` or waiver | Missing | No vet config or explicit waiver doc. | — |
