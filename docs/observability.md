@@ -45,6 +45,13 @@ gatewayapi_gateway_status{status="Ready"}
 `RefNotPermitted` for a resource in the reconciled gateway snapshot. Status conditions on
 routes still carry the authoritative per-parent detail; the counter is for cluster-wide alerting.
 
+## Leader election
+
+When `UGWC_LEADER_ELECTION=true` (requires `UGWC_KUBE_ENABLE`), replicas coordinate via
+a `coordination.k8s.io/v1` `Lease` named `ugwc-leader` in `POD_NAMESPACE`. Only the
+holder sets `ugwc_leader_active=1` and publishes xDS / dataplane changes. On shutdown,
+the lease is released before the controller stops accepting work.
+
 ## Deferred
 
 - `rest_client_request_duration_seconds` — requires custom kube-rs HTTP middleware

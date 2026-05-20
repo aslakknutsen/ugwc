@@ -34,6 +34,7 @@ prometheus.workspace = true
 http.workspace = true
 futures.workspace = true
 kube.workspace = true
+k8s-openapi.workspace = true
 once_cell.workspace = true
 tonic.workspace = true
 tokio-stream.workspace = true

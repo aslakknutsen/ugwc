@@ -2631,6 +2631,7 @@ dependencies = [
  "envy",
  "futures",
  "http",
+ "k8s-openapi",
  "kube",
  "metrics",
  "metrics-exporter-prometheus",

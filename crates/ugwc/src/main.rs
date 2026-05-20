@@ -6,6 +6,7 @@ mod admin;
 mod config;
 mod implementation_profiles;
 mod leader;
+mod leader_election;
 mod logging;
 mod metrics;
 mod readiness;

@@ -20,20 +20,12 @@ use ugwc_xds::{
 use crate::config::Config;
 use crate::implementation_profiles::{self, DataPlaneKind};
 use crate::leader::LeaderState;
+use crate::leader_election::LeaseElectionHandle;
 use crate::metrics;
 use crate::readiness::Readiness;
 
 pub async fn run(cfg: Config) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let prom = metrics::install()?.clone();
-
-    let leader = if cfg.leader_election {
-        warn!("leader_election=true but Lease wiring not complete — acting as follower stub (Kubernetes status still updates; xDS publish skipped on followers)");
-        metrics::set_leader_active(false);
-        LeaderState::follower_stub()
-    } else {
-        metrics::set_leader_active(true);
-        LeaderState::leader_always()
-    };
 
     let fp = FailurePolicy::default();
     let initial_out = ugwc_core::compile(
@@ -95,6 +87,7 @@ pub async fn run(cfg: Config) -> Result<(), Box<dyn std::error::Error + Send + S
                     shutdown,
                     readiness,
                     ugwc_k8s::ReconcileQueueMetrics::noop(),
+                    None,
                     admin_task,
                     xds_task,
                     None,
@@ -103,6 +96,25 @@ pub async fn run(cfg: Config) -> Result<(), Box<dyn std::error::Error + Send + S
                 return Ok(());
             }
         };
+
+        let (leader, lease_handle) = if cfg.leader_election {
+            let ns =
+                std::env::var("POD_NAMESPACE").unwrap_or_else(|_| "default".to_string());
+            let identity = std::env::var("HOSTNAME")
+                .unwrap_or_else(|_| format!("ugwc-{}", std::process::id()));
+            let lease_sd = shutdown.child_token();
+            let (state, handle) = crate::leader_election::spawn_lease_election(
+                client.clone(),
+                ns,
+                identity,
+                lease_sd,
+            );
+            (state, Some(handle))
+        } else {
+            metrics::set_leader_active(true);
+            (LeaderState::leader_always(), None)
+        };
+
         let kube_sd = shutdown.child_token();
         let debounce = std::time::Duration::from_millis(cfg.endpoint_debounce_ms);
         let leader_k = leader.clone();
@@ -521,16 +533,22 @@ pub async fn run(cfg: Config) -> Result<(), Box<dyn std::error::Error + Send + S
             shutdown,
             readiness,
             queue_metrics,
+            lease_handle,
             admin_task,
             xds_task,
             Some(kube_task),
         )
         .await;
     } else {
+        if cfg.leader_election {
+            warn!("UGWC_LEADER_ELECTION requires UGWC_KUBE_ENABLE — running as single leader");
+        }
+        metrics::set_leader_active(true);
         wait_shutdown(
             shutdown,
             readiness,
             ugwc_k8s::ReconcileQueueMetrics::noop(),
+            None,
             admin_task,
             xds_task,
             None,
@@ -545,6 +563,7 @@ async fn wait_shutdown(
     shutdown: tokio_util::sync::CancellationToken,
     readiness: Arc<Readiness>,
     queue_metrics: ugwc_k8s::ReconcileQueueMetrics,
+    lease_handle: Option<Arc<LeaseElectionHandle>>,
     admin: tokio::task::JoinHandle<Result<(), std::io::Error>>,
     xds: tokio::task::JoinHandle<()>,
     kube: Option<tokio::task::JoinHandle<()>>,
@@ -553,6 +572,9 @@ async fn wait_shutdown(
     info!("signal received — draining");
     readiness.set_cache_synced(false);
     tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+    if let Some(handle) = lease_handle {
+        handle.release().await;
+    }
     shutdown.cancel();
     let drain_deadline = std::time::Duration::from_secs(30);
     let drain_start = Instant::now();

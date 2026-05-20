@@ -68,6 +68,14 @@ spec:
               value: {{ .Values.ugwc.endpointDebounceMs | quote }}
             - name: UGWC_CONTROL_PLANE_XDS_BOOTSTRAP_ADDR
               value: {{ include "ugwc.bootstrapAddr" . | quote }}
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            - name: HOSTNAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
             {{- with .Values.extraEnv }}
             {{- toYaml . | nindent 12 }}
             {{- end }}

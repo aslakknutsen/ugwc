@@ -1,30 +1,43 @@
-//! Phase 8 — Kubernetes Lease leader election (**stub** until full HA path).
+//! Tracks whether this replica should publish IR/xDS updates (leader election).
+
+use std::sync::Arc;
 
 use tokio::sync::watch;
 
-/// Tracks whether this replica should publish IR/xDS updates.
+struct Inner {
+    tx: watch::Sender<bool>,
+    rx: watch::Receiver<bool>,
+}
+
+/// Whether this replica is the active leader (publishes xDS / dataplane changes).
 #[derive(Clone)]
 pub struct LeaderState {
-    is_leader: watch::Receiver<bool>,
+    inner: Arc<Inner>,
 }
 
 impl LeaderState {
-    /// Standalone / tests: always leader.
     #[must_use]
     pub fn leader_always() -> Self {
-        let (_tx, rx) = watch::channel(true);
-        Self { is_leader: rx }
+        let (tx, rx) = watch::channel(true);
+        Self {
+            inner: Arc::new(Inner { tx, rx }),
+        }
     }
 
-    /// HA mode placeholder — followers stay false until lease wiring lands.
     #[must_use]
-    pub fn follower_stub() -> Self {
-        let (_tx, rx) = watch::channel(false);
-        Self { is_leader: rx }
+    pub fn new_follower() -> Self {
+        let (tx, rx) = watch::channel(false);
+        Self {
+            inner: Arc::new(Inner { tx, rx }),
+        }
+    }
+
+    pub fn set_is_leader(&self, leader: bool) {
+        let _ = self.inner.tx.send(leader);
     }
 
     #[must_use]
     pub fn is_leader(&self) -> bool {
-        *self.is_leader.borrow()
+        *self.inner.rx.borrow()
     }
 }
