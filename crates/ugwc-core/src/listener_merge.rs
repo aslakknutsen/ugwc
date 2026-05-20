@@ -2,6 +2,8 @@
 
 use std::collections::{HashMap, HashSet};
 
+use zeroize::Zeroizing;
+
 use crate::snapshot::{
     EffectiveListenerSnap, GatewayListenerSnap, ListenerParentSnap, ListenerSetSnap,
 };
@@ -34,7 +36,7 @@ pub fn merge_effective_listeners(
             allowed_routes: l.allowed_routes.clone(),
             tls: l.tls.clone(),
             tls_cert_pem: Vec::new(),
-            tls_key_pem: Vec::new(),
+            tls_key_pem: Zeroizing::new(Vec::new()),
             tls_resolve_error: None,
         })
         .collect();
@@ -55,7 +57,7 @@ pub fn merge_effective_listeners(
                 allowed_routes: l.allowed_routes.clone(),
                 tls: l.tls.clone(),
                 tls_cert_pem: Vec::new(),
-                tls_key_pem: Vec::new(),
+                tls_key_pem: Zeroizing::new(Vec::new()),
                 tls_resolve_error: None,
             });
         }

@@ -1,6 +1,7 @@
 //! Route attachment — listener keys, hostname intersection, `allowedRoutes`, ReferenceGrant helpers.
 
 use std::collections::{BTreeMap, HashSet};
+use tracing::warn;
 
 use crate::snapshot::{
     AllowedRoutesSnap, ClusterSnapshot, EffectiveListenerSnap, GrpcRouteSnap, HttpRouteSnap,
@@ -94,8 +95,20 @@ pub fn reference_grant_permits_service_ref(
                 continue;
             }
             match &to.name {
-                None => return true,
-                Some(n) if n.is_empty() => return true,
+                None => {
+                    warn!(
+                        grant_ns = %g.namespace, grant_name = %g.name,
+                        "ReferenceGrant with wildcard to.name permits all Services in namespace"
+                    );
+                    return true;
+                }
+                Some(n) if n.is_empty() => {
+                    warn!(
+                        grant_ns = %g.namespace, grant_name = %g.name,
+                        "ReferenceGrant with empty to.name permits all Services in namespace"
+                    );
+                    return true;
+                }
                 Some(n) if n == service_name => return true,
                 _ => {}
             }
@@ -143,8 +156,13 @@ pub fn reference_grant_permits_inference_pool_ref(
                 continue;
             }
             match &to.name {
-                None => return true,
-                Some(n) if n.is_empty() => return true,
+                None | Some(_) if to.name.as_deref().map_or(true, str::is_empty) => {
+                    warn!(
+                        grant_ns = %g.namespace, grant_name = %g.name,
+                        "ReferenceGrant with wildcard to.name permits all InferencePools in namespace"
+                    );
+                    return true;
+                }
                 Some(n) if n == pool_name => return true,
                 _ => {}
             }
@@ -310,8 +328,13 @@ pub fn reference_grant_permits_gateway_secret_ref(
                 continue;
             }
             match &to.name {
-                None => return true,
-                Some(n) if n.is_empty() => return true,
+                None | Some(_) if to.name.as_deref().map_or(true, str::is_empty) => {
+                    warn!(
+                        grant_ns = %g.namespace, grant_name = %g.name,
+                        "ReferenceGrant with wildcard to.name permits all Secrets in namespace"
+                    );
+                    return true;
+                }
                 Some(n) if n == secret_name => return true,
                 _ => {}
             }
@@ -359,8 +382,14 @@ pub fn reference_grant_permits_backend_tls_policy_resource_ref(
                 continue;
             }
             match &to.name {
-                None => return true,
-                Some(n) if n.is_empty() => return true,
+                None | Some(_) if to.name.as_deref().map_or(true, str::is_empty) => {
+                    warn!(
+                        grant_ns = %g.namespace, grant_name = %g.name,
+                        resource_kind,
+                        "ReferenceGrant with wildcard to.name permits all resources of kind in namespace"
+                    );
+                    return true;
+                }
                 Some(n) if n == resource_name => return true,
                 _ => {}
             }

@@ -2,6 +2,8 @@
 
 use std::collections::BTreeMap;
 
+use zeroize::Zeroizing;
+
 use crate::inference::InferenceIr;
 use crate::ir::{
     BackendEndpointIr, BackendIr, IrRevision, IrScopeId, IrSnapshot, ListenerIr, RouteMatchIr,
@@ -36,7 +38,7 @@ impl HttpCompileFixture {
                 conflicted: false,
                 hostname: None,
                 tls_cert_pem: vec![],
-                tls_key_pem: vec![],
+                tls_key_pem: Zeroizing::new(vec![]),
                 allowed_route_group_kinds: vec![],
             }],
             routes: vec![RouteRuleIr {

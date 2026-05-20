@@ -13,6 +13,7 @@ prost.workspace = true
 
 [dev-dependencies]
 uuid.workspace = true
+zeroize.workspace = true
 
 [build-dependencies]
 prost-build.workspace = true

@@ -38,6 +38,21 @@ Plaintext xDS remains **prototype-only** and must not be the implicit production
 
 Review against actual informer list **and** each enabled output backend — RBAC drift is a recurring audit failure.
 
+### 2.1 Secret watch justification
+
+The controller watches `core/v1 Secret` resources (cluster-wide `get/list/watch`) because:
+- HTTPS listeners require resolved PEM for xDS push to the dataplane
+- BackendTLSPolicy client certificates similarly need PEM at compile time
+
+This deviates from the zero-secret RBAC model described in external standards.
+Mitigations:
+- PEM private keys use `Zeroizing<Vec<u8>>` (zeroed on drop)
+- Log redaction via `redact_field` catches PEM in tracing output
+- IR serialization skips key fields (`#[serde(skip)]`)
+
+If a deployment does not use HTTPS listeners or BackendTLSPolicy client certs,
+the `secrets` rule can be removed from the ClusterRole manually.
+
 ---
 
 ## 3. Policy attachment and trust boundaries
@@ -66,6 +81,16 @@ Every path that exposes or applies **compiled config** is in scope: gRPC xDS, HT
 - Separate credentials per GatewayClass / tenant where required  
 
 Document **what ships default** vs **platform responsibility** for **each** enabled backend.
+
+### 4.1 Admin HTTP endpoint
+
+The admin port (`/healthz`, `/readyz`, `/metrics`) binds to `0.0.0.0` by default.
+This is required for kubelet liveness/readiness probes (which connect from the node,
+not from within the pod).
+
+**Platform responsibility:** deploy a `NetworkPolicy` that restricts ingress to the
+admin port to the cluster monitoring stack and kubelet CIDR only. The chart does not
+ship a default NetworkPolicy because node CIDR ranges are cluster-specific.
 
 ---
 

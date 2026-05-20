@@ -162,6 +162,7 @@ pub async fn run_gateway_controller(
     let sd_sec = shutdown.clone();
     let c_sec = client.clone();
     let tx_sec = tx.clone();
+    let secret_debounce = endpoint_debounce;
     crate::spawn::spawn_with_trace_context(async move {
         let api: Api<Secret> = Api::all(c_sec.clone());
         let mut stream = watch_stream::full_applied_stream(api, watcher_config());
@@ -173,6 +174,10 @@ pub async fn run_gateway_controller(
                         Some(Ok(sec)) => {
                             let sns = sec.namespace().unwrap_or_default();
                             let sn = sec.name_any();
+                            tokio::time::sleep(secret_debounce).await;
+                            if sd_sec.is_cancelled() {
+                                break;
+                            }
                             let gw_api: Api<Gateway> = Api::all(c_sec.clone());
                             match gw_api.list(&ListParams::default()).await {
                                 Ok(list) => {

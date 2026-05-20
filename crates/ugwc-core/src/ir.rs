@@ -3,6 +3,7 @@
 use std::collections::BTreeMap;
 
 use uuid::Uuid;
+use zeroize::Zeroizing;
 
 /// Schema version embedded on every snapshot (bump when wire/IR changes).
 pub const IR_VERSION: u32 = 9;
@@ -70,9 +71,9 @@ pub struct ListenerIr {
     /// PEM TLS certificate (terminate mode), resolved by loader.
     #[serde(default)]
     pub tls_cert_pem: Vec<u8>,
-    /// PEM TLS private key (terminate mode), resolved by loader.
-    #[serde(default)]
-    pub tls_key_pem: Vec<u8>,
+    /// PEM TLS private key (terminate mode), resolved by loader. Zeroed on drop.
+    #[serde(skip)]
+    pub tls_key_pem: Zeroizing<Vec<u8>>,
     /// Effective `allowedRoutes` as `group/kind` strings (empty = infer HTTP + GRPC on HTTP-like listeners in encoder).
     #[serde(default)]
     pub allowed_route_group_kinds: Vec<String>,
@@ -248,9 +249,9 @@ pub struct BackendTlsIr {
     /// PEM client certificate for mutual TLS to the backend (`clientCertificateRefs`).
     #[serde(default)]
     pub client_cert_pem: Vec<u8>,
-    /// PEM client private key for mutual TLS to the backend.
-    #[serde(default)]
-    pub client_key_pem: Vec<u8>,
+    /// PEM client private key for mutual TLS to the backend. Zeroed on drop.
+    #[serde(skip)]
+    pub client_key_pem: Zeroizing<Vec<u8>>,
     /// CA resolution or validation config failed; dataplane must fail closed.
     #[serde(default)]
     pub invalid: bool,

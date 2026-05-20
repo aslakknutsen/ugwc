@@ -1,0 +1,31 @@
+{{- if .Values.admissionPolicies.rejectWildcardReferenceGrant.enabled }}
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: {{ include "ugwc.fullname" . }}-no-wildcard-referencegrant
+  labels:
+    {{- include "ugwc.labels" . | nindent 4 }}
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+      - apiGroups: ["gateway.networking.k8s.io"]
+        apiVersions: ["*"]
+        operations: ["CREATE", "UPDATE"]
+        resources: ["referencegrants"]
+  validations:
+    - expression: |
+        object.spec.to.all(t, has(t.name) && t.name != "")
+      message: "ReferenceGrant with wildcard (empty or missing) to.name is rejected by cluster policy"
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: {{ include "ugwc.fullname" . }}-no-wildcard-referencegrant
+  labels:
+    {{- include "ugwc.labels" . | nindent 4 }}
+spec:
+  policyName: {{ include "ugwc.fullname" . }}-no-wildcard-referencegrant
+  validationActions:
+    - Deny
+{{- end }}

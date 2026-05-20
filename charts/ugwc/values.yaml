@@ -76,5 +76,11 @@ livenessProbe:
 
 resources: {}
 
+# Optional ValidatingAdmissionPolicy to reject ReferenceGrant with wildcard to.name.
+# Requires K8s 1.30+ (ValidatingAdmissionPolicy GA).
+admissionPolicies:
+  rejectWildcardReferenceGrant:
+    enabled: false
+
 # Additional container env (literal names, e.g. UGWC_FOO).
 extraEnv: []

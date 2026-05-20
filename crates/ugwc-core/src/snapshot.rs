@@ -4,6 +4,7 @@
 
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
+use zeroize::Zeroizing;
 
 use crate::ir::BackendTlsIr;
 
@@ -583,8 +584,8 @@ pub struct EffectiveListenerSnap {
     /// Resolved `tls.crt` / `tls.key` from referenced Secret (loader-only).
     #[serde(default)]
     pub tls_cert_pem: Vec<u8>,
-    #[serde(default)]
-    pub tls_key_pem: Vec<u8>,
+    #[serde(skip)]
+    pub tls_key_pem: Zeroizing<Vec<u8>>,
     #[serde(default)]
     pub tls_resolve_error: Option<String>,
 }

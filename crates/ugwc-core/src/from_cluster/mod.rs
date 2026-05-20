@@ -12,6 +12,7 @@ use std::cmp::Ordering;
 use std::collections::{BTreeMap, HashSet};
 
 use uuid::Uuid;
+use zeroize::Zeroizing;
 
 use attachment::compute_listener_route_attachment_counts;
 use backend_resolve::{
@@ -186,7 +187,7 @@ fn listener_tls_ir_fields(
     e: &EffectiveListenerSnap,
     snapshot: &ClusterSnapshot,
     report: &mut CompileReport,
-) -> (TlsMode, Vec<u8>, Vec<u8>) {
+) -> (TlsMode, Vec<u8>, Zeroizing<Vec<u8>>) {
     let proto = normalize_protocol(&e.protocol);
     match proto.as_str() {
         "HTTP" => {
@@ -196,7 +197,7 @@ fn listener_tls_ir_fields(
                     "Invalid: HTTP listener must not set tls",
                 ));
             }
-            (TlsMode::Plaintext, Vec::new(), Vec::new())
+            (TlsMode::Plaintext, Vec::new(), Zeroizing::new(Vec::new()))
         }
         "HTTPS" => {
             let mode = e
@@ -209,18 +210,18 @@ fn listener_tls_ir_fields(
                     snapshot,
                     "UnsupportedValue: HTTPS TLS Passthrough",
                 ));
-                return (TlsMode::Plaintext, Vec::new(), Vec::new());
+                return (TlsMode::Plaintext, Vec::new(), Zeroizing::new(Vec::new()));
             }
             if let Some(ref err) = e.tls_resolve_error {
                 report.errors.push(gateway_obj_err(snapshot, err.as_str()));
-                return (TlsMode::Terminate, Vec::new(), Vec::new());
+                return (TlsMode::Terminate, Vec::new(), Zeroizing::new(Vec::new()));
             }
             if e.tls_cert_pem.is_empty() || e.tls_key_pem.is_empty() {
                 report.errors.push(gateway_obj_err(
                     snapshot,
                     "InvalidCertificateRef: missing TLS certificate material",
                 ));
-                return (TlsMode::Terminate, Vec::new(), Vec::new());
+                return (TlsMode::Terminate, Vec::new(), Zeroizing::new(Vec::new()));
             }
             (
                 TlsMode::Terminate,
@@ -234,7 +235,7 @@ fn listener_tls_ir_fields(
                     snapshot,
                     "Invalid: TLS listener requires tls configuration",
                 ));
-                return (TlsMode::Plaintext, Vec::new(), Vec::new());
+                return (TlsMode::Plaintext, Vec::new(), Zeroizing::new(Vec::new()));
             };
             let mode = tls_cfg.mode.as_deref().unwrap_or("").trim();
             if mode.is_empty() {
@@ -242,31 +243,31 @@ fn listener_tls_ir_fields(
                     snapshot,
                     "Invalid: TLS listener requires tls.mode",
                 ));
-                return (TlsMode::Plaintext, Vec::new(), Vec::new());
+                return (TlsMode::Plaintext, Vec::new(), Zeroizing::new(Vec::new()));
             }
             if mode.eq_ignore_ascii_case("Terminate") {
                 report.errors.push(gateway_obj_err(
                     snapshot,
                     "UnsupportedValue: TLS listener Terminate requires TLSRouteTermination support",
                 ));
-                return (TlsMode::Plaintext, Vec::new(), Vec::new());
+                return (TlsMode::Plaintext, Vec::new(), Zeroizing::new(Vec::new()));
             }
             if mode.eq_ignore_ascii_case("Passthrough") {
-                return (TlsMode::Passthrough, Vec::new(), Vec::new());
+                return (TlsMode::Passthrough, Vec::new(), Zeroizing::new(Vec::new()));
             }
             report.errors.push(gateway_obj_err(
                 snapshot,
                 format!("UnsupportedValue: TLS listener tls.mode {mode}"),
             ));
-            (TlsMode::Plaintext, Vec::new(), Vec::new())
+            (TlsMode::Plaintext, Vec::new(), Zeroizing::new(Vec::new()))
         }
-        "TCP" | "UDP" => (TlsMode::Plaintext, Vec::new(), Vec::new()),
+        "TCP" | "UDP" => (TlsMode::Plaintext, Vec::new(), Zeroizing::new(Vec::new())),
         other => {
             report.errors.push(gateway_obj_err(
                 snapshot,
                 format!("UnsupportedProtocol: {other}"),
             ));
-            (TlsMode::Plaintext, Vec::new(), Vec::new())
+            (TlsMode::Plaintext, Vec::new(), Zeroizing::new(Vec::new()))
         }
     }
 }

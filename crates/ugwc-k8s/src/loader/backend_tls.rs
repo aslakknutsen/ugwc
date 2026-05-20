@@ -5,6 +5,7 @@ use std::collections::{BTreeMap, HashSet};
 use kube::api::ListParams;
 use kube::{Api, Client};
 use tracing::warn;
+use zeroize::Zeroizing;
 use ugwc_core::http_route_attachment::reference_grant_permits_backend_tls_policy_resource_ref;
 use ugwc_core::ir::BackendTlsIr;
 use ugwc_core::snapshot::{
@@ -70,7 +71,7 @@ fn tls_invalid(
             sans,
             trust_system_ca: false,
             client_cert_pem: vec![],
-            client_key_pem: vec![],
+            client_key_pem: Zeroizing::new(vec![]),
             invalid: true,
         },
         Some(reason.into()),
@@ -180,7 +181,7 @@ async fn backend_tls_ir_from_validation(
     }
 
     let client_cert_pem = Vec::new();
-    let client_key_pem = Vec::new();
+    let client_key_pem = Zeroizing::new(Vec::new());
 
     let ca_refs = v.ca_certificate_refs.as_deref().unwrap_or_default();
     let has_ca = !ca_refs.is_empty();

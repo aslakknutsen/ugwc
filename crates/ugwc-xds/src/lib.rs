@@ -7,7 +7,7 @@ pub mod server;
 
 pub use cache::{MultiScopeSnapshot, SharedSnapshot, SnapshotCache, XdsSnapshotSource};
 pub use encode::{encode_delta, encode_sotw, XdsSnapshot};
-pub use server::{serve, shutdown_gracefully, XdsSecurityConfig, XdsServerConfig};
+pub use server::{serve, shutdown_gracefully, XdsSecurityConfig, XdsServeError, XdsServerConfig};
 /// ADS `type_url` for Praxis gwxds wire (same as [`ugwc_gwxds::GW_TYPE_URL`]).
 pub use ugwc_gwxds::GW_TYPE_URL;
 

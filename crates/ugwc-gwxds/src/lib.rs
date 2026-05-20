@@ -100,7 +100,7 @@ fn backend_tls_proto(t: &ugwc_core::ir::BackendTlsIr) -> BackendTls {
         hostname: t.hostname.clone(),
         sans: t.sans.clone(),
         client_cert: t.client_cert_pem.clone(),
-        client_key: t.client_key_pem.clone(),
+        client_key: (*t.client_key_pem).clone(),
         invalid: t.invalid,
     }
 }
@@ -191,7 +191,7 @@ pub fn encode_ir(ir: &IrSnapshot) -> Vec<Resource> {
         {
             Some(TlsConfig {
                 cert_pem: ln.tls_cert_pem.clone(),
-                key_pem: ln.tls_key_pem.clone(),
+                key_pem: (*ln.tls_key_pem).clone(),
                 ca_pem: vec![],
                 min_version: String::new(),
             })
@@ -412,7 +412,7 @@ mod tests {
             conflicted: false,
             hostname: Some("gw.example.com".into()),
             tls_cert_pem: b"C".to_vec(),
-            tls_key_pem: b"K".to_vec(),
+            tls_key_pem: zeroize::Zeroizing::new(b"K".to_vec()),
             allowed_route_group_kinds: vec![
                 "gateway.networking.k8s.io/HTTPRoute".into(),
                 "gateway.networking.k8s.io/GRPCRoute".into(),
@@ -513,7 +513,7 @@ mod tests {
             conflicted: false,
             hostname: Some("*.example.com".into()),
             tls_cert_pem: vec![],
-            tls_key_pem: vec![],
+            tls_key_pem: zeroize::Zeroizing::new(vec![]),
             allowed_route_group_kinds: vec![],
         };
         let attach = ListenerAttachmentIr {
@@ -603,7 +603,7 @@ mod tests {
             conflicted: false,
             hostname: None,
             tls_cert_pem: vec![],
-            tls_key_pem: vec![],
+            tls_key_pem: zeroize::Zeroizing::new(vec![]),
             allowed_route_group_kinds: vec![],
         };
         let attach = ListenerAttachmentIr {
@@ -692,7 +692,7 @@ mod tests {
             conflicted: false,
             hostname: None,
             tls_cert_pem: vec![],
-            tls_key_pem: vec![],
+            tls_key_pem: zeroize::Zeroizing::new(vec![]),
             allowed_route_group_kinds: vec![],
         };
         let attach = ListenerAttachmentIr {
@@ -782,7 +782,7 @@ mod tests {
             conflicted: false,
             hostname: None,
             tls_cert_pem: vec![],
-            tls_key_pem: vec![],
+            tls_key_pem: zeroize::Zeroizing::new(vec![]),
             allowed_route_group_kinds: vec![],
         };
         let attach = ListenerAttachmentIr {
@@ -829,7 +829,7 @@ mod tests {
                             sans: vec!["alt.internal".into()],
                             trust_system_ca: false,
                             client_cert_pem: vec![],
-                            client_key_pem: vec![],
+                            client_key_pem: zeroize::Zeroizing::new(vec![]),
                             invalid: false,
                         }),
                         inference: None,
@@ -886,7 +886,7 @@ mod tests {
             conflicted: false,
             hostname: None,
             tls_cert_pem: vec![],
-            tls_key_pem: vec![],
+            tls_key_pem: zeroize::Zeroizing::new(vec![]),
             allowed_route_group_kinds: vec![],
         };
         let attach = ListenerAttachmentIr {
@@ -982,7 +982,7 @@ mod tests {
         f.listeners[0].tls = TlsMode::Terminate;
         f.listeners[0].hostname = Some("gw.example.com".into());
         f.listeners[0].tls_cert_pem = b"BEGIN CERT".to_vec();
-        f.listeners[0].tls_key_pem = b"BEGIN KEY".to_vec();
+        f.listeners[0].tls_key_pem = zeroize::Zeroizing::new(b"BEGIN KEY".to_vec());
         let ir = ugwc_core::http_ir::build_http_ir_from_fixture(&f);
         let r = encode_ir(&ir);
         let l = r[0].listener.as_ref().expect("listener");
@@ -1014,7 +1014,7 @@ mod tests {
             sans: vec![],
             trust_system_ca: false,
             client_cert_pem: vec![],
-            client_key_pem: vec![],
+            client_key_pem: zeroize::Zeroizing::new(vec![]),
             invalid: true,
         });
         let ir = ugwc_core::http_ir::build_http_ir_from_fixture(&f);

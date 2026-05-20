@@ -120,7 +120,7 @@ pub(super) async fn resolve_gateway_listener_tls(
                         continue;
                     }
                     e.tls_cert_pem = crt;
-                    e.tls_key_pem = key;
+                    e.tls_key_pem = zeroize::Zeroizing::new(key);
                 }
                 Err(msg) => {
                     e.tls_resolve_error = Some(format!("InvalidCertificateRef: {msg}"));
@@ -173,8 +173,20 @@ pub(super) fn reference_grant_permits_listener_secret_ref(
                 continue;
             }
             match &to.name {
-                None => return true,
-                Some(n) if n.is_empty() => return true,
+                None => {
+                    warn!(
+                        grant_ns = %g.namespace, grant_name = %g.name,
+                        "ReferenceGrant with wildcard to.name permits all Secrets in namespace"
+                    );
+                    return true;
+                }
+                Some(n) if n.is_empty() => {
+                    warn!(
+                        grant_ns = %g.namespace, grant_name = %g.name,
+                        "ReferenceGrant with empty to.name permits all Secrets in namespace"
+                    );
+                    return true;
+                }
                 Some(n) if n == secret_name => return true,
                 _ => {}
             }

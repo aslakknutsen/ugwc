@@ -2063,6 +2063,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "rustls-pemfile"
+version = "2.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "dce314e5fee3f39953d46bb63bb8a46d40c2f8fb7cc5a3b6cab2bde9721d6e50"
+dependencies = [
+ "rustls-pki-types",
+]
+
+[[package]]
 name = "rustls-pki-types"
 version = "1.14.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2549,8 +2558,10 @@ dependencies = [
  "percent-encoding",
  "pin-project",
  "prost",
+ "rustls-pemfile",
  "socket2 0.5.10",
  "tokio",
+ "tokio-rustls",
  "tokio-stream",
  "tower 0.4.13",
  "tower-layer",
@@ -2806,7 +2817,9 @@ dependencies = [
  "sha2",
  "strum",
  "thiserror 1.0.69",
+ "tracing",
  "uuid",
+ "zeroize",
 ]
 
 [[package]]
@@ -2817,6 +2830,7 @@ dependencies = [
  "prost-build",
  "ugwc-core",
  "uuid",
+ "zeroize",
 ]
 
 [[package]]
@@ -2842,6 +2856,7 @@ dependencies = [
  "tower 0.5.3",
  "tracing",
  "ugwc-core",
+ "zeroize",
 ]
 
 [[package]]
@@ -2854,6 +2869,7 @@ dependencies = [
  "parking_lot",
  "prost",
  "prost-types",
+ "thiserror 1.0.69",
  "tokio",
  "tokio-stream",
  "tokio-util",
@@ -3362,6 +3378,20 @@ name = "zeroize"
 version = "1.8.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b97154e67e32c85465826e8bcc1c59429aaaf107c1e4a9e53c8d8ccd5eff88d0"
+dependencies = [
+ "zeroize_derive",
+]
+
+[[package]]
+name = "zeroize_derive"
+version = "1.4.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "85a5b4158499876c763cb03bc4e49185d3cccbabb15b33c627f7884f43db852e"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn",
+]
 
 [[package]]
 name = "zmij"

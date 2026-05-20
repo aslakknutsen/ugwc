@@ -9,10 +9,12 @@ description = "Internal IR, compile reports, FailurePolicy, publish planning"
 [dependencies]
 serde.workspace = true
 thiserror.workspace = true
+tracing.workspace = true
 uuid.workspace = true
 strum.workspace = true
 sha2.workspace = true
 hex.workspace = true
+zeroize.workspace = true
 
 [dev-dependencies]
 serde_json.workspace = true

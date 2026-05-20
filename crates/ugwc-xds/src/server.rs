@@ -8,7 +8,7 @@ use futures::Stream;
 use prost::Message;
 use tokio::sync::{mpsc, watch};
 use tokio_stream::wrappers::ReceiverStream;
-use tonic::transport::Server;
+use tonic::transport::{Identity, Certificate, Server, ServerTlsConfig};
 use tonic::{Request, Response, Status, Streaming};
 use metrics::{counter, gauge, histogram};
 use tracing::{info, warn, Instrument};
@@ -287,33 +287,22 @@ fn discovery_response(ir: &IrSnapshot, xds_wire: &str, req_type_url: &str) -> Di
     }
 }
 
+/// Errors from xDS server startup (TLS config or transport).
+#[derive(Debug, thiserror::Error)]
+pub enum XdsServeError {
+    #[error("xDS TLS configuration: {0}")]
+    TlsConfig(String),
+    #[error("xDS transport: {0}")]
+    Transport(#[from] tonic::transport::Error),
+}
+
 /// Run until `shutdown` triggers or the server errors.
 pub async fn serve(
     cfg: XdsServerConfig,
     cache: Arc<dyn XdsSnapshotSource>,
     revision_tx: Option<watch::Sender<u64>>,
     shutdown: tokio_util::sync::CancellationToken,
-) -> Result<(), tonic::transport::Error> {
-    if cfg.security.allow_insecure {
-        warn!("xDS listening in **insecure (plaintext)** mode — prototype only");
-    } else {
-        for path in [
-            &cfg.security.tls_cert_path,
-            &cfg.security.tls_key_path,
-            &cfg.security.tls_ca_path,
-        ]
-        .into_iter()
-        .flatten()
-        {
-            if !path.exists() {
-                warn!(
-                    ?path,
-                    "TLS material path missing — handshake will fail when wired"
-                );
-            }
-        }
-    }
-
+) -> Result<(), XdsServeError> {
     let svc = AdsService {
         cache,
         allow_delta: cfg.allow_delta,
@@ -323,18 +312,60 @@ pub async fn serve(
 
     let ads = AggregatedDiscoveryServiceServer::new(svc);
 
-    Server::builder()
-        .add_service(ads)
-        .serve_with_shutdown(cfg.listen_addr, async move {
-            shutdown.cancelled().await;
-        })
-        .await
+    if cfg.security.allow_insecure {
+        warn!("xDS listening in **insecure (plaintext)** mode — prototype only");
+        Server::builder()
+            .add_service(ads)
+            .serve_with_shutdown(cfg.listen_addr, async move {
+                shutdown.cancelled().await;
+            })
+            .await?;
+    } else {
+        let cert_path = cfg.security.tls_cert_path.as_ref().ok_or_else(|| {
+            XdsServeError::TlsConfig(
+                "UGWC_XDS_TLS_CERT_PATH required when insecure mode is disabled".into(),
+            )
+        })?;
+        let key_path = cfg.security.tls_key_path.as_ref().ok_or_else(|| {
+            XdsServeError::TlsConfig(
+                "UGWC_XDS_TLS_KEY_PATH required when insecure mode is disabled".into(),
+            )
+        })?;
+
+        let cert_pem = std::fs::read(cert_path).map_err(|e| {
+            XdsServeError::TlsConfig(format!("read {}: {e}", cert_path.display()))
+        })?;
+        let key_pem = std::fs::read(key_path).map_err(|e| {
+            XdsServeError::TlsConfig(format!("read {}: {e}", key_path.display()))
+        })?;
+
+        let identity = Identity::from_pem(&cert_pem, &key_pem);
+        let mut tls_config = ServerTlsConfig::new().identity(identity);
+
+        if let Some(ref ca_path) = cfg.security.tls_ca_path {
+            let ca_pem = std::fs::read(ca_path).map_err(|e| {
+                XdsServeError::TlsConfig(format!("read CA {}: {e}", ca_path.display()))
+            })?;
+            tls_config = tls_config.client_ca_root(Certificate::from_pem(&ca_pem));
+            info!("xDS TLS: mTLS enabled (client CA loaded)");
+        }
+
+        info!("xDS listening with TLS");
+        Server::builder()
+            .tls_config(tls_config)?
+            .add_service(ads)
+            .serve_with_shutdown(cfg.listen_addr, async move {
+                shutdown.cancelled().await;
+            })
+            .await?;
+    }
+    Ok(())
 }
 
 /// Best-effort graceful drain (plan Phase 2C / 8).
 pub async fn shutdown_gracefully(
     token: tokio_util::sync::CancellationToken,
-    join: tokio::task::JoinHandle<Result<(), tonic::transport::Error>>,
+    join: tokio::task::JoinHandle<Result<(), XdsServeError>>,
     timeout: std::time::Duration,
 ) {
     token.cancel();

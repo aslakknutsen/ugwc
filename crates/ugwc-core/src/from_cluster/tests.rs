@@ -1,6 +1,8 @@
 use super::*;
 use std::collections::BTreeMap;
 
+use zeroize::Zeroizing;
+
 use crate::ir::{BackendTlsIr, RouteFamily};
 use crate::listener_merge::merge_effective_listeners;
 use crate::snapshot::{
@@ -119,7 +121,7 @@ fn http_backend_attaches_backend_tls_from_snapshot() {
                 sans: vec!["alt.example.com".into()],
                 trust_system_ca: false,
                 client_cert_pem: vec![],
-                client_key_pem: vec![],
+                client_key_pem: Zeroizing::new(vec![]),
                 invalid: false,
             },
         },
@@ -155,7 +157,7 @@ fn http_backend_tls_system_trust_sets_flag_and_empty_ca() {
                 sans: vec![],
                 trust_system_ca: true,
                 client_cert_pem: vec![],
-                client_key_pem: vec![],
+                client_key_pem: Zeroizing::new(vec![]),
                 invalid: false,
             },
         },
@@ -183,7 +185,7 @@ fn http_backend_tls_invalid_records_invalid_ca_ref_error() {
                 sans: vec![],
                 trust_system_ca: false,
                 client_cert_pem: vec![],
-                client_key_pem: vec![],
+                client_key_pem: Zeroizing::new(vec![]),
                 invalid: true,
             },
         },
@@ -219,7 +221,7 @@ fn backend_tls_effective_key_is_per_service_port_not_whole_service() {
                 sans: vec![],
                 trust_system_ca: false,
                 client_cert_pem: vec![],
-                client_key_pem: vec![],
+                client_key_pem: Zeroizing::new(vec![]),
                 invalid: false,
             },
         },
@@ -416,7 +418,7 @@ fn https_listener_ok_with_resolved_pem() {
     }];
     let mut effective_listeners = merge_effective_listeners(&listeners, &[]);
     effective_listeners[0].tls_cert_pem = b"CERT".to_vec();
-    effective_listeners[0].tls_key_pem = b"KEY".to_vec();
+    effective_listeners[0].tls_key_pem = Zeroizing::new(b"KEY".to_vec());
     let mut snap = minimal_cluster();
     snap.listeners = listeners;
     snap.effective_listeners = effective_listeners;

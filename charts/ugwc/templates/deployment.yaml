@@ -101,3 +101,8 @@ spec:
           resources:
             {{- toYaml . | nindent 12 }}
           {{- end }}
+          securityContext:
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]

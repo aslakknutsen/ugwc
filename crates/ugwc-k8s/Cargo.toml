@@ -25,6 +25,7 @@ http.workspace = true
 chrono = { version = "0.4", default-features = false, features = ["clock", "std", "serde"] }
 metrics.workspace = true
 tower.workspace = true
+zeroize.workspace = true
 opentelemetry = { workspace = true, optional = true }
 
 [features]
