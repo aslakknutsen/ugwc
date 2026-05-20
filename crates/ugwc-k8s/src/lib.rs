@@ -2,6 +2,7 @@
 
 mod crd_supervisor;
 mod gateway_watchers;
+mod reconcile_queue;
 mod watch_helpers;
 
 pub mod controller;
@@ -12,6 +13,10 @@ pub mod resources;
 pub mod status;
 
 pub use controller::{run_gateway_controller, ReconcileFn};
+pub use reconcile_queue::{
+    new_reconcile_queue, record_workqueue_retry, ReconcileQueue, ReconcileQueueMetrics,
+    ReconcileSender, GATEWAY_RECONCILE_QUEUE,
+};
 pub use crd_supervisor::{ActiveCrds, ManagedCrd};
 pub use loader::{load_cluster_snapshot, parent_reference_to_snap, LoaderError};
 pub use mappers::{mapped_gateway_key, GatewayKey, WatchEventCause};

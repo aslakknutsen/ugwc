@@ -23,5 +23,6 @@ tokio-util.workspace = true
 futures.workspace = true
 http.workspace = true
 chrono = { version = "0.4", default-features = false, features = ["clock", "std", "serde"] }
+metrics.workspace = true
 
 [dev-dependencies]

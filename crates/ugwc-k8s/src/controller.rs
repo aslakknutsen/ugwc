@@ -15,10 +15,10 @@ use kube::api::ListParams;
 use kube::runtime::watcher::{watcher, Config as WatcherConfig};
 use kube::runtime::WatchStreamExt;
 use kube::{Api, Client, ResourceExt};
-use tokio::sync::mpsc;
 use tracing::{info, instrument, warn};
 
 use crate::crd_supervisor::{run_crd_supervisor, ActiveCrds};
+use crate::reconcile_queue::{record_workqueue_retry, ReconcileQueue, ReconcileSender, GATEWAY_RECONCILE_QUEUE};
 use crate::resources::{
     backend_tls_policy_spec_references_configmap, backend_tls_policy_spec_references_secret,
     gateway_spec_references_secret, listenerset_spec_references_secret, BackendTLSPolicy, Gateway,
@@ -31,16 +31,18 @@ pub type ReconcileFn = Arc<dyn Fn(String, String) -> ReconcileFuture + Send + Sy
 
 /// Observe gateways (CRD-gated via [`run_crd_supervisor`]), routes, grants, backend TLS policies,
 /// CA ConfigMaps, endpoints, secrets, classes, and inference pools.
-#[instrument(skip(client, shutdown, reconcile))]
+#[instrument(skip(client, shutdown, reconcile, work_queue, reconcile_tx))]
 pub async fn run_gateway_controller(
     client: Client,
     shutdown: tokio_util::sync::CancellationToken,
     endpoint_debounce: Duration,
+    reconcile_tx: ReconcileSender,
+    mut work_queue: ReconcileQueue,
     reconcile: ReconcileFn,
     owned_controller_names: Vec<String>,
     active_crds: ActiveCrds,
 ) {
-    let (tx, mut rx) = mpsc::channel::<(String, String)>(256);
+    let tx = reconcile_tx;
 
     let c_sup = client.clone();
     let sd_sup = shutdown.clone();
@@ -76,7 +78,7 @@ pub async fn run_gateway_controller(
                                     for gw in list.items {
                                         let name = gw.name_any();
                                         let ns = gw.namespace().unwrap_or_default();
-                                        if tx_ep.send((ns, name)).await.is_err() {
+                                        if tx_ep.send(ns, name).await.is_err() {
                                             return;
                                         }
                                     }
@@ -120,7 +122,7 @@ pub async fn run_gateway_controller(
                                 .cloned()
                                 .unwrap_or_default();
                             if !gw_ns.is_empty() && !gw_name.is_empty() {
-                                if tx_svc.send((gw_ns, gw_name)).await.is_err() {
+                                if tx_svc.send(gw_ns, gw_name).await.is_err() {
                                     return;
                                 }
                             }
@@ -153,7 +155,7 @@ pub async fn run_gateway_controller(
                                     for gw in list.items {
                                         let gwns = gw.namespace().unwrap_or_default();
                                         if gateway_spec_references_secret(&gw.spec, &gwns, &sns, &sn)
-                                            && tx_sec.send((gwns, gw.name_any())).await.is_err()
+                                            && tx_sec.send(gwns, gw.name_any()).await.is_err()
                                         {
                                             return;
                                         }
@@ -180,7 +182,7 @@ pub async fn run_gateway_controller(
                                             .clone()
                                             .or(ls.metadata.namespace.clone())
                                             .unwrap_or_default();
-                                        if tx_sec.send((gwns, pr.name.clone())).await.is_err() {
+                                        if tx_sec.send(gwns, pr.name.clone()).await.is_err() {
                                             return;
                                         }
                                     }
@@ -205,7 +207,7 @@ pub async fn run_gateway_controller(
                                         }
                                     }
                                     for (pns, pname) in gateways {
-                                        if tx_sec.send((pns, pname)).await.is_err() {
+                                        if tx_sec.send(pns, pname).await.is_err() {
                                             return;
                                         }
                                     }
@@ -259,7 +261,7 @@ pub async fn run_gateway_controller(
                                 gateways.extend(gateway_targets_for_backend_tls_policy(&c_cm, &pol).await);
                             }
                             for (pns, pname) in gateways {
-                                if tx_cm.send((pns, pname)).await.is_err() {
+                                if tx_cm.send(pns, pname).await.is_err() {
                                     return;
                                 }
                             }
@@ -279,9 +281,13 @@ pub async fn run_gateway_controller(
                 info!("graph controller shutdown");
                 break;
             }
-            pair = rx.recv() => {
+            pair = work_queue.recv() => {
                 let Some((ns, name)) = pair else { break };
-                if let Err(e) = reconcile(ns, name).await {
+                let proc_started = work_queue.begin_reconcile();
+                let result = reconcile(ns, name).await;
+                work_queue.end_reconcile(proc_started);
+                if let Err(e) = result {
+                    record_workqueue_retry(GATEWAY_RECONCILE_QUEUE);
                     warn!(error = %e, "reconcile");
                 }
             }

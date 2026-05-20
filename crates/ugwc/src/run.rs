@@ -109,9 +109,9 @@ pub async fn run(cfg: Config) -> Result<(), Box<dyn std::error::Error + Send + S
         ));
         let active_crds_reconcile = active_crds.clone();
         let status_cache_k = status_cache.clone();
+        let (reconcile_tx, work_queue, _queue_metrics) = ugwc_k8s::new_reconcile_queue(256);
         let kube_task = tokio::spawn(async move {
             let rfn: ugwc_k8s::ReconcileFn = Arc::new(move |ns: String, name: String| {
-                metrics::record_reconcile();
                 let fp_k = fp_k.clone();
                 let cache_k = cache_k.clone();
                 let leader_k = leader_k.clone();
@@ -124,7 +124,10 @@ pub async fn run(cfg: Config) -> Result<(), Box<dyn std::error::Error + Send + S
                 let xds_insecure = xds_insecure;
                 let xds_wire = xds_wire.clone();
                 let active_crds = active_crds_reconcile.clone();
+                let controller_name = primary_controller.clone();
                 Box::pin(async move {
+                    let reconcile_started = Instant::now();
+                    let outcome: Result<(), String> = async {
                     let api: Api<Gateway> = Api::namespaced(client_inner.clone(), &ns);
                     let latest = api.get(&name).await.map_err(|e| e.to_string())?;
 
@@ -469,12 +472,22 @@ pub async fn run(cfg: Config) -> Result<(), Box<dyn std::error::Error + Send + S
                     }
 
                     Ok(())
+                    }
+                    .await;
+                    metrics::record_reconcile_run(&controller_name, outcome.is_ok());
+                    metrics::observe_reconcile_duration_seconds(
+                        &controller_name,
+                        reconcile_started.elapsed().as_secs_f64(),
+                    );
+                    outcome
                 })
             });
             ugwc_k8s::run_gateway_controller(
                 watch_client,
                 kube_sd,
                 debounce,
+                reconcile_tx,
+                work_queue,
                 rfn,
                 controller_names.clone(),
                 active_crds,

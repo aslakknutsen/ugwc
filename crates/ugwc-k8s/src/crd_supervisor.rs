@@ -14,7 +14,6 @@ use kube::api::ListParams;
 use kube::runtime::watcher::{watcher, Config as WatcherConfig, Event};
 use kube::{Api, Client, Resource};
 use std::borrow::Cow;
-use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
 
@@ -157,7 +156,7 @@ fn stop_for_crd(
 fn dispatch_spawn(
     m: ManagedCrd,
     client: Client,
-    tx: mpsc::Sender<(String, String)>,
+    tx: crate::reconcile_queue::ReconcileSender,
     child: CancellationToken,
     owned_controller_names: Vec<String>,
 ) {
@@ -184,7 +183,7 @@ async fn apply_crd(
     last_warned_rv: &mut HashMap<ManagedCrd, String>,
     client: &Client,
     shutdown: &CancellationToken,
-    tx: &mpsc::Sender<(String, String)>,
+    tx: &crate::reconcile_queue::ReconcileSender,
     owned_controller_names: &[String],
     active: &ActiveCrds,
 ) {
@@ -216,7 +215,7 @@ async fn apply_crd(
 pub(crate) async fn run_crd_supervisor(
     client: Client,
     shutdown: CancellationToken,
-    tx: mpsc::Sender<(String, String)>,
+    tx: crate::reconcile_queue::ReconcileSender,
     owned_controller_names: Vec<String>,
     active: ActiveCrds,
 ) {

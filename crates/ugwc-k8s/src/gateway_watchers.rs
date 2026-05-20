@@ -8,7 +8,6 @@ use kube::api::ListParams;
 use kube::runtime::watcher::{watcher, Config as WatcherConfig};
 use kube::runtime::WatchStreamExt;
 use kube::{Api, Client, ResourceExt};
-use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
 
@@ -57,7 +56,7 @@ impl StreamBackoff {
 
 pub(crate) fn spawn_gateway_watcher(
     client: Client,
-    tx: mpsc::Sender<(String, String)>,
+    tx: crate::reconcile_queue::ReconcileSender,
     token: CancellationToken,
 ) {
     tokio::spawn(async move {
@@ -74,7 +73,7 @@ pub(crate) fn spawn_gateway_watcher(
                             backoff.reset();
                             let ns = gw.namespace().unwrap_or_default();
                             let name = gw.name_any();
-                            if tx.send((ns, name)).await.is_err() {
+                            if tx.send(ns, name).await.is_err() {
                                 break;
                             }
                         }
@@ -93,7 +92,7 @@ pub(crate) fn spawn_gateway_watcher(
 
 pub(crate) fn spawn_http_route_watcher(
     client: Client,
-    tx: mpsc::Sender<(String, String)>,
+    tx: crate::reconcile_queue::ReconcileSender,
     token: CancellationToken,
 ) {
     tokio::spawn(async move {
@@ -110,7 +109,7 @@ pub(crate) fn spawn_http_route_watcher(
                             backoff.reset();
                             let targets = gateway_targets_for_route(&client, &route).await;
                             for (pns, pname) in targets {
-                                if tx.send((pns, pname)).await.is_err() {
+                                if tx.send(pns, pname).await.is_err() {
                                     return;
                                 }
                             }
@@ -130,7 +129,7 @@ pub(crate) fn spawn_http_route_watcher(
 
 pub(crate) fn spawn_grpc_route_watcher(
     client: Client,
-    tx: mpsc::Sender<(String, String)>,
+    tx: crate::reconcile_queue::ReconcileSender,
     token: CancellationToken,
 ) {
     tokio::spawn(async move {
@@ -147,7 +146,7 @@ pub(crate) fn spawn_grpc_route_watcher(
                             backoff.reset();
                             let targets = gateway_targets_for_grpc_route(&client, &route).await;
                             for (pns, pname) in targets {
-                                if tx.send((pns, pname)).await.is_err() {
+                                if tx.send(pns, pname).await.is_err() {
                                     return;
                                 }
                             }
@@ -167,7 +166,7 @@ pub(crate) fn spawn_grpc_route_watcher(
 
 pub(crate) fn spawn_tls_route_watcher(
     client: Client,
-    tx: mpsc::Sender<(String, String)>,
+    tx: crate::reconcile_queue::ReconcileSender,
     token: CancellationToken,
 ) {
     tokio::spawn(async move {
@@ -184,7 +183,7 @@ pub(crate) fn spawn_tls_route_watcher(
                             backoff.reset();
                             let targets = gateway_targets_for_tls_route(&client, &route).await;
                             for (pns, pname) in targets {
-                                if tx.send((pns, pname)).await.is_err() {
+                                if tx.send(pns, pname).await.is_err() {
                                     return;
                                 }
                             }
@@ -204,7 +203,7 @@ pub(crate) fn spawn_tls_route_watcher(
 
 pub(crate) fn spawn_tcp_route_watcher(
     client: Client,
-    tx: mpsc::Sender<(String, String)>,
+    tx: crate::reconcile_queue::ReconcileSender,
     token: CancellationToken,
 ) {
     tokio::spawn(async move {
@@ -221,7 +220,7 @@ pub(crate) fn spawn_tcp_route_watcher(
                             backoff.reset();
                             let targets = gateway_targets_for_tcp_route(&client, &route).await;
                             for (pns, pname) in targets {
-                                if tx.send((pns, pname)).await.is_err() {
+                                if tx.send(pns, pname).await.is_err() {
                                     return;
                                 }
                             }
@@ -241,7 +240,7 @@ pub(crate) fn spawn_tcp_route_watcher(
 
 pub(crate) fn spawn_udp_route_watcher(
     client: Client,
-    tx: mpsc::Sender<(String, String)>,
+    tx: crate::reconcile_queue::ReconcileSender,
     token: CancellationToken,
 ) {
     tokio::spawn(async move {
@@ -258,7 +257,7 @@ pub(crate) fn spawn_udp_route_watcher(
                             backoff.reset();
                             let targets = gateway_targets_for_udp_route(&client, &route).await;
                             for (pns, pname) in targets {
-                                if tx.send((pns, pname)).await.is_err() {
+                                if tx.send(pns, pname).await.is_err() {
                                     return;
                                 }
                             }
@@ -278,7 +277,7 @@ pub(crate) fn spawn_udp_route_watcher(
 
 pub(crate) fn spawn_inference_pool_watcher(
     client: Client,
-    tx: mpsc::Sender<(String, String)>,
+    tx: crate::reconcile_queue::ReconcileSender,
     token: CancellationToken,
 ) {
     tokio::spawn(async move {
@@ -298,7 +297,7 @@ pub(crate) fn spawn_inference_pool_watcher(
                             let targets =
                                 gateway_targets_for_inference_pool(&client, &pns, &pname).await;
                             for (gwns, gwname) in targets {
-                                if tx.send((gwns, gwname)).await.is_err() {
+                                if tx.send(gwns, gwname).await.is_err() {
                                     return;
                                 }
                             }
@@ -318,7 +317,7 @@ pub(crate) fn spawn_inference_pool_watcher(
 
 pub(crate) fn spawn_reference_grant_watcher(
     client: Client,
-    tx: mpsc::Sender<(String, String)>,
+    tx: crate::reconcile_queue::ReconcileSender,
     token: CancellationToken,
 ) {
     tokio::spawn(async move {
@@ -556,7 +555,7 @@ pub(crate) fn spawn_reference_grant_watcher(
                             }
 
                             for (pns, pname) in keys {
-                                if tx.send((pns, pname)).await.is_err() {
+                                if tx.send(pns, pname).await.is_err() {
                                     return;
                                 }
                             }
@@ -576,7 +575,7 @@ pub(crate) fn spawn_reference_grant_watcher(
 
 pub(crate) fn spawn_listener_set_watcher(
     client: Client,
-    tx: mpsc::Sender<(String, String)>,
+    tx: crate::reconcile_queue::ReconcileSender,
     token: CancellationToken,
 ) {
     tokio::spawn(async move {
@@ -600,7 +599,7 @@ pub(crate) fn spawn_listener_set_watcher(
                                     .clone()
                                     .or(ls.metadata.namespace.clone())
                                     .unwrap_or_default();
-                                if tx.send((gwns, pr.name.clone())).await.is_err() {
+                                if tx.send(gwns, pr.name.clone()).await.is_err() {
                                     return;
                                 }
                             }
@@ -620,7 +619,7 @@ pub(crate) fn spawn_listener_set_watcher(
 
 pub(crate) fn spawn_gateway_class_watcher(
     client: Client,
-    tx: mpsc::Sender<(String, String)>,
+    tx: crate::reconcile_queue::ReconcileSender,
     token: CancellationToken,
     owned_controller_names: Vec<String>,
 ) {
@@ -655,7 +654,7 @@ pub(crate) fn spawn_gateway_class_watcher(
                                         }
                                         let name = gw.name_any();
                                         let ns = gw.namespace().unwrap_or_default();
-                                        if tx.send((ns, name)).await.is_err() {
+                                        if tx.send(ns, name).await.is_err() {
                                             return;
                                         }
                                     }
@@ -678,7 +677,7 @@ pub(crate) fn spawn_gateway_class_watcher(
 
 pub(crate) fn spawn_backend_tls_policy_watcher(
     client: Client,
-    tx: mpsc::Sender<(String, String)>,
+    tx: crate::reconcile_queue::ReconcileSender,
     token: CancellationToken,
 ) {
     tokio::spawn(async move {
@@ -695,7 +694,7 @@ pub(crate) fn spawn_backend_tls_policy_watcher(
                             backoff.reset();
                             let targets = gateway_targets_for_backend_tls_policy(&client, &pol).await;
                             for (pns, pname) in targets {
-                                if tx.send((pns, pname)).await.is_err() {
+                                if tx.send(pns, pname).await.is_err() {
                                     return;
                                 }
                             }
