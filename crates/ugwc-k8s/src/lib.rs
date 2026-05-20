@@ -2,6 +2,8 @@
 
 mod crd_supervisor;
 mod gateway_watchers;
+mod initial_sync;
+mod kube_metrics;
 mod reconcile_queue;
 mod watch_helpers;
 
@@ -18,6 +20,8 @@ pub use reconcile_queue::{
     ReconcileSender, GATEWAY_RECONCILE_QUEUE,
 };
 pub use crd_supervisor::{ActiveCrds, ManagedCrd};
+pub use initial_sync::InitialSyncGate;
+pub use kube_metrics::{instrumented_client, try_default_instrumented};
 pub use loader::{load_cluster_snapshot, parent_reference_to_snap, LoaderError};
 pub use mappers::{mapped_gateway_key, GatewayKey, WatchEventCause};
 pub use provision::{

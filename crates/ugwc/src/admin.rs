@@ -6,7 +6,6 @@ use axum::extract::State;
 use axum::http::StatusCode;
 use axum::routing::get;
 use axum::Router;
-use metrics_exporter_prometheus::PrometheusHandle;
 use tokio::net::TcpListener;
 use tokio_util::sync::CancellationToken;
 
@@ -14,7 +13,6 @@ use crate::readiness::Readiness;
 
 #[derive(Clone)]
 struct AdminState {
-    prom: PrometheusHandle,
     readiness: Arc<Readiness>,
 }
 
@@ -30,35 +28,27 @@ async fn readyz(State(st): State<AdminState>) -> StatusCode {
     }
 }
 
-async fn metrics_prom(
-    State(st): State<AdminState>,
-) -> ([(axum::http::header::HeaderName, &'static str); 1], String) {
-    let mut body = st.prom.render();
-    if let Ok(extra) = crate::metrics::render_process_metrics() {
-        if !extra.is_empty() {
-            if !body.is_empty() && !body.ends_with('\n') {
-                body.push('\n');
-            }
-            body.push_str(&extra);
-        }
-    }
-    (
+async fn metrics_prom() -> Result<
+    ([(axum::http::header::HeaderName, &'static str); 1], String),
+    StatusCode,
+> {
+    let body = crate::metrics::render().map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    Ok((
         [(
             axum::http::header::CONTENT_TYPE,
             "text/plain; version=0.0.4; charset=utf-8",
         )],
         body,
-    )
+    ))
 }
 
 /// Spawn admin server; cancel via token.
 pub async fn serve(
     listen: std::net::SocketAddr,
     shutdown: CancellationToken,
-    prom: PrometheusHandle,
     readiness: Arc<Readiness>,
 ) -> Result<(), std::io::Error> {
-    let state = AdminState { prom, readiness };
+    let state = AdminState { readiness };
     let app = Router::new()
         .route("/healthz", get(healthz))
         .route("/readyz", get(readyz))

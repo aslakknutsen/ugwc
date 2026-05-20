@@ -38,16 +38,28 @@ ugwc:
 
 podAnnotations: {}
 
-# Prometheus Operator ServiceMonitor (requires monitoring.coreos.com CRDs).
+# Observability (Prometheus pull on admin port; optional Operator CRs).
+observability:
+  serviceMonitor:
+    enabled: false
+    interval: 30s
+    scrapeTimeout: 10s
+    labels: {}
+  prometheusRule:
+    enabled: false
+    labels: {}
+
+# Deprecated: use observability.serviceMonitor (kept for backward-compatible Helm upgrades).
 serviceMonitor:
   enabled: false
   interval: 30s
   scrapeTimeout: 10s
   labels: {}
 
-# Legacy annotation-based scrape when serviceMonitor.enabled is false.
+# Legacy annotation-based scrape when ServiceMonitor is off.
 prometheusAnnotations: false
 
+# Must exceed ugwc shutdown drain (30s) + join (10s); see crates/ugwc/src/run.rs constants.
 terminationGracePeriodSeconds: 60
 
 readinessProbe:

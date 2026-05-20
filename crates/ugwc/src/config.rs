@@ -70,6 +70,15 @@ pub struct Config {
     /// (file entries override the same `controllerName` key). Not set directly from env.
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub implementation_profiles: HashMap<String, ImplementationProfile>,
+    /// OTLP metrics endpoint (requires `otlp-metrics` feature on the binary).
+    pub otlp_endpoint: Option<String>,
+    /// OTLP push interval in milliseconds (default 15000).
+    #[serde(default = "default_otlp_push_interval_ms")]
+    pub otlp_push_interval_ms: u64,
+}
+
+fn default_otlp_push_interval_ms() -> u64 {
+    15_000
 }
 
 #[derive(Debug, Error)]
@@ -241,6 +250,8 @@ mod tests {
             dataplane_enable: false,
             control_plane_xds_bootstrap_addr: None,
             implementation_profiles: HashMap::new(),
+            otlp_endpoint: None,
+            otlp_push_interval_ms: default_otlp_push_interval_ms(),
         }
     }
 }

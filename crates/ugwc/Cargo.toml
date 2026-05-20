@@ -29,8 +29,9 @@ clap.workspace = true
 axum.workspace = true
 arc-swap.workspace = true
 metrics.workspace = true
-metrics-exporter-prometheus.workspace = true
 prometheus.workspace = true
+prometheus-client.workspace = true
+metrics-prometheus-client.workspace = true
 http.workspace = true
 futures.workspace = true
 kube.workspace = true
@@ -39,3 +40,12 @@ once_cell.workspace = true
 tonic.workspace = true
 tokio-stream.workspace = true
 xds-api.workspace = true
+tokio-metrics = { workspace = true, optional = true }
+opentelemetry = { workspace = true, optional = true }
+opentelemetry_sdk = { workspace = true, optional = true }
+opentelemetry-otlp = { workspace = true, optional = true }
+
+[features]
+default = []
+tokio-metrics = ["dep:tokio-metrics"]
+otlp-metrics = ["dep:opentelemetry", "dep:opentelemetry_sdk", "dep:opentelemetry-otlp"]

@@ -4,13 +4,16 @@ use clap::{Parser, Subcommand};
 
 mod admin;
 mod config;
+mod gateway_state_metrics;
 mod implementation_profiles;
 mod leader;
 mod leader_election;
 mod logging;
 mod metrics;
+mod otlp;
 mod readiness;
 mod run;
+mod tokio_runtime_metrics;
 mod xds_dump;
 
 #[derive(Parser, Debug)]

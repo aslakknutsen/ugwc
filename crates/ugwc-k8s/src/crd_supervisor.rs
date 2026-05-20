@@ -20,6 +20,7 @@ use tracing::{info, warn};
 /// Live view of which CRDs the supervisor currently considers active.
 pub type ActiveCrds = Arc<RwLock<HashSet<ManagedCrd>>>;
 
+use crate::initial_sync::InitialSyncGate;
 use crate::gateway_watchers::{
     spawn_backend_tls_policy_watcher, spawn_gateway_class_watcher, spawn_gateway_watcher,
     spawn_grpc_route_watcher, spawn_http_route_watcher, spawn_inference_pool_watcher,
@@ -218,16 +219,14 @@ pub(crate) async fn run_crd_supervisor(
     tx: crate::reconcile_queue::ReconcileSender,
     owned_controller_names: Vec<String>,
     active: ActiveCrds,
-    on_initial_sync: Option<Arc<dyn Fn() + Send + Sync>>,
+    sync_gate: Option<Arc<InitialSyncGate>>,
 ) {
     let api: Api<CustomResourceDefinition> = Api::all(client.clone());
     let mut running: HashMap<ManagedCrd, CancellationToken> = HashMap::new();
     let mut last_warned_rv: HashMap<ManagedCrd, String> = HashMap::new();
 
-    let mut initial_list_ok = false;
     match api.list(&ListParams::default()).await {
         Ok(list) => {
-            initial_list_ok = true;
             for crd in list.items {
                 apply_crd(
                     &crd,
@@ -241,16 +240,14 @@ pub(crate) async fn run_crd_supervisor(
                 )
                 .await;
             }
+            if let Some(gate) = &sync_gate {
+                gate.mark_crd_list();
+            }
         }
         Err(e) => warn!(
             error = %e,
             "crd supervisor initial list failed; waiting for CRD watch. Gated watchers will not start until list/watch succeeds"
         ),
-    }
-    if initial_list_ok {
-        if let Some(cb) = &on_initial_sync {
-            cb();
-        }
     }
 
     let cfg = WatcherConfig::default().any_semantic();

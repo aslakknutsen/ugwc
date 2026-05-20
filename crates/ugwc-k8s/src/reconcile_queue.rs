@@ -3,8 +3,8 @@
 //! Workqueue metrics use the global `metrics` recorder (installed by `ugwc::metrics::install`).
 //! Keep label sets fixed per metric name to avoid facade cardinality panics.
 
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
-use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use metrics::{counter, gauge, histogram};
@@ -24,7 +24,8 @@ struct QueueStats {
     depth: AtomicUsize,
     in_flight: AtomicUsize,
     longest_running_secs: AtomicU64,
-    unfinished_work_secs: AtomicU64,
+    /// Start time of each in-flight reconcile (sum of ages → unfinished_work gauge).
+    in_flight_started: Mutex<Vec<Instant>>,
 }
 
 impl QueueStats {
@@ -33,8 +34,18 @@ impl QueueStats {
             depth: AtomicUsize::new(0),
             in_flight: AtomicUsize::new(0),
             longest_running_secs: AtomicU64::new(0),
-            unfinished_work_secs: AtomicU64::new(0),
+            in_flight_started: Mutex::new(Vec::new()),
         }
+    }
+
+    fn unfinished_work_seconds(&self) -> f64 {
+        let now = Instant::now();
+        self.in_flight_started
+            .lock()
+            .expect("in_flight_started lock")
+            .iter()
+            .map(|s| now.duration_since(*s).as_secs_f64())
+            .sum()
     }
 
     fn publish_gauges(&self, queue_name: &str) {
@@ -49,7 +60,7 @@ impl QueueStats {
             "ugwc_workqueue_unfinished_work_seconds",
             "queue_name" => queue_name.to_string()
         )
-        .set(self.unfinished_work_secs.load(Ordering::Relaxed) as f64);
+        .set(self.unfinished_work_seconds());
     }
 }
 
@@ -58,10 +69,14 @@ impl QueueStats {
 pub struct ReconcileSender {
     tx: mpsc::Sender<QueueItem>,
     stats: Arc<QueueStats>,
+    draining: Arc<AtomicBool>,
 }
 
 impl ReconcileSender {
     pub async fn send(&self, ns: String, name: String) -> Result<(), ()> {
+        if self.draining.load(Ordering::Relaxed) {
+            return Err(());
+        }
         counter!(
             "ugwc_workqueue_adds_total",
             "queue_name" => GATEWAY_RECONCILE_QUEUE.to_string()
@@ -82,6 +97,16 @@ impl ReconcileSender {
             })
             .await
             .map_err(|_| ())
+    }
+
+    /// Stop accepting new reconcile keys (graceful shutdown).
+    pub fn close(&self) {
+        self.draining.store(true, Ordering::Relaxed);
+    }
+
+    #[must_use]
+    pub fn is_draining(&self) -> bool {
+        self.draining.load(Ordering::Relaxed)
     }
 }
 
@@ -105,21 +130,31 @@ impl ReconcileQueueMetrics {
         self.stats.in_flight.load(Ordering::Relaxed)
     }
 
-    fn begin_processing(&self) {
-        let n = self.stats.in_flight.fetch_add(1, Ordering::Relaxed) + 1;
+    #[cfg(test)]
+    fn unfinished_work_seconds(&self) -> f64 {
+        self.stats.unfinished_work_seconds()
+    }
+
+    fn begin_processing(&self) -> Instant {
+        let started = Instant::now();
+        self.stats.in_flight.fetch_add(1, Ordering::Relaxed);
         self.stats
-            .unfinished_work_secs
-            .store(n as u64, Ordering::Relaxed);
+            .in_flight_started
+            .lock()
+            .expect("in_flight_started lock")
+            .push(started);
         self.stats.publish_gauges(GATEWAY_RECONCILE_QUEUE);
+        started
     }
 
     fn end_processing(&self, started: Instant) {
         let elapsed = started.elapsed().as_secs();
-        let n = self.stats.in_flight.fetch_sub(1, Ordering::Relaxed);
-        let remaining = n.saturating_sub(1);
-        self.stats
-            .unfinished_work_secs
-            .store(remaining as u64, Ordering::Relaxed);
+        self.stats.in_flight.fetch_sub(1, Ordering::Relaxed);
+        if let Ok(mut v) = self.stats.in_flight_started.lock() {
+            if let Some(pos) = v.iter().position(|t| *t == started) {
+                v.remove(pos);
+            }
+        }
         let prev_longest = self.stats.longest_running_secs.load(Ordering::Relaxed);
         if elapsed > prev_longest {
             self.stats
@@ -146,6 +181,7 @@ pub fn new_reconcile_queue(
     let sender = ReconcileSender {
         tx,
         stats: stats.clone(),
+        draining: Arc::new(AtomicBool::new(false)),
     };
     let metrics = ReconcileQueueMetrics { stats: stats.clone() };
     let queue = ReconcileQueue {
@@ -185,8 +221,7 @@ impl ReconcileQueue {
     }
 
     pub fn begin_reconcile(&self) -> Instant {
-        self.metrics.begin_processing();
-        Instant::now()
+        self.metrics.begin_processing()
     }
 
     pub fn end_reconcile(&self, started: Instant) {
@@ -221,5 +256,29 @@ mod tests {
             queue.metrics.stats.depth.load(Ordering::Relaxed),
             0
         );
+    }
+
+    #[tokio::test]
+    async fn unfinished_work_seconds_accumulates_while_reconcile_in_flight() {
+        let (_tx, queue, metrics) = new_reconcile_queue(8);
+        let started = queue.begin_reconcile();
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        let unfinished = metrics.unfinished_work_seconds();
+        assert!(
+            unfinished >= 0.04,
+            "expected unfinished work >= 40ms, got {unfinished}"
+        );
+        queue.end_reconcile(started);
+        assert!(
+            metrics.unfinished_work_seconds() < 0.01,
+            "expected ~0 unfinished work after end"
+        );
+    }
+
+    #[tokio::test]
+    async fn send_rejected_after_close() {
+        let (tx, _queue, _metrics) = new_reconcile_queue(8);
+        tx.close();
+        assert!(tx.send("ns".into(), "gw".into()).await.is_err());
     }
 }

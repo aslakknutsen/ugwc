@@ -10,6 +10,7 @@ use tokio::sync::{mpsc, watch};
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::transport::Server;
 use tonic::{Request, Response, Status, Streaming};
+use metrics::{counter, gauge, histogram};
 use tracing::{info, warn};
 use ugwc_core::IrSnapshot;
 
@@ -65,6 +66,7 @@ impl AggregatedDiscoveryService for AdsService {
             ads.method = "StreamAggregatedResources",
             "xds stream opened"
         );
+        gauge!("ugwc_xds_streams_active").increment(1.0);
 
         let cache = self.cache.clone();
         let wire = self.xds_wire.clone();
@@ -166,6 +168,12 @@ impl AggregatedDiscoveryService for AdsService {
                 }
             }
 
+            gauge!("ugwc_xds_streams_active").decrement(1.0);
+            counter!(
+                "ugwc_xds_stream_disconnects_total",
+                "reason" => "stream_end"
+            )
+            .increment(1);
             info!(
                 ads.method = "StreamAggregatedResources",
                 "xds stream closed"
@@ -215,12 +223,15 @@ async fn send_discovery_response(
     type_url: &str,
     tx: &mpsc::Sender<Result<DiscoveryResponse, Status>>,
 ) -> Result<(), ()> {
+    let push_started = std::time::Instant::now();
     let resp = discovery_response(snap, wire, type_url);
-    if tx.send(Ok(resp)).await.is_err() {
+    let out = if tx.send(Ok(resp)).await.is_err() {
         Err(())
     } else {
         Ok(())
-    }
+    };
+    histogram!("ugwc_xds_push_duration_seconds").record(push_started.elapsed().as_secs_f64());
+    out
 }
 
 async fn send_snapshot_if_revision_changed(

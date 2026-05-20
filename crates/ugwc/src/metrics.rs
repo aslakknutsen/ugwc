@@ -1,50 +1,68 @@
 //! Prometheus metrics (`/metrics` on admin router).
 //!
-//! All `counter!` / `histogram!` / `gauge!` macros for the `ugwc` binary live here
-//! (snake_case names only). Workqueue metrics are recorded from `ugwc-k8s` via the
-//! same global `metrics` recorder after [`install`].
+//! Facade macros bridge into a [`prometheus_client::Registry`] via
+//! [`metrics_prometheus_client::MetricsCollector`]. Process metrics use the legacy
+//! `prometheus` process collector appended at scrape time.
 
-use std::sync::Mutex;
+use std::sync::{Mutex, OnceLock};
 
 use metrics::{counter, gauge, histogram};
-use metrics_exporter_prometheus::{PrometheusBuilder, PrometheusHandle};
-use once_cell::sync::OnceCell;
+use metrics_prometheus_client::MetricsCollector;
 use prometheus::Encoder;
+use prometheus_client::encoding::text::encode;
+use prometheus_client::registry::Registry;
 
-static PROM: OnceCell<PrometheusHandle> = OnceCell::new();
-static PROCESS_REGISTRY: OnceCell<Mutex<prometheus::Registry>> = OnceCell::new();
-
-pub fn install() -> Result<&'static PrometheusHandle, String> {
-    PROM.get_or_try_init(|| {
-        PrometheusBuilder::new()
-            .install_recorder()
-            .map_err(|e| e.to_string())
-    })?;
-    PROCESS_REGISTRY.get_or_init(|| {
-        let registry = prometheus::Registry::new();
-        let collector = prometheus::process_collector::ProcessCollector::for_self();
-        registry
-            .register(Box::new(collector))
-            .expect("register process collector");
-        Mutex::new(registry)
-    });
-    PROM.get()
-        .ok_or_else(|| "metrics install failed".to_string())
+struct MetricsState {
+    registry: Mutex<Registry>,
+    process_registry: Mutex<prometheus::Registry>,
 }
 
-/// Prometheus text exposition for process collector (appended to facade `/metrics`).
-pub fn render_process_metrics() -> Result<String, String> {
-    let registry = PROCESS_REGISTRY
-        .get()
-        .ok_or_else(|| "process registry not installed".to_string())?;
-    let guard = registry.lock().map_err(|e| e.to_string())?;
-    let metric_families = guard.gather();
-    let encoder = prometheus::TextEncoder::new();
-    let mut buf = Vec::new();
-    encoder
-        .encode(&metric_families, &mut buf)
+static STATE: OnceLock<MetricsState> = OnceLock::new();
+
+/// Install the global metrics recorder and process collector.
+pub fn install() -> Result<(), String> {
+    if STATE.get().is_some() {
+        return Ok(());
+    }
+    let mut registry = Registry::default();
+    let collector: MetricsCollector = metrics_prometheus_client::install();
+    registry.register_collector(Box::new(collector));
+    let process_registry = prometheus::Registry::new();
+    let proc_collector = prometheus::process_collector::ProcessCollector::for_self();
+    process_registry
+        .register(Box::new(proc_collector))
         .map_err(|e| e.to_string())?;
-    String::from_utf8(buf).map_err(|e| e.to_string())
+    let _ = STATE.set(MetricsState {
+        registry: Mutex::new(registry),
+        process_registry: Mutex::new(process_registry),
+    });
+    Ok(())
+}
+
+/// Full Prometheus text exposition for `/metrics`.
+pub fn render() -> Result<String, String> {
+    let state = STATE.get().ok_or_else(|| "metrics not installed".to_string())?;
+    let registry = state.registry.lock().map_err(|e| e.to_string())?;
+    let mut body = String::new();
+    encode(&mut body, &registry).map_err(|e| e.to_string())?;
+    let proc_reg = state
+        .process_registry
+        .lock()
+        .map_err(|e| e.to_string())?;
+    let families = proc_reg.gather();
+    let encoder = prometheus::TextEncoder::new();
+    let mut proc_buf = Vec::new();
+    encoder
+        .encode(&families, &mut proc_buf)
+        .map_err(|e| e.to_string())?;
+    let proc_text = String::from_utf8(proc_buf).map_err(|e| e.to_string())?;
+    if !proc_text.is_empty() {
+        if !body.is_empty() && !body.ends_with('\n') {
+            body.push('\n');
+        }
+        body.push_str(&proc_text);
+    }
+    Ok(body)
 }
 
 // --- Reconcile SLO (controller_name, status) ---

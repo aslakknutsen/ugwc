@@ -25,7 +25,17 @@ use crate::metrics;
 use crate::readiness::Readiness;
 
 pub async fn run(cfg: Config) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let prom = metrics::install()?.clone();
+    metrics::install()?;
+    crate::tokio_runtime_metrics::spawn();
+    if let Some(ref ep) = cfg.otlp_endpoint {
+        if !ep.trim().is_empty() {
+            crate::otlp::init(
+                ep,
+                std::time::Duration::from_millis(cfg.otlp_push_interval_ms),
+            )
+            .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { e.into() })?;
+        }
+    }
 
     let fp = FailurePolicy::default();
     let initial_out = ugwc_core::compile(
@@ -51,7 +61,6 @@ pub async fn run(cfg: Config) -> Result<(), Box<dyn std::error::Error + Send + S
     let admin_task = tokio::spawn(crate::admin::serve(
         admin_addr,
         admin_sd,
-        prom,
         readiness_admin,
     ));
 
@@ -79,14 +88,16 @@ pub async fn run(cfg: Config) -> Result<(), Box<dyn std::error::Error + Send + S
     if cfg.kube_enable {
         let fp_k = fp.clone();
         let cache_k = cache.clone();
-        let client = match kube::Client::try_default().await {
+        let client = match ugwc_k8s::try_default_instrumented().await {
             Ok(c) => c,
             Err(e) => {
                 warn!(error = %e, "kube client unavailable — disable UGWC_KUBE_ENABLE or fix kubeconfig");
+                let (noop_tx, _, noop_metrics) = ugwc_k8s::new_reconcile_queue(1);
                 wait_shutdown(
                     shutdown,
                     readiness,
-                    ugwc_k8s::ReconcileQueueMetrics::noop(),
+                    noop_tx,
+                    noop_metrics,
                     None,
                     admin_task,
                     xds_task,
@@ -142,7 +153,10 @@ pub async fn run(cfg: Config) -> Result<(), Box<dyn std::error::Error + Send + S
         let active_crds_reconcile = active_crds.clone();
         let status_cache_k = status_cache.clone();
         let (reconcile_tx, work_queue, queue_metrics) = ugwc_k8s::new_reconcile_queue(256);
-        let on_initial_sync = Readiness::on_cache_synced_callback(readiness.clone());
+        let sync_gate = Arc::new(ugwc_k8s::InitialSyncGate::new(Some(
+            Readiness::on_cache_synced_callback(readiness.clone()),
+        )));
+        let reconcile_tx_shutdown = reconcile_tx.clone();
         let kube_task = tokio::spawn(async move {
             let rfn: ugwc_k8s::ReconcileFn = Arc::new(move |ns: String, name: String| {
                 let fp_k = fp_k.clone();
@@ -191,6 +205,9 @@ pub async fn run(cfg: Config) -> Result<(), Box<dyn std::error::Error + Send + S
 
                     let programmed_ok =
                         !co.report.has_blocking_errors() && !co.snapshot.meta.has_errors;
+                    if let Some(ref snap) = input.cluster {
+                        crate::gateway_state_metrics::record_from_reconcile(snap, programmed_ok);
+                    }
 
                     if let Err(e) = ugwc_k8s::apply_gateway_reconciled_status(
                         &client_inner,
@@ -525,13 +542,14 @@ pub async fn run(cfg: Config) -> Result<(), Box<dyn std::error::Error + Send + S
                 rfn,
                 controller_names.clone(),
                 active_crds,
-                Some(on_initial_sync),
+                Some(sync_gate),
             )
             .await;
         });
         wait_shutdown(
             shutdown,
             readiness,
+            reconcile_tx_shutdown,
             queue_metrics,
             lease_handle,
             admin_task,
@@ -544,10 +562,12 @@ pub async fn run(cfg: Config) -> Result<(), Box<dyn std::error::Error + Send + S
             warn!("UGWC_LEADER_ELECTION requires UGWC_KUBE_ENABLE — running as single leader");
         }
         metrics::set_leader_active(true);
+        let (noop_tx, _, noop_metrics) = ugwc_k8s::new_reconcile_queue(1);
         wait_shutdown(
             shutdown,
             readiness,
-            ugwc_k8s::ReconcileQueueMetrics::noop(),
+            noop_tx,
+            noop_metrics,
             None,
             admin_task,
             xds_task,
@@ -559,9 +579,15 @@ pub async fn run(cfg: Config) -> Result<(), Box<dyn std::error::Error + Send + S
     Ok(())
 }
 
+/// Seconds to wait for in-flight reconciles during graceful shutdown (must be < Helm terminationGracePeriodSeconds).
+pub const SHUTDOWN_DRAIN_SECS: u64 = 30;
+/// Per-task join timeout after cancel (admin, xds, kube).
+pub const SHUTDOWN_JOIN_SECS: u64 = 10;
+
 async fn wait_shutdown(
     shutdown: tokio_util::sync::CancellationToken,
     readiness: Arc<Readiness>,
+    reconcile_tx: ugwc_k8s::ReconcileSender,
     queue_metrics: ugwc_k8s::ReconcileQueueMetrics,
     lease_handle: Option<Arc<LeaseElectionHandle>>,
     admin: tokio::task::JoinHandle<Result<(), std::io::Error>>,
@@ -571,12 +597,8 @@ async fn wait_shutdown(
     wait_for_shutdown_signal().await;
     info!("signal received — draining");
     readiness.set_cache_synced(false);
-    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-    if let Some(handle) = lease_handle {
-        handle.release().await;
-    }
-    shutdown.cancel();
-    let drain_deadline = std::time::Duration::from_secs(30);
+    reconcile_tx.close();
+    let drain_deadline = std::time::Duration::from_secs(SHUTDOWN_DRAIN_SECS);
     let drain_start = Instant::now();
     while queue_metrics.in_flight() > 0 && drain_start.elapsed() < drain_deadline {
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
@@ -587,11 +609,17 @@ async fn wait_shutdown(
             "shutdown drain timeout with reconciles still in flight"
         );
     }
-    let _ = tokio::time::timeout(std::time::Duration::from_secs(10), admin).await;
-    let _ = tokio::time::timeout(std::time::Duration::from_secs(10), xds).await;
-    if let Some(k) = kube {
-        let _ = tokio::time::timeout(std::time::Duration::from_secs(10), k).await;
+    if let Some(handle) = lease_handle {
+        handle.release().await;
     }
+    shutdown.cancel();
+    let join = std::time::Duration::from_secs(SHUTDOWN_JOIN_SECS);
+    let _ = tokio::time::timeout(join, admin).await;
+    let _ = tokio::time::timeout(join, xds).await;
+    if let Some(k) = kube {
+        let _ = tokio::time::timeout(join, k).await;
+    }
+    crate::otlp::flush();
 }
 
 async fn wait_for_shutdown_signal() {

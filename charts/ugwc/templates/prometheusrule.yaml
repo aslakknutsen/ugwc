@@ -1,0 +1,43 @@
+{{- $sm := .Values.observability.serviceMonitor }}
+{{- if and $sm.enabled .Values.observability.prometheusRule.enabled }}
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: {{ include "ugwc.fullname" . }}
+  labels:
+    {{- include "ugwc.labels" . | nindent 4 }}
+    {{- with .Values.observability.prometheusRule.labels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+spec:
+  groups:
+    - name: ugwc.rules
+      rules:
+        - alert: UgwcReconcileErrorRateHigh
+          expr: |
+            sum(rate(ugwc_reconcile_runs_total{status="error"}[5m]))
+              / sum(rate(ugwc_reconcile_runs_total[5m])) > 0.05
+          for: 10m
+          labels:
+            severity: warning
+          annotations:
+            summary: ugwc reconcile error rate elevated
+        - alert: UgwcReconcileLatencyHigh
+          expr: |
+            histogram_quantile(
+              0.99,
+              sum(rate(ugwc_reconcile_duration_seconds_bucket[5m])) by (le, controller_name)
+            ) > 5
+          for: 15m
+          labels:
+            severity: warning
+          annotations:
+            summary: ugwc reconcile P99 latency above 5s
+        - alert: UgwcWorkqueueBacklog
+          expr: ugwc_workqueue_depth{queue_name="gateway_reconcile"} > 50
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: ugwc gateway reconcile queue backlog
+{{- end }}
