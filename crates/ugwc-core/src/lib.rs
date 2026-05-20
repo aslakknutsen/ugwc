@@ -13,6 +13,7 @@ pub mod listener_merge;
 pub mod listener_route_kinds;
 pub mod policy;
 pub mod publish;
+pub mod redact;
 pub mod snapshot;
 
 pub use compile::{

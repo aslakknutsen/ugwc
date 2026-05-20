@@ -5,7 +5,7 @@
 pub fn spawn() {
     let handle = tokio::runtime::Handle::current();
     let runtime_monitor = tokio_metrics::RuntimeMonitor::new(&handle);
-    tokio::spawn(async move {
+    ugwc_k8s::spawn_with_trace_context(async move {
         for interval in runtime_monitor.intervals() {
             let m = interval.metrics();
             metrics::gauge!("ugwc_tokio_workers_count").set(m.workers_count as f64);

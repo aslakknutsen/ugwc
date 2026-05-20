@@ -1,20 +1,18 @@
 //! Prometheus metrics (`/metrics` on admin router).
 //!
 //! Facade macros bridge into a [`prometheus_client::Registry`] via
-//! [`metrics_prometheus_client::MetricsCollector`]. Process metrics use the legacy
-//! `prometheus` process collector appended at scrape time.
+//! [`metrics_prometheus_client::MetricsCollector`]. Process metrics use the
+//! `metrics-process` crate which registers through the `metrics` facade.
 
 use std::sync::{Mutex, OnceLock};
 
 use metrics::{counter, gauge, histogram};
 use metrics_prometheus_client::MetricsCollector;
-use prometheus::Encoder;
 use prometheus_client::encoding::text::encode;
 use prometheus_client::registry::Registry;
 
 struct MetricsState {
     registry: Mutex<Registry>,
-    process_registry: Mutex<prometheus::Registry>,
 }
 
 static STATE: OnceLock<MetricsState> = OnceLock::new();
@@ -27,41 +25,20 @@ pub fn install() -> Result<(), String> {
     let mut registry = Registry::default();
     let collector: MetricsCollector = metrics_prometheus_client::install();
     registry.register_collector(Box::new(collector));
-    let process_registry = prometheus::Registry::new();
-    let proc_collector = prometheus::process_collector::ProcessCollector::for_self();
-    process_registry
-        .register(Box::new(proc_collector))
-        .map_err(|e| e.to_string())?;
     let _ = STATE.set(MetricsState {
         registry: Mutex::new(registry),
-        process_registry: Mutex::new(process_registry),
     });
+    metrics_process::Collector::default().describe();
     Ok(())
 }
 
 /// Full Prometheus text exposition for `/metrics`.
 pub fn render() -> Result<String, String> {
     let state = STATE.get().ok_or_else(|| "metrics not installed".to_string())?;
+    metrics_process::Collector::default().collect();
     let registry = state.registry.lock().map_err(|e| e.to_string())?;
     let mut body = String::new();
     encode(&mut body, &registry).map_err(|e| e.to_string())?;
-    let proc_reg = state
-        .process_registry
-        .lock()
-        .map_err(|e| e.to_string())?;
-    let families = proc_reg.gather();
-    let encoder = prometheus::TextEncoder::new();
-    let mut proc_buf = Vec::new();
-    encoder
-        .encode(&families, &mut proc_buf)
-        .map_err(|e| e.to_string())?;
-    let proc_text = String::from_utf8(proc_buf).map_err(|e| e.to_string())?;
-    if !proc_text.is_empty() {
-        if !body.is_empty() && !body.ends_with('\n') {
-            body.push('\n');
-        }
-        body.push_str(&proc_text);
-    }
     Ok(body)
 }
 
@@ -77,8 +54,8 @@ pub fn record_reconcile_run(controller_name: &str, success: bool) {
     .increment(1);
 }
 
-/// Reconcile latency histogram. With `otlp-traces`, correlate to traces via JSON log
-/// `trace_id` on the `reconcile_gateway` span (Prometheus exemplars need a native histogram).
+/// Reconcile latency histogram. Exemplars linking to the active trace_id require
+/// native histogram support (not yet available via the `metrics` facade bridge).
 pub fn observe_reconcile_duration_seconds(controller_name: &str, seconds: f64) {
     histogram!(
         "ugwc_reconcile_duration_seconds",

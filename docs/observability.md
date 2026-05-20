@@ -63,10 +63,29 @@ Build with `--features tokio-metrics` and `RUSTFLAGS='--cfg tokio_unstable'` for
 
 Build with `--features otlp-metrics`. Set `UGWC_OTLP_ENDPOINT` and optional `UGWC_OTLP_PUSH_INTERVAL_MS`. Pull scrape remains the default for long-lived Deployments.
 
-## Deferred / N/A
+## OTLP traces (optional)
 
-- `etcd_request_duration_seconds` — not visible from the controller process
-- Target Allocator / hybrid scrape — not bundled in-chart
+Build with `--features otlp-traces`. When enabled:
+- All tracing spans are exported via OTLP gRPC to `UGWC_OTLP_ENDPOINT`.
+- The `PUT /log-level` admin endpoint remains functional (filter reload works with the OTLP layer stack).
+- Spawned tasks propagate the parent span, so trace IDs survive across `tokio::spawn` boundaries.
+- Outbound Kubernetes API requests include a W3C `traceparent` header for cross-service correlation.
+
+## Grafana dashboard
+
+A ready-to-import dashboard is at `charts/ugwc/dashboards/ugwc-overview.json`. Panels: reconcile rate/error rate, P50/P95/P99 latency, workqueue depth, REST client latency by resource, Gateway API state, leader status.
+
+## Recording rules
+
+The Helm `PrometheusRule` includes recording rules for SLO burn-rate queries:
+- `ugwc:reconcile_error_rate:5m`
+- `ugwc:reconcile_p99_seconds:5m`
+
+## Known limitations
+
+- **Exemplars on reconcile histograms:** The `metrics` crate facade does not support Prometheus exemplars. Linking `ugwc_reconcile_duration_seconds` histogram samples to their active `trace_id` requires switching to native `prometheus-client` histograms directly, bypassing the facade. Until then, use JSON log `trace_id` fields and the `reconcile_gateway` span for trace correlation.
+- `etcd_request_duration_seconds` — not visible from the controller process.
+- Target Allocator / hybrid scrape — not bundled in-chart.
 
 ## Example alerts
 

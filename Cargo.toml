@@ -63,9 +63,9 @@ metrics = "0.24"
 metrics-exporter-prometheus = { version = "0.16", default-features = false, features = [
     "http-listener",
 ] }
-prometheus = { version = "0.13", default-features = false, features = ["process"] }
 prometheus-client = "0.22"
 metrics-prometheus-client = "0.0.1"
+metrics-process = "2.4"
 hyper-util = { version = "0.1", features = ["client", "client-legacy", "tokio"] }
 tokio-metrics = "0.4"
 opentelemetry = "0.27"

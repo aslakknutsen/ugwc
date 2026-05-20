@@ -68,7 +68,10 @@ let api: Api<Gateway> = Api::namespaced(ctx.client.clone(), &ns);
                         ..Default::default()
                     };
                     let t_compile = Instant::now();
-                    let co = ugwc_core::compile(&ctx.fp, &input).map_err(|e| e.to_string())?;
+                    let co = {
+                        let _span = tracing::info_span!("compile").entered();
+                        ugwc_core::compile(&ctx.fp, &input).map_err(|e| e.to_string())?
+                    };
                     metrics::observe_compile_seconds(t_compile.elapsed().as_secs_f64());
                     metrics::record_ungranted_references(&co.report);
 
@@ -333,14 +336,17 @@ let api: Api<Gateway> = Api::namespaced(ctx.client.clone(), &ns);
                     let prev = ctx.cache.previous_for_scope(&co.snapshot.scope);
                     let plan = plan_publish(prev.as_deref(), &co.snapshot, &ctx.fp);
 
-                    match plan.action {
-                        PublishAction::Skip => metrics::record_publish_skipped(),
-                        PublishAction::FullReplace => {
-                            ctx.cache.store_scoped(co.snapshot.clone());
-                            metrics::record_publish_applied();
+                    {
+                        let _span = tracing::info_span!("publish", action = ?plan.action).entered();
+                        match plan.action {
+                            PublishAction::Skip => metrics::record_publish_skipped(),
+                            PublishAction::FullReplace => {
+                                ctx.cache.store_scoped(co.snapshot.clone());
+                                metrics::record_publish_applied();
+                            }
+                            PublishAction::Delta => {}
+                            _ => {}
                         }
-                        PublishAction::Delta => {}
-                        _ => {}
                     }
 
                     let controller_name = input

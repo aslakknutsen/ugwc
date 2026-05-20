@@ -35,6 +35,14 @@ jobs:
           UGWC_GIT_COMMIT: ${{ github.sha }}
         run: cargo test --workspace
 
+      - name: Clippy (OTLP features)
+        run: cargo clippy --workspace --all-targets --features ugwc/otlp -- -D warnings
+
+      - name: Test (OTLP features)
+        env:
+          UGWC_GIT_COMMIT: ${{ github.sha }}
+        run: cargo test --workspace --features ugwc/otlp
+
       - name: Build release binary
         env:
           UGWC_GIT_COMMIT: ${{ github.sha }}

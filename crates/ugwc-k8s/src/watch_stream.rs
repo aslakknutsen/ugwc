@@ -12,9 +12,10 @@ use tokio_util::sync::CancellationToken;
 use tracing::warn;
 
 /// Default watcher config for Gateway API controllers.
+/// Uses streaming lists (K8s >= 1.27) for efficient initial sync without full LIST.
 #[must_use]
 pub fn watcher_config() -> WatcherConfig {
-    WatcherConfig::default().any_semantic()
+    WatcherConfig::default().streaming_lists()
 }
 
 /// Clear `managedFields` before objects are handled or cached.

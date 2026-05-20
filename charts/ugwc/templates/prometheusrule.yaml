@@ -41,4 +41,14 @@ spec:
             severity: warning
           annotations:
             summary: ugwc gateway reconcile queue backlog
+    - name: ugwc.recording
+      rules:
+        - record: ugwc:reconcile_error_rate:5m
+          expr: >-
+            sum(rate(ugwc_reconcile_runs_total{status="error"}[5m]))
+            / sum(rate(ugwc_reconcile_runs_total[5m]))
+        - record: ugwc:reconcile_p99_seconds:5m
+          expr: >-
+            histogram_quantile(0.99,
+              sum(rate(ugwc_reconcile_duration_seconds_bucket[5m])) by (le))
 {{- end }}

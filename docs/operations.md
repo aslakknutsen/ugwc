@@ -38,4 +38,4 @@ Returns `204` on success, `400` on invalid directive.
 
 - Reconcile logs: span `reconcile_gateway` with `k8s.resource.namespace`, `k8s.resource.name`, `k8s.resource.generation`.
 - Metrics: `ugwc_reconcile_duration_seconds`, `ugwc_reconcile_runs_total` labeled by `controller_name`.
-- When OTLP traces are enabled, JSON logs include trace/span IDs; reconcile histograms may carry exemplars linking to the active trace.
+- When OTLP traces are enabled (`--features otlp-traces`), JSON logs include trace/span IDs. Spawned tasks inherit the parent span, and outbound kube API requests carry a W3C `traceparent` header for end-to-end distributed tracing. Exemplars on reconcile histograms are a known limitation (see [observability.md](observability.md#known-limitations)).

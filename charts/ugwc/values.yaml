@@ -48,7 +48,7 @@ observability:
     scrapeTimeout: 10s
     labels: {}
   prometheusRule:
-    enabled: false
+    enabled: true
     labels: {}
 
 # Deprecated: use observability.serviceMonitor (kept for backward-compatible Helm upgrades).

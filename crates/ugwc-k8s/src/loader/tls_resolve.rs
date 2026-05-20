@@ -1,5 +1,6 @@
 use k8s_openapi::api::core::v1::Secret;
 use kube::{Api, Client};
+use tracing::warn;
 
 use ugwc_core::snapshot::{EffectiveListenerSnap, ListenerParentSnap, ReferenceGrantSnap};
 
@@ -125,7 +126,8 @@ pub(super) async fn resolve_gateway_listener_tls(
                     e.tls_resolve_error = Some(format!("InvalidCertificateRef: {msg}"));
                 }
             },
-            Err(_) => {
+            Err(err) => {
+                warn!(error = %err, secret_ns = %secret_ns, secret_name = %r.name, "tls certificate secret fetch failed");
                 e.tls_resolve_error = Some("InvalidCertificateRef: Secret not found".into());
             }
         }

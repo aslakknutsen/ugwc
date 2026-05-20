@@ -46,6 +46,7 @@ pub fn init(json: bool, #[allow(unused_variables)] otlp_endpoint: Option<&str>) 
         let tracer = provider.tracer("ugwc");
         let otel_layer = tracing_opentelemetry::layer().with_tracer(tracer);
         let filter = default_filter();
+        let (env_filter_layer, reload_handle) = reload::Layer::new(filter);
         let fmt_layer = if json {
             tracing_subscriber::fmt::layer()
                 .json()
@@ -62,13 +63,11 @@ pub fn init(json: bool, #[allow(unused_variables)] otlp_endpoint: Option<&str>) 
             tracing_subscriber::fmt::layer().compact().boxed()
         };
         tracing_subscriber::registry()
+            .with(env_filter_layer)
             .with(otel_layer)
-            .with(fmt_layer.with_filter(filter))
+            .with(fmt_layer)
             .init();
-        // Reload is unavailable with the OTLP layer stack; admin PUT /log-level is a no-op.
-        let (reload_layer, handle) = reload::Layer::new(EnvFilter::new(DEFAULT_FILTER));
-        let _ = reload_layer;
-        return handle;
+        return reload_handle;
     }
 
     let filter = default_filter();
@@ -107,29 +106,5 @@ pub fn set_log_filter(handle: &LogFilterHandle, directive: &str) -> Result<(), S
         .map_err(|e| e.to_string())
 }
 
-/// Skip logging raw bearer tokens or PEM-looking bodies in field values.
-#[must_use]
-pub fn redact_field(input: &str) -> String {
-    if input.contains("-----BEGIN") {
-        return "<redacted-pem>".into();
-    }
-    if input.len() > 20
-        && input
-            .chars()
-            .all(|c| c.is_alphanumeric() || c == '-' || c == '_')
-    {
-        return format!("<redacted:{}>", input.len());
-    }
-    input.to_string()
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn pem_redacted() {
-        let s = redact_field("-----BEGIN RSA PRIVATE KEY-----\nMIIF");
-        assert_eq!(s, "<redacted-pem>");
-    }
-}
+#[allow(unused_imports)]
+pub use ugwc_core::redact::redact_field;

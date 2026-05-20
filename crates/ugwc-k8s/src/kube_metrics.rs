@@ -62,7 +62,9 @@ where
         Poll::Ready(Ok(()))
     }
 
-    fn call(&mut self, req: Request<ReqBody>) -> Self::Future {
+    fn call(&mut self, mut req: Request<ReqBody>) -> Self::Future {
+        #[cfg(feature = "otel-context")]
+        inject_traceparent(&mut req);
         let verb = req.method().as_str().to_string();
         let resource = k8s_resource_from_path(req.uri().path()).to_string();
         let started = Instant::now();
@@ -83,6 +85,24 @@ where
             .record(started.elapsed().as_secs_f64());
             result
         })
+    }
+}
+
+#[cfg(feature = "otel-context")]
+fn inject_traceparent<B>(req: &mut Request<B>) {
+    use opentelemetry::trace::TraceContextExt;
+    let cx = opentelemetry::Context::current();
+    let sc = cx.span().span_context().clone();
+    if sc.is_valid() {
+        let val = format!(
+            "00-{}-{}-{:02x}",
+            sc.trace_id(),
+            sc.span_id(),
+            sc.trace_flags().to_u8(),
+        );
+        if let Ok(v) = http::HeaderValue::from_str(&val) {
+            req.headers_mut().insert("traceparent", v);
+        }
     }
 }
 

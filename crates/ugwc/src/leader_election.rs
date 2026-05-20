@@ -111,7 +111,7 @@ pub fn spawn_lease_election(
         shutdown,
     });
     let task = handle.clone();
-    tokio::spawn(async move {
+    ugwc_k8s::spawn_with_trace_context(async move {
         task.run().await;
     });
     (state, handle)

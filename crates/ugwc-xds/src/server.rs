@@ -11,7 +11,7 @@ use tokio_stream::wrappers::ReceiverStream;
 use tonic::transport::Server;
 use tonic::{Request, Response, Status, Streaming};
 use metrics::{counter, gauge, histogram};
-use tracing::{info, warn};
+use tracing::{info, warn, Instrument};
 use ugwc_core::IrSnapshot;
 
 use crate::cache::XdsSnapshotSource;
@@ -178,7 +178,7 @@ impl AggregatedDiscoveryService for AdsService {
                 ads.method = "StreamAggregatedResources",
                 "xds stream closed"
             );
-        });
+        }.instrument(tracing::Span::current()));
 
         let out = ReceiverStream::new(rx);
         Ok(Response::new(

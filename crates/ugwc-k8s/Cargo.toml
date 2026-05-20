@@ -25,5 +25,10 @@ http.workspace = true
 chrono = { version = "0.4", default-features = false, features = ["clock", "std", "serde"] }
 metrics.workspace = true
 tower.workspace = true
+opentelemetry = { workspace = true, optional = true }
+
+[features]
+default = []
+otel-context = ["dep:opentelemetry"]
 
 [dev-dependencies]
