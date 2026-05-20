@@ -1,7 +1,4 @@
 {
-  "__inputs": [
-    { "name": "DS_PROMETHEUS", "label": "Prometheus", "type": "datasource", "pluginId": "prometheus" }
-  ],
   "title": "ugwc Controller Overview",
   "uid": "ugwc-overview",
   "schemaVersion": 39,
@@ -15,7 +12,7 @@
       {
         "name": "namespace",
         "type": "query",
-        "datasource": "${DS_PROMETHEUS}",
+        "datasource": { "type": "prometheus", "uid": "prometheus" },
         "query": "label_values(ugwc_reconcile_runs_total, namespace)",
         "refresh": 2,
         "includeAll": true,
@@ -32,7 +29,7 @@
         {
           "expr": "sum(rate(ugwc_reconcile_runs_total[5m])) by (status)",
           "legendFormat": "{{ status }}",
-          "datasource": "${DS_PROMETHEUS}"
+          "datasource": { "type": "prometheus", "uid": "prometheus" }
         }
       ],
       "fieldConfig": {
@@ -50,7 +47,7 @@
         {
           "expr": "sum(rate(ugwc_reconcile_runs_total{status=\"error\"}[5m])) / sum(rate(ugwc_reconcile_runs_total[5m]))",
           "legendFormat": "error ratio",
-          "datasource": "${DS_PROMETHEUS}"
+          "datasource": { "type": "prometheus", "uid": "prometheus" }
         }
       ],
       "fieldConfig": {
@@ -76,17 +73,17 @@
         {
           "expr": "histogram_quantile(0.50, sum(rate(ugwc_reconcile_duration_seconds_bucket[5m])) by (le))",
           "legendFormat": "p50",
-          "datasource": "${DS_PROMETHEUS}"
+          "datasource": { "type": "prometheus", "uid": "prometheus" }
         },
         {
           "expr": "histogram_quantile(0.95, sum(rate(ugwc_reconcile_duration_seconds_bucket[5m])) by (le))",
           "legendFormat": "p95",
-          "datasource": "${DS_PROMETHEUS}"
+          "datasource": { "type": "prometheus", "uid": "prometheus" }
         },
         {
           "expr": "histogram_quantile(0.99, sum(rate(ugwc_reconcile_duration_seconds_bucket[5m])) by (le))",
           "legendFormat": "p99",
-          "datasource": "${DS_PROMETHEUS}"
+          "datasource": { "type": "prometheus", "uid": "prometheus" }
         }
       ],
       "fieldConfig": {
@@ -104,12 +101,12 @@
         {
           "expr": "ugwc_workqueue_depth",
           "legendFormat": "depth",
-          "datasource": "${DS_PROMETHEUS}"
+          "datasource": { "type": "prometheus", "uid": "prometheus" }
         },
         {
           "expr": "histogram_quantile(0.99, sum(rate(ugwc_workqueue_queue_duration_seconds_bucket[5m])) by (le))",
           "legendFormat": "wait p99",
-          "datasource": "${DS_PROMETHEUS}"
+          "datasource": { "type": "prometheus", "uid": "prometheus" }
         }
       ],
       "fieldConfig": {
@@ -132,7 +129,7 @@
         {
           "expr": "histogram_quantile(0.99, sum(rate(ugwc_rest_client_request_duration_seconds_bucket[5m])) by (le, resource))",
           "legendFormat": "{{ resource }} p99",
-          "datasource": "${DS_PROMETHEUS}"
+          "datasource": { "type": "prometheus", "uid": "prometheus" }
         }
       ],
       "fieldConfig": {
@@ -148,14 +145,14 @@
       "gridPos": { "h": 8, "w": 6, "x": 12, "y": 16 },
       "targets": [
         {
-          "expr": "sum(ugwc_gatewayapi_gateway_status{status=\"programmed\"})",
+          "expr": "sum(gatewayapi_gateway_status{status=\"Programmed\", source=\"ugwc\"})",
           "legendFormat": "Programmed",
-          "datasource": "${DS_PROMETHEUS}"
+          "datasource": { "type": "prometheus", "uid": "prometheus" }
         },
         {
-          "expr": "sum(ugwc_gatewayapi_gateway_status{status=\"not_programmed\"})",
+          "expr": "sum(gatewayapi_gateway_status{status=\"NotProgrammed\", source=\"ugwc\"})",
           "legendFormat": "Not Programmed",
-          "datasource": "${DS_PROMETHEUS}"
+          "datasource": { "type": "prometheus", "uid": "prometheus" }
         }
       ],
       "fieldConfig": {
@@ -177,7 +174,7 @@
         {
           "expr": "ugwc_leader_active",
           "legendFormat": "leader",
-          "datasource": "${DS_PROMETHEUS}"
+          "datasource": { "type": "prometheus", "uid": "prometheus" }
         }
       ],
       "fieldConfig": {

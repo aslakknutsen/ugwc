@@ -30,6 +30,13 @@ grafana:
   enabled: true
   defaultDashboardsEnabled: false
   sidecar:
+    datasources:
+      enabled: true
+      defaultDatasourceEnabled: true
+      name: Prometheus
+      uid: prometheus
+      alertmanager:
+        enabled: false
     dashboards:
       enabled: true
       label: grafana_dashboard
