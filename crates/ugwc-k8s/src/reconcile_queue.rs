@@ -89,6 +89,14 @@ pub struct ReconcileQueueMetrics {
 }
 
 impl ReconcileQueueMetrics {
+    /// No-op metrics for non-Kubernetes runs.
+    #[must_use]
+    pub fn noop() -> Self {
+        Self {
+            stats: Arc::new(QueueStats::new()),
+        }
+    }
+
     #[must_use]
     pub fn in_flight(&self) -> usize {
         self.stats.in_flight.load(Ordering::Relaxed)

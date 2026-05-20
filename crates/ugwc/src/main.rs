@@ -8,6 +8,7 @@ mod implementation_profiles;
 mod leader;
 mod logging;
 mod metrics;
+mod readiness;
 mod run;
 mod xds_dump;
 

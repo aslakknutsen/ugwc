@@ -31,7 +31,7 @@ pub type ReconcileFn = Arc<dyn Fn(String, String) -> ReconcileFuture + Send + Sy
 
 /// Observe gateways (CRD-gated via [`run_crd_supervisor`]), routes, grants, backend TLS policies,
 /// CA ConfigMaps, endpoints, secrets, classes, and inference pools.
-#[instrument(skip(client, shutdown, reconcile, work_queue, reconcile_tx))]
+#[instrument(skip(client, shutdown, reconcile, work_queue, reconcile_tx, on_initial_sync))]
 pub async fn run_gateway_controller(
     client: Client,
     shutdown: tokio_util::sync::CancellationToken,
@@ -41,6 +41,7 @@ pub async fn run_gateway_controller(
     reconcile: ReconcileFn,
     owned_controller_names: Vec<String>,
     active_crds: ActiveCrds,
+    on_initial_sync: Option<Arc<dyn Fn() + Send + Sync>>,
 ) {
     let tx = reconcile_tx;
 
@@ -50,7 +51,7 @@ pub async fn run_gateway_controller(
     let owned_sup = owned_controller_names.clone();
     let active_sup = active_crds.clone();
     tokio::spawn(async move {
-        run_crd_supervisor(c_sup, sd_sup, tx_sup, owned_sup, active_sup).await;
+        run_crd_supervisor(c_sup, sd_sup, tx_sup, owned_sup, active_sup, on_initial_sync).await;
     });
 
     let sd_ep = shutdown.clone();

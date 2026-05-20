@@ -218,13 +218,16 @@ pub(crate) async fn run_crd_supervisor(
     tx: crate::reconcile_queue::ReconcileSender,
     owned_controller_names: Vec<String>,
     active: ActiveCrds,
+    on_initial_sync: Option<Arc<dyn Fn() + Send + Sync>>,
 ) {
     let api: Api<CustomResourceDefinition> = Api::all(client.clone());
     let mut running: HashMap<ManagedCrd, CancellationToken> = HashMap::new();
     let mut last_warned_rv: HashMap<ManagedCrd, String> = HashMap::new();
 
+    let mut initial_list_ok = false;
     match api.list(&ListParams::default()).await {
         Ok(list) => {
+            initial_list_ok = true;
             for crd in list.items {
                 apply_crd(
                     &crd,
@@ -243,6 +246,11 @@ pub(crate) async fn run_crd_supervisor(
             error = %e,
             "crd supervisor initial list failed; waiting for CRD watch. Gated watchers will not start until list/watch succeeds"
         ),
+    }
+    if initial_list_ok {
+        if let Some(cb) = &on_initial_sync {
+            cb();
+        }
     }
 
     let cfg = WatcherConfig::default().any_semantic();

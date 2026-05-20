@@ -54,6 +54,10 @@ pub fn set_leader_active(active: bool) {
     gauge!("ugwc_leader_active").set(if active { 1.0 } else { 0.0 });
 }
 
+pub fn set_cache_synced(synced: bool) {
+    gauge!("ugwc_cache_synced").set(if synced { 1.0 } else { 0.0 });
+}
+
 pub fn observe_compile_seconds(seconds: f64) {
     histogram!("ugwc_compile_duration_seconds").record(seconds);
 }

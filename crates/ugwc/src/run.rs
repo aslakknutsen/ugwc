@@ -21,6 +21,7 @@ use crate::config::Config;
 use crate::implementation_profiles::{self, DataPlaneKind};
 use crate::leader::LeaderState;
 use crate::metrics;
+use crate::readiness::Readiness;
 
 pub async fn run(cfg: Config) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let prom = metrics::install()?.clone();
@@ -48,8 +49,19 @@ pub async fn run(cfg: Config) -> Result<(), Box<dyn std::error::Error + Send + S
     let admin_sd = shutdown.child_token();
     let xds_sd = shutdown.child_token();
 
+    let readiness = Arc::new(Readiness::new());
+    if !cfg.kube_enable {
+        readiness.set_cache_synced(true);
+    }
+
     let admin_addr: SocketAddr = cfg.admin_listen_addr.parse()?;
-    let admin_task = tokio::spawn(crate::admin::serve(admin_addr, admin_sd, prom));
+    let readiness_admin = readiness.clone();
+    let admin_task = tokio::spawn(crate::admin::serve(
+        admin_addr,
+        admin_sd,
+        prom,
+        readiness_admin,
+    ));
 
     let xds_addr: SocketAddr = cfg.xds_listen_addr.parse()?;
     let xds_cfg = XdsServerConfig {
@@ -79,7 +91,15 @@ pub async fn run(cfg: Config) -> Result<(), Box<dyn std::error::Error + Send + S
             Ok(c) => c,
             Err(e) => {
                 warn!(error = %e, "kube client unavailable — disable UGWC_KUBE_ENABLE or fix kubeconfig");
-                wait_shutdown(shutdown, admin_task, xds_task, None).await;
+                wait_shutdown(
+                    shutdown,
+                    readiness,
+                    ugwc_k8s::ReconcileQueueMetrics::noop(),
+                    admin_task,
+                    xds_task,
+                    None,
+                )
+                .await;
                 return Ok(());
             }
         };
@@ -109,7 +129,8 @@ pub async fn run(cfg: Config) -> Result<(), Box<dyn std::error::Error + Send + S
         ));
         let active_crds_reconcile = active_crds.clone();
         let status_cache_k = status_cache.clone();
-        let (reconcile_tx, work_queue, _queue_metrics) = ugwc_k8s::new_reconcile_queue(256);
+        let (reconcile_tx, work_queue, queue_metrics) = ugwc_k8s::new_reconcile_queue(256);
+        let on_initial_sync = Readiness::on_cache_synced_callback(readiness.clone());
         let kube_task = tokio::spawn(async move {
             let rfn: ugwc_k8s::ReconcileFn = Arc::new(move |ns: String, name: String| {
                 let fp_k = fp_k.clone();
@@ -491,12 +512,29 @@ pub async fn run(cfg: Config) -> Result<(), Box<dyn std::error::Error + Send + S
                 rfn,
                 controller_names.clone(),
                 active_crds,
+                Some(on_initial_sync),
             )
             .await;
         });
-        wait_shutdown(shutdown, admin_task, xds_task, Some(kube_task)).await;
+        wait_shutdown(
+            shutdown,
+            readiness,
+            queue_metrics,
+            admin_task,
+            xds_task,
+            Some(kube_task),
+        )
+        .await;
     } else {
-        wait_shutdown(shutdown, admin_task, xds_task, None).await;
+        wait_shutdown(
+            shutdown,
+            readiness,
+            ugwc_k8s::ReconcileQueueMetrics::noop(),
+            admin_task,
+            xds_task,
+            None,
+        )
+        .await;
     }
 
     Ok(())
@@ -504,18 +542,50 @@ pub async fn run(cfg: Config) -> Result<(), Box<dyn std::error::Error + Send + S
 
 async fn wait_shutdown(
     shutdown: tokio_util::sync::CancellationToken,
+    readiness: Arc<Readiness>,
+    queue_metrics: ugwc_k8s::ReconcileQueueMetrics,
     admin: tokio::task::JoinHandle<Result<(), std::io::Error>>,
     xds: tokio::task::JoinHandle<()>,
     kube: Option<tokio::task::JoinHandle<()>>,
 ) {
-    tokio::signal::ctrl_c()
-        .await
-        .expect("install ctrl-c handler");
+    wait_for_shutdown_signal().await;
     info!("signal received — draining");
+    readiness.set_cache_synced(false);
+    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
     shutdown.cancel();
+    let drain_deadline = std::time::Duration::from_secs(30);
+    let drain_start = Instant::now();
+    while queue_metrics.in_flight() > 0 && drain_start.elapsed() < drain_deadline {
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    if queue_metrics.in_flight() > 0 {
+        warn!(
+            in_flight = queue_metrics.in_flight(),
+            "shutdown drain timeout with reconciles still in flight"
+        );
+    }
     let _ = tokio::time::timeout(std::time::Duration::from_secs(10), admin).await;
     let _ = tokio::time::timeout(std::time::Duration::from_secs(10), xds).await;
     if let Some(k) = kube {
         let _ = tokio::time::timeout(std::time::Duration::from_secs(10), k).await;
+    }
+}
+
+async fn wait_for_shutdown_signal() {
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{signal, SignalKind};
+        let mut term =
+            signal(SignalKind::terminate()).expect("install SIGTERM handler");
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => {}
+            _ = term.recv() => {}
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        tokio::signal::ctrl_c()
+            .await
+            .expect("install ctrl-c handler");
     }
 }
