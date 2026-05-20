@@ -99,8 +99,28 @@ Scripts under [`hack/`](../hack/) provision a **kind** cluster with **MetalLB**,
 
 **Dataplane:** the chart defaults `ugwc.dataplaneEnable: true`, so conformance that exercises provisioned proxies may pull the built-in Praxis image (`quay.io/aslakknutsen/praxis:latest` per code). Clusters need registry access, or override the image / disable dataplane via Helm for your environment.
 
+## Observability
+
+See [observability.md](observability.md) for the metric catalog, scrape configuration (`UGWC_ADMIN_LISTEN_ADDR`, Helm `serviceMonitor`), readiness/shutdown behavior, and example alerts:
+
+```promql
+# Reconcile error ratio
+sum(rate(ugwc_reconcile_runs_total{status="error"}[5m]))
+  / sum(rate(ugwc_reconcile_runs_total[5m]))
+
+# P99 reconcile latency (target often < 5s)
+histogram_quantile(
+  0.99,
+  sum(rate(ugwc_reconcile_duration_seconds_bucket[5m])) by (le, controller_name)
+)
+
+# Workqueue backlog
+ugwc_workqueue_depth{queue_name="gateway_reconcile"}
+```
+
 ## See also
 
+- [observability.md](observability.md) — Metrics, scraping, gateway-api-state-metrics, alerts.
 - [architecture.md](architecture.md) — Watch graph, reconcile flow, BackendTLS limitations.
 - [design.md](design.md) — IR and publish model.
 - [example-gateway-standard-plus-tls.md](example-gateway-standard-plus-tls.md) — Apply order, env vars, `ugwc xds-dump` debugging.

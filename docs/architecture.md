@@ -248,14 +248,14 @@ flowchart LR
 
 At a high level:
 
-1. **Startup** — Load config, initialize logging/metrics, optionally elect or assume leader (stub paths exist).
+1. **Startup** — Load config, initialize logging/metrics, optionally elect leader via Kubernetes `Lease` (or assume leader when election is off). `/readyz` stays **503** until the CRD supervisor completes its initial list and starts watchers (`ugwc_cache_synced=1`).
 2. **IR cache** — `MultiScopeSnapshot`: a global snapshot plus per-gateway keys; xDS selects by `node.id`.
 3. **Compile loop** — Core `compile` consumes `CompileInput` (from fixtures, tests, or cluster-derived snapshots) and produces `CompileOutcome` + snapshot.
 4. **Publish planning** — `plan_publish` compares previous and next snapshots with `FailurePolicy` to decide actions (full replace, skip, etc.).
 5. **Kubernetes path** (when enabled) — Controller reconciles Gateway (and related) objects, feeds the compiler, updates shared cache and status.
 6. **xDS path** — Server streams encoded resources from the cache to connected proxies.
 
-Admin and Prometheus endpoints run alongside these services for health and observability.
+Admin and Prometheus endpoints run alongside these services for health and observability. On shutdown (SIGTERM/Ctrl-C), readiness clears first, in-flight reconciles drain (up to ~30s), then watches and servers stop. See [observability.md](observability.md).
 
 ## Layering rules
 
@@ -265,4 +265,4 @@ Admin and Prometheus endpoints run alongside these services for health and obser
 
 ## Related material
 
-Design rationale and phased delivery: [design.md](design.md), [operations.md](operations.md), and [`../design/`](../design/) for longer-form notes.
+Design rationale and phased delivery: [design.md](design.md), [operations.md](operations.md), [observability.md](observability.md), and [`../design/`](../design/) for longer-form notes.
