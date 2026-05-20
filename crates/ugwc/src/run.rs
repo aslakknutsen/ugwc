@@ -171,6 +171,7 @@ pub async fn run(cfg: Config) -> Result<(), Box<dyn std::error::Error + Send + S
                     let t_compile = Instant::now();
                     let co = ugwc_core::compile(&fp_k, &input).map_err(|e| e.to_string())?;
                     metrics::observe_compile_seconds(t_compile.elapsed().as_secs_f64());
+                    metrics::record_ungranted_references(&co.report);
 
                     if co.report.has_errors() {
                         metrics::record_compile_error();

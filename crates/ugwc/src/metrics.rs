@@ -104,3 +104,16 @@ pub fn record_dataplane_apply() {
 pub fn record_dataplane_error() {
     counter!("ugwc_dataplane_error_total").increment(1);
 }
+
+/// Increment per cross-namespace `RefNotPermitted` finding from a compile pass.
+pub fn record_ungranted_references(report: &ugwc_core::CompileReport) {
+    for err in &report.errors {
+        if err.reason == "RefNotPermitted" {
+            counter!(
+                "ugwc_ungranted_reference_total",
+                "route_kind" => err.kind.clone()
+            )
+            .increment(1);
+        }
+    }
+}
