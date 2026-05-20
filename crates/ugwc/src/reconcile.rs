@@ -10,8 +10,8 @@ use tracing::{instrument, warn, Span};
 use ugwc_core::publish::plan_publish;
 use ugwc_core::{
     grpc_route_resolved_refs_row, http_route_resolved_refs_row, tcp_route_resolved_refs_row,
-    tls_route_resolved_refs_row, udp_route_resolved_refs_row, CompileInput, FailurePolicy,
-    PublishAction,
+    tls_route_resolved_refs_row, udp_route_resolved_refs_row, CompileInput, CompileOutcome,
+    FailurePolicy, PublishAction, PublishPlan,
 };
 use ugwc_k8s::resources::{Gateway, ListenerSet};
 use ugwc_xds::{MultiScopeSnapshot, XdsSnapshotSource};
@@ -68,10 +68,7 @@ let api: Api<Gateway> = Api::namespaced(ctx.client.clone(), &ns);
                         ..Default::default()
                     };
                     let t_compile = Instant::now();
-                    let co = {
-                        let _span = tracing::info_span!("compile").entered();
-                        ugwc_core::compile(&ctx.fp, &input).map_err(|e| e.to_string())?
-                    };
+                    let co = do_compile(&ctx.fp, &input)?;
                     metrics::observe_compile_seconds(t_compile.elapsed().as_secs_f64());
                     metrics::record_ungranted_references(&co.report);
 
@@ -87,6 +84,30 @@ let api: Api<Gateway> = Api::namespaced(ctx.client.clone(), &ns);
                                 None,
                             )
                             .await;
+                        }
+                    }
+
+                    if let Some(ref ev) = ctx.events {
+                        if let Some(ref snap) = input.cluster {
+                            let tls_errors: Vec<&str> = snap
+                                .effective_listeners
+                                .iter()
+                                .filter_map(|l| l.tls_resolve_error.as_deref())
+                                .collect();
+                            if !tls_errors.is_empty() {
+                                let msg = format!(
+                                    "{} listener(s) with TLS errors: {}",
+                                    tls_errors.len(),
+                                    tls_errors.join("; ")
+                                );
+                                ev.publish_warning(
+                                    &latest,
+                                    ugwc_k8s::REASON_TLS_MATERIAL_MISSING,
+                                    &msg,
+                                    None,
+                                )
+                                .await;
+                            }
                         }
                     }
 
@@ -335,19 +356,7 @@ let api: Api<Gateway> = Api::namespaced(ctx.client.clone(), &ns);
 
                     let prev = ctx.cache.previous_for_scope(&co.snapshot.scope);
                     let plan = plan_publish(prev.as_deref(), &co.snapshot, &ctx.fp);
-
-                    {
-                        let _span = tracing::info_span!("publish", action = ?plan.action).entered();
-                        match plan.action {
-                            PublishAction::Skip => metrics::record_publish_skipped(),
-                            PublishAction::FullReplace => {
-                                ctx.cache.store_scoped(co.snapshot.clone());
-                                metrics::record_publish_applied();
-                            }
-                            PublishAction::Delta => {}
-                            _ => {}
-                        }
-                    }
+                    do_publish(&ctx.cache, &co, &plan);
 
                     let controller_name = input
                         .cluster
@@ -440,4 +449,22 @@ let api: Api<Gateway> = Api::namespaced(ctx.client.clone(), &ns);
                     }
 
     Ok(())
+}
+
+#[instrument(name = "compile", skip_all)]
+fn do_compile(fp: &FailurePolicy, input: &CompileInput) -> Result<CompileOutcome, String> {
+    ugwc_core::compile(fp, input).map_err(|e| e.to_string())
+}
+
+#[instrument(name = "publish", skip_all, fields(action = ?plan.action))]
+fn do_publish(cache: &MultiScopeSnapshot, co: &CompileOutcome, plan: &PublishPlan) {
+    match plan.action {
+        PublishAction::Skip => metrics::record_publish_skipped(),
+        PublishAction::FullReplace => {
+            cache.store_scoped(co.snapshot.clone());
+            metrics::record_publish_applied();
+        }
+        PublishAction::Delta => {}
+        _ => {}
+    }
 }

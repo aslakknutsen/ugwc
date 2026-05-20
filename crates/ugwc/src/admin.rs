@@ -1,13 +1,17 @@
 //! Admin HTTP (`/healthz`, `/readyz`, `/metrics`, `PUT /log-level`).
 
 use std::sync::Arc;
+use std::time::Instant;
 use std::time::Duration;
 
 use axum::body::Bytes;
-use axum::extract::State;
+use axum::extract::{Request, State};
 use axum::http::StatusCode;
+use axum::middleware::{self, Next};
+use axum::response::Response;
 use axum::routing::{get, put};
 use axum::Router;
+use metrics::histogram;
 use tokio::net::TcpListener;
 use tokio_util::sync::CancellationToken;
 use tower::ServiceBuilder;
@@ -66,6 +70,20 @@ async fn put_log_level(body: Bytes) -> StatusCode {
     }
 }
 
+async fn request_metrics(req: Request, next: Next) -> Response {
+    let method = req.method().as_str().to_string();
+    let started = Instant::now();
+    let resp = next.run(req).await;
+    let status = resp.status().as_u16().to_string();
+    histogram!(
+        "ugwc_admin_request_duration_seconds",
+        "method" => method,
+        "status" => status
+    )
+    .record(started.elapsed().as_secs_f64());
+    resp
+}
+
 /// Spawn admin server; cancel via token.
 pub async fn serve(
     listen: std::net::SocketAddr,
@@ -80,11 +98,14 @@ pub async fn serve(
         .route("/log-level", put(put_log_level))
         .with_state(state);
 
-    let app = Router::new().nest("/", routes).layer(
-        ServiceBuilder::new()
-            .layer(TraceLayer::new_for_http())
-            .layer(TimeoutLayer::new(Duration::from_secs(30))),
-    );
+    let app = Router::new()
+        .nest("/", routes)
+        .layer(middleware::from_fn(request_metrics))
+        .layer(
+            ServiceBuilder::new()
+                .layer(TraceLayer::new_for_http())
+                .layer(TimeoutLayer::new(Duration::from_secs(30))),
+        );
 
     let listener = TcpListener::bind(listen).await?;
     axum::serve(listener, app)

@@ -127,7 +127,7 @@ pub(super) async fn resolve_gateway_listener_tls(
                 }
             },
             Err(err) => {
-                warn!(error = %err, secret_ns = %secret_ns, secret_name = %r.name, "tls certificate secret fetch failed");
+                warn!(error = %ugwc_core::redact::redact_field(&err.to_string()), secret_ns = %secret_ns, secret_name = %r.name, "tls certificate secret fetch failed");
                 e.tls_resolve_error = Some("InvalidCertificateRef: Secret not found".into());
             }
         }

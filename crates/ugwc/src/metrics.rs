@@ -3,16 +3,36 @@
 //! Facade macros bridge into a [`prometheus_client::Registry`] via
 //! [`metrics_prometheus_client::MetricsCollector`]. Process metrics use the
 //! `metrics-process` crate which registers through the `metrics` facade.
+//!
+//! `reconcile_duration_seconds` uses a native `prometheus_client` histogram so
+//! that exemplars (with `trace_id`) can be attached — the facade bridge cannot
+//! carry exemplar labels.
 
 use std::sync::{Mutex, OnceLock};
 
 use metrics::{counter, gauge, histogram};
 use metrics_prometheus_client::MetricsCollector;
-use prometheus_client::encoding::text::encode;
+use prometheus_client::encoding::{EncodeLabelSet, text::encode};
+use prometheus_client::metrics::exemplar::HistogramWithExemplars;
+use prometheus_client::metrics::family::Family;
+use prometheus_client::metrics::histogram::exponential_buckets;
 use prometheus_client::registry::Registry;
+
+#[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
+struct ControllerLabel {
+    controller_name: String,
+}
+
+#[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
+struct TraceIdLabel {
+    trace_id: String,
+}
+
+type ReconcileHistogramFamily = Family<ControllerLabel, HistogramWithExemplars<TraceIdLabel>>;
 
 struct MetricsState {
     registry: Mutex<Registry>,
+    reconcile_duration: ReconcileHistogramFamily,
 }
 
 static STATE: OnceLock<MetricsState> = OnceLock::new();
@@ -25,8 +45,19 @@ pub fn install() -> Result<(), String> {
     let mut registry = Registry::default();
     let collector: MetricsCollector = metrics_prometheus_client::install();
     registry.register_collector(Box::new(collector));
+
+    let reconcile_duration: ReconcileHistogramFamily = Family::new_with_constructor(|| {
+        HistogramWithExemplars::new(exponential_buckets(0.005, 2.0, 12))
+    });
+    registry.register(
+        "ugwc_reconcile_duration_seconds",
+        "Duration of gateway reconcile in seconds",
+        reconcile_duration.clone(),
+    );
+
     let _ = STATE.set(MetricsState {
         registry: Mutex::new(registry),
+        reconcile_duration,
     });
     metrics_process::Collector::default().describe();
     Ok(())
@@ -54,14 +85,33 @@ pub fn record_reconcile_run(controller_name: &str, success: bool) {
     .increment(1);
 }
 
-/// Reconcile latency histogram. Exemplars linking to the active trace_id require
-/// native histogram support (not yet available via the `metrics` facade bridge).
+/// Reconcile latency histogram with trace_id exemplar (when OTel is active).
 pub fn observe_reconcile_duration_seconds(controller_name: &str, seconds: f64) {
-    histogram!(
-        "ugwc_reconcile_duration_seconds",
-        "controller_name" => controller_name.to_string()
-    )
-    .record(seconds);
+    let Some(state) = STATE.get() else { return };
+    let label = ControllerLabel {
+        controller_name: controller_name.to_string(),
+    };
+    let exemplar = current_trace_id_exemplar();
+    state
+        .reconcile_duration
+        .get_or_create(&label)
+        .observe(seconds, exemplar);
+}
+
+/// Extract the active OTel trace_id (if any) for histogram exemplars.
+fn current_trace_id_exemplar() -> Option<TraceIdLabel> {
+    #[cfg(feature = "otlp-traces")]
+    {
+        use opentelemetry::trace::TraceContextExt;
+        let cx = opentelemetry::Context::current();
+        let sc = cx.span().span_context().clone();
+        if sc.is_valid() {
+            return Some(TraceIdLabel {
+                trace_id: sc.trace_id().to_string(),
+            });
+        }
+    }
+    None
 }
 
 // --- Domain counters / histograms ---

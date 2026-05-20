@@ -98,6 +98,16 @@ pub fn record_from_reconcile(snap: &ClusterSnapshot, programmed_ok: bool) {
         )
         .set(1.0);
     }
+
+    for pool in &snap.inference_pools {
+        gauge!(
+            "gatewayapi_inferencepool_status",
+            "namespace" => pool.namespace.clone(),
+            "name" => pool.name.clone(),
+            "source" => SOURCE.to_string()
+        )
+        .set(1.0);
+    }
 }
 
 fn record_route(
