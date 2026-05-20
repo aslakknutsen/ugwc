@@ -1,4 +1,7 @@
 //! Gateway reconcile queue with workqueue-style Prometheus metrics.
+//!
+//! Workqueue metrics use the global `metrics` recorder (installed by `ugwc::metrics::install`).
+//! Keep label sets fixed per metric name to avoid facade cardinality panics.
 
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;

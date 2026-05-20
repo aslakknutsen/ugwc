@@ -33,12 +33,21 @@ async fn readyz(State(st): State<AdminState>) -> StatusCode {
 async fn metrics_prom(
     State(st): State<AdminState>,
 ) -> ([(axum::http::header::HeaderName, &'static str); 1], String) {
+    let mut body = st.prom.render();
+    if let Ok(extra) = crate::metrics::render_process_metrics() {
+        if !extra.is_empty() {
+            if !body.is_empty() && !body.ends_with('\n') {
+                body.push('\n');
+            }
+            body.push_str(&extra);
+        }
+    }
     (
         [(
             axum::http::header::CONTENT_TYPE,
-            "text/plain; charset=utf-8",
+            "text/plain; version=0.0.4; charset=utf-8",
         )],
-        st.prom.render(),
+        body,
     )
 }
 

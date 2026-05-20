@@ -30,6 +30,7 @@ axum.workspace = true
 arc-swap.workspace = true
 metrics.workspace = true
 metrics-exporter-prometheus.workspace = true
+prometheus.workspace = true
 http.workspace = true
 futures.workspace = true
 kube.workspace = true

@@ -1,19 +1,50 @@
 //! Prometheus metrics (`/metrics` on admin router).
 //!
-//! All `counter!` / `histogram!` / `gauge!` macros live in this module (snake_case names only).
+//! All `counter!` / `histogram!` / `gauge!` macros for the `ugwc` binary live here
+//! (snake_case names only). Workqueue metrics are recorded from `ugwc-k8s` via the
+//! same global `metrics` recorder after [`install`].
+
+use std::sync::Mutex;
 
 use metrics::{counter, gauge, histogram};
 use metrics_exporter_prometheus::{PrometheusBuilder, PrometheusHandle};
 use once_cell::sync::OnceCell;
+use prometheus::Encoder;
 
 static PROM: OnceCell<PrometheusHandle> = OnceCell::new();
+static PROCESS_REGISTRY: OnceCell<Mutex<prometheus::Registry>> = OnceCell::new();
 
 pub fn install() -> Result<&'static PrometheusHandle, String> {
     PROM.get_or_try_init(|| {
         PrometheusBuilder::new()
             .install_recorder()
             .map_err(|e| e.to_string())
-    })
+    })?;
+    PROCESS_REGISTRY.get_or_init(|| {
+        let registry = prometheus::Registry::new();
+        let collector = prometheus::process_collector::ProcessCollector::for_self();
+        registry
+            .register(Box::new(collector))
+            .expect("register process collector");
+        Mutex::new(registry)
+    });
+    PROM.get()
+        .ok_or_else(|| "metrics install failed".to_string())
+}
+
+/// Prometheus text exposition for process collector (appended to facade `/metrics`).
+pub fn render_process_metrics() -> Result<String, String> {
+    let registry = PROCESS_REGISTRY
+        .get()
+        .ok_or_else(|| "process registry not installed".to_string())?;
+    let guard = registry.lock().map_err(|e| e.to_string())?;
+    let metric_families = guard.gather();
+    let encoder = prometheus::TextEncoder::new();
+    let mut buf = Vec::new();
+    encoder
+        .encode(&metric_families, &mut buf)
+        .map_err(|e| e.to_string())?;
+    String::from_utf8(buf).map_err(|e| e.to_string())
 }
 
 // --- Reconcile SLO (controller_name, status) ---
