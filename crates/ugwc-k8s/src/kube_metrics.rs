@@ -62,9 +62,13 @@ where
         Poll::Ready(Ok(()))
     }
 
-    fn call(&mut self, mut req: Request<ReqBody>) -> Self::Future {
+    fn call(&mut self, req: Request<ReqBody>) -> Self::Future {
         #[cfg(feature = "otel-context")]
-        inject_traceparent(&mut req);
+        let req = {
+            let mut req = req;
+            inject_traceparent(&mut req);
+            req
+        };
         let verb = req.method().as_str().to_string();
         let resource = k8s_resource_from_path(req.uri().path()).to_string();
         let started = Instant::now();

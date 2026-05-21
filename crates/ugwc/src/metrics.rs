@@ -36,6 +36,7 @@ struct MetricsState {
 }
 
 static STATE: OnceLock<MetricsState> = OnceLock::new();
+static PROCESS_COLLECTOR: OnceLock<metrics_process::Collector> = OnceLock::new();
 
 /// Install the global metrics recorder and process collector.
 pub fn install() -> Result<(), String> {
@@ -59,14 +60,21 @@ pub fn install() -> Result<(), String> {
         registry: Mutex::new(registry),
         reconcile_duration,
     });
-    metrics_process::Collector::default().describe();
+    let process = PROCESS_COLLECTOR.get_or_init(|| {
+        let c = metrics_process::Collector::default();
+        c.describe();
+        c
+    });
+    let _ = process;
     Ok(())
 }
 
 /// Full Prometheus text exposition for `/metrics`.
 pub fn render() -> Result<String, String> {
     let state = STATE.get().ok_or_else(|| "metrics not installed".to_string())?;
-    metrics_process::Collector::default().collect();
+    if let Some(process) = PROCESS_COLLECTOR.get() {
+        process.collect();
+    }
     let registry = state.registry.lock().map_err(|e| e.to_string())?;
     let mut body = String::new();
     encode(&mut body, &registry).map_err(|e| e.to_string())?;
@@ -162,5 +170,52 @@ pub fn record_ungranted_references(report: &ugwc_core::CompileReport) {
             )
             .increment(1);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn render_exports_facade_counters() {
+        install().expect("metrics install");
+        counter!(
+            "ugwc_reconcile_runs_total",
+            "controller_name" => "test",
+            "status" => "success"
+        )
+        .increment(1);
+        gauge!(
+            "gatewayapi_gateway_status",
+            "namespace" => "ns",
+            "name" => "gw",
+            "status" => "Programmed",
+            "source" => "ugwc"
+        )
+        .set(1.0);
+        let body = render().expect("render");
+        assert!(
+            body.contains("ugwc_reconcile_runs_total"),
+            "missing reconcile counter in:\n{body}"
+        );
+        assert!(
+            body.contains("gatewayapi_gateway_status"),
+            "missing gateway status gauge in:\n{body}"
+        );
+        // metrics 0.24 re-registers on every macro call; must not panic on repeat.
+        counter!(
+            "ugwc_reconcile_runs_total",
+            "controller_name" => "test",
+            "status" => "success"
+        )
+        .increment(1);
+        counter!(
+            "ugwc_compile_errors_total",
+        )
+        .increment(1);
+        counter!("ugwc_compile_errors_total").increment(1);
+        let body = render().expect("render after repeat");
+        assert!(body.contains("ugwc_compile_errors_total"));
     }
 }

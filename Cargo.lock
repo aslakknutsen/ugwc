@@ -1393,16 +1393,6 @@ checksum = "38d1115007560874e373613744c6fba374c17688327a71c1476d1a5954cc857b"
 
 [[package]]
 name = "metrics"
-version = "0.23.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3045b4193fbdc5b5681f32f11070da9be3609f189a79f3390706d42587f46bb5"
-dependencies = [
- "ahash",
- "portable-atomic",
-]
-
-[[package]]
-name = "metrics"
 version = "0.24.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ff56c2e7dce6bd462e3b8919986a617027481b1dcc703175b58cf9dd98a2f071"
@@ -1420,7 +1410,7 @@ dependencies = [
  "libc",
  "libproc",
  "mach2",
- "metrics 0.24.5",
+ "metrics",
  "once_cell",
  "procfs",
  "rlimit",
@@ -1430,10 +1420,8 @@ dependencies = [
 [[package]]
 name = "metrics-prometheus-client"
 version = "0.0.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "21cc5f7df748e4b7de079dfd009a6d5084e1562c3298d13035c660a859bad48b"
 dependencies = [
- "metrics 0.23.1",
+ "metrics",
  "prometheus-client",
 ]
 
@@ -2778,7 +2766,7 @@ dependencies = [
  "http",
  "k8s-openapi",
  "kube",
- "metrics 0.24.5",
+ "metrics",
  "metrics-process",
  "metrics-prometheus-client",
  "once_cell",
@@ -2844,7 +2832,7 @@ dependencies = [
  "k8s-openapi",
  "kube",
  "kube-runtime",
- "metrics 0.24.5",
+ "metrics",
  "minijinja",
  "opentelemetry",
  "serde",
@@ -2865,7 +2853,7 @@ version = "0.1.0"
 dependencies = [
  "arc-swap",
  "futures",
- "metrics 0.24.5",
+ "metrics",
  "parking_lot",
  "prost",
  "prost-types",

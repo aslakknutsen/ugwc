@@ -72,3 +72,7 @@ tokio-metrics = "0.4"
 opentelemetry = "0.27"
 opentelemetry_sdk = { version = "0.27", features = ["rt-tokio"] }
 opentelemetry-otlp = { version = "0.27", features = ["grpc-tonic", "metrics", "trace"] }
+
+# metrics-prometheus-client 0.0.1 on crates.io pins metrics 0.23; ugwc uses 0.24.
+[patch.crates-io]
+metrics-prometheus-client = { path = "crates/metrics-prometheus-client" }
