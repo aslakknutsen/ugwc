@@ -25,12 +25,18 @@ ugwc exposes Prometheus metrics on the admin HTTP server. Gateway API **resource
 | `ugwc_reconcile_duration_seconds` | Histogram | `controller_name` |
 | `ugwc_reconcile_runs_total` | Counter | `controller_name`, `status` |
 | `ugwc_rest_client_request_duration_seconds` | Histogram | `verb`, `resource`, `code` |
+| `ugwc_rest_client_requests_total` | Counter | `verb`, `resource`, `code` |
+| `ugwc_compile_ir_listeners` | Gauge | — |
+| `ugwc_compile_ir_routes` | Gauge | — |
+| `ugwc_compile_ir_backends` | Gauge | — |
 | `ugwc_ungranted_reference_total` | Counter | `route_kind` |
 | `ugwc_cache_synced` | Gauge | — |
 | `ugwc_leader_active` | Gauge | — |
 | `ugwc_xds_streams_active` | Gauge | — |
 | `ugwc_xds_stream_disconnects_total` | Counter | `reason` |
 | `ugwc_xds_push_duration_seconds` | Histogram | — |
+| `ugwc_xds_push_bytes_total` | Counter | — |
+| `ugwc_xds_push_resources` | Gauge | — |
 | `ugwc_xds_scope_miss_total` | Counter | — |
 | `process_*` | (process collector) | standard Prometheus process metrics |
 
@@ -57,7 +63,22 @@ Emitted per reconcile for the gateway snapshot (owned `controllerName` fan-out):
 
 ## Tokio runtime metrics (optional)
 
-Build with `--features tokio-metrics` and `RUSTFLAGS='--cfg tokio_unstable'` for `ugwc_tokio_*` gauges.
+Build with `--features tokio-metrics` and `RUSTFLAGS='--cfg tokio_unstable'` for `ugwc_tokio_*` gauges:
+
+| Metric | Description |
+|--------|-------------|
+| `ugwc_tokio_workers_count` | Number of runtime worker threads |
+| `ugwc_tokio_total_busy_duration_seconds` | Total time workers spent executing tasks |
+| `ugwc_tokio_total_polls_count` | Total task polls |
+| `ugwc_tokio_total_noop_count` | Polls that found no work |
+| `ugwc_tokio_total_steal_count` | Tasks stolen from other workers |
+| `ugwc_tokio_total_steal_operations` | Steal attempts |
+| `ugwc_tokio_total_local_schedule_count` | Tasks scheduled to local queues |
+| `ugwc_tokio_total_overflow_count` | Tasks overflowed to global queue |
+| `ugwc_tokio_injection_queue_depth` | Current global injection queue depth |
+| `ugwc_tokio_budget_forced_yield_count` | Coop budget forced yields |
+| `ugwc_tokio_total_local_queue_depth` | Sum of all local queue depths |
+| `ugwc_tokio_mean_poll_duration_seconds` | Computed mean poll time per interval |
 
 ## OTLP push (optional)
 
@@ -71,9 +92,12 @@ Build with `--features otlp-traces`. When enabled:
 - Spawned tasks propagate the parent span, so trace IDs survive across `tokio::spawn` boundaries.
 - Outbound Kubernetes API requests include a W3C `traceparent` header for cross-service correlation.
 
-## Grafana dashboard
+## Grafana dashboards
 
-A ready-to-import dashboard is at `charts/ugwc/dashboards/ugwc-overview.json`. Panels: reconcile rate/error rate, P50/P95/P99 latency, workqueue depth, REST client latency by resource, Gateway API state, leader status.
+| Dashboard | File | Purpose |
+|-----------|------|---------|
+| Controller Overview | `charts/ugwc/dashboards/ugwc-overview.json` | SLO monitoring: reconcile rate/error rate, P50/P95/P99 latency, workqueue depth, Gateway API state, leader status |
+| Performance | `charts/ugwc/dashboards/ugwc-performance.json` | Performance testing: timing breakdown, throughput, API calls by kind, memory, CPU/Tokio scheduler, scale indicators |
 
 ## Recording rules
 

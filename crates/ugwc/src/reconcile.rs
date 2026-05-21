@@ -77,6 +77,11 @@ pub async fn reconcile_gateway(ctx: ReconcileCtx, ns: String, name: String) -> R
                     let t_compile = Instant::now();
                     let co = do_compile(&ctx.fp, &input)?;
                     metrics::observe_compile_seconds(t_compile.elapsed().as_secs_f64());
+                    metrics::set_compile_output_size(
+                        co.snapshot.listeners.len(),
+                        co.snapshot.routes.len(),
+                        co.snapshot.backends.len(),
+                    );
                     metrics::record_ungranted_references(&co.report);
 
                     if co.report.has_errors() {

@@ -225,6 +225,8 @@ async fn send_discovery_response(
 ) -> Result<(), ()> {
     let push_started = std::time::Instant::now();
     let resp = discovery_response(snap, wire, type_url);
+    counter!("ugwc_xds_push_bytes_total").increment(resp.encoded_len() as u64);
+    gauge!("ugwc_xds_push_resources").set(resp.resources.len() as f64);
     let out = if tx.send(Ok(resp)).await.is_err() {
         Err(())
     } else {

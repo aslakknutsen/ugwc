@@ -1,0 +1,561 @@
+{
+  "title": "ugwc Performance",
+  "uid": "ugwc-performance",
+  "schemaVersion": 39,
+  "version": 1,
+  "timezone": "utc",
+  "editable": true,
+  "time": { "from": "now-30m", "to": "now" },
+  "refresh": "10s",
+  "templating": {
+    "list": [
+      {
+        "name": "namespace",
+        "type": "query",
+        "datasource": { "type": "prometheus", "uid": "prometheus" },
+        "query": "label_values(ugwc_reconcile_runs_total, namespace)",
+        "refresh": 2,
+        "includeAll": true,
+        "current": { "text": "All", "value": "$__all" }
+      },
+      {
+        "name": "job",
+        "type": "query",
+        "datasource": { "type": "prometheus", "uid": "prometheus" },
+        "query": "label_values(ugwc_reconcile_runs_total, job)",
+        "refresh": 2,
+        "includeAll": true,
+        "current": { "text": "All", "value": "$__all" }
+      }
+    ]
+  },
+  "panels": [
+    {
+      "title": "Row: Timing Breakdown",
+      "type": "row",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 0 },
+      "collapsed": false
+    },
+    {
+      "title": "Reconcile Duration (P50 / P95 / P99)",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 1 },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.50, sum(rate(ugwc_reconcile_duration_seconds_bucket{namespace=~\"$namespace\", job=~\"$job\"}[1m])) by (le))",
+          "legendFormat": "p50",
+          "datasource": { "type": "prometheus", "uid": "prometheus" }
+        },
+        {
+          "expr": "histogram_quantile(0.95, sum(rate(ugwc_reconcile_duration_seconds_bucket{namespace=~\"$namespace\", job=~\"$job\"}[1m])) by (le))",
+          "legendFormat": "p95",
+          "datasource": { "type": "prometheus", "uid": "prometheus" }
+        },
+        {
+          "expr": "histogram_quantile(0.99, sum(rate(ugwc_reconcile_duration_seconds_bucket{namespace=~\"$namespace\", job=~\"$job\"}[1m])) by (le))",
+          "legendFormat": "p99",
+          "datasource": { "type": "prometheus", "uid": "prometheus" }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "custom": { "drawStyle": "line", "fillOpacity": 5 }
+        }
+      }
+    },
+    {
+      "title": "Compile Duration (P50 / P95 / P99)",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 1 },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.50, sum(rate(ugwc_compile_duration_seconds_bucket{namespace=~\"$namespace\", job=~\"$job\"}[1m])) by (le))",
+          "legendFormat": "p50",
+          "datasource": { "type": "prometheus", "uid": "prometheus" }
+        },
+        {
+          "expr": "histogram_quantile(0.95, sum(rate(ugwc_compile_duration_seconds_bucket{namespace=~\"$namespace\", job=~\"$job\"}[1m])) by (le))",
+          "legendFormat": "p95",
+          "datasource": { "type": "prometheus", "uid": "prometheus" }
+        },
+        {
+          "expr": "histogram_quantile(0.99, sum(rate(ugwc_compile_duration_seconds_bucket{namespace=~\"$namespace\", job=~\"$job\"}[1m])) by (le))",
+          "legendFormat": "p99",
+          "datasource": { "type": "prometheus", "uid": "prometheus" }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "custom": { "drawStyle": "line", "fillOpacity": 5 }
+        }
+      }
+    },
+    {
+      "title": "Snapshot Load Duration (P50 / P95 / P99)",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 9 },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.50, sum(rate(ugwc_snapshot_load_duration_seconds_bucket{namespace=~\"$namespace\", job=~\"$job\"}[1m])) by (le))",
+          "legendFormat": "p50",
+          "datasource": { "type": "prometheus", "uid": "prometheus" }
+        },
+        {
+          "expr": "histogram_quantile(0.95, sum(rate(ugwc_snapshot_load_duration_seconds_bucket{namespace=~\"$namespace\", job=~\"$job\"}[1m])) by (le))",
+          "legendFormat": "p95",
+          "datasource": { "type": "prometheus", "uid": "prometheus" }
+        },
+        {
+          "expr": "histogram_quantile(0.99, sum(rate(ugwc_snapshot_load_duration_seconds_bucket{namespace=~\"$namespace\", job=~\"$job\"}[1m])) by (le))",
+          "legendFormat": "p99",
+          "datasource": { "type": "prometheus", "uid": "prometheus" }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "custom": { "drawStyle": "line", "fillOpacity": 5 }
+        }
+      }
+    },
+    {
+      "title": "xDS Push Duration (P50 / P95 / P99)",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 9 },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.50, sum(rate(ugwc_xds_push_duration_seconds_bucket{namespace=~\"$namespace\", job=~\"$job\"}[1m])) by (le))",
+          "legendFormat": "p50",
+          "datasource": { "type": "prometheus", "uid": "prometheus" }
+        },
+        {
+          "expr": "histogram_quantile(0.95, sum(rate(ugwc_xds_push_duration_seconds_bucket{namespace=~\"$namespace\", job=~\"$job\"}[1m])) by (le))",
+          "legendFormat": "p95",
+          "datasource": { "type": "prometheus", "uid": "prometheus" }
+        },
+        {
+          "expr": "histogram_quantile(0.99, sum(rate(ugwc_xds_push_duration_seconds_bucket{namespace=~\"$namespace\", job=~\"$job\"}[1m])) by (le))",
+          "legendFormat": "p99",
+          "datasource": { "type": "prometheus", "uid": "prometheus" }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "custom": { "drawStyle": "line", "fillOpacity": 5 }
+        }
+      }
+    },
+    {
+      "title": "Row: Throughput",
+      "type": "row",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 17 },
+      "collapsed": false
+    },
+    {
+      "title": "Reconcile Throughput",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 6, "x": 0, "y": 18 },
+      "targets": [
+        {
+          "expr": "sum(rate(ugwc_reconcile_runs_total{namespace=~\"$namespace\", job=~\"$job\"}[1m]))",
+          "legendFormat": "ops/s",
+          "datasource": { "type": "prometheus", "uid": "prometheus" }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
+          "custom": { "drawStyle": "line", "fillOpacity": 10 }
+        }
+      }
+    },
+    {
+      "title": "xDS Pushes/s",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 6, "x": 6, "y": 18 },
+      "targets": [
+        {
+          "expr": "rate(ugwc_xds_push_duration_seconds_count{namespace=~\"$namespace\", job=~\"$job\"}[1m])",
+          "legendFormat": "pushes/s",
+          "datasource": { "type": "prometheus", "uid": "prometheus" }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
+          "custom": { "drawStyle": "line", "fillOpacity": 10 }
+        }
+      }
+    },
+    {
+      "title": "Workqueue Add Rate",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 6, "x": 12, "y": 18 },
+      "targets": [
+        {
+          "expr": "rate(ugwc_workqueue_adds_total{namespace=~\"$namespace\", job=~\"$job\"}[1m])",
+          "legendFormat": "adds/s",
+          "datasource": { "type": "prometheus", "uid": "prometheus" }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
+          "custom": { "drawStyle": "line", "fillOpacity": 10 }
+        }
+      }
+    },
+    {
+      "title": "Workqueue Unfinished Work",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 6, "x": 18, "y": 18 },
+      "targets": [
+        {
+          "expr": "ugwc_workqueue_unfinished_work_seconds{namespace=~\"$namespace\", job=~\"$job\"}",
+          "legendFormat": "unfinished (s)",
+          "datasource": { "type": "prometheus", "uid": "prometheus" }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "custom": { "drawStyle": "line", "fillOpacity": 10 }
+        }
+      }
+    },
+    {
+      "title": "Row: API Calls by Kind",
+      "type": "row",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 26 },
+      "collapsed": false
+    },
+    {
+      "title": "API Calls/s by Resource",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 8, "x": 0, "y": 27 },
+      "targets": [
+        {
+          "expr": "sum(rate(ugwc_rest_client_requests_total{namespace=~\"$namespace\", job=~\"$job\"}[1m])) by (resource)",
+          "legendFormat": "{{ resource }}",
+          "datasource": { "type": "prometheus", "uid": "prometheus" }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "reqps",
+          "custom": { "drawStyle": "line", "fillOpacity": 10, "stacking": { "mode": "normal" } }
+        }
+      }
+    },
+    {
+      "title": "API Calls/s by Resource & Verb",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 8, "x": 8, "y": 27 },
+      "targets": [
+        {
+          "expr": "sum(rate(ugwc_rest_client_requests_total{namespace=~\"$namespace\", job=~\"$job\"}[1m])) by (resource, verb)",
+          "legendFormat": "{{ resource }} {{ verb }}",
+          "datasource": { "type": "prometheus", "uid": "prometheus" }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "reqps",
+          "custom": { "drawStyle": "line", "fillOpacity": 5 }
+        }
+      }
+    },
+    {
+      "title": "API 5xx Error Rate by Resource",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 8, "x": 16, "y": 27 },
+      "targets": [
+        {
+          "expr": "sum(rate(ugwc_rest_client_requests_total{namespace=~\"$namespace\", job=~\"$job\", code=~\"5..\"}[1m])) by (resource)",
+          "legendFormat": "{{ resource }}",
+          "datasource": { "type": "prometheus", "uid": "prometheus" }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "reqps",
+          "custom": { "drawStyle": "line", "fillOpacity": 10 },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "red", "value": 0.01 }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "title": "Row: Memory",
+      "type": "row",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 35 },
+      "collapsed": false
+    },
+    {
+      "title": "Resident Memory (RSS)",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 8, "x": 0, "y": 36 },
+      "targets": [
+        {
+          "expr": "process_resident_memory_bytes{namespace=~\"$namespace\", job=~\"$job\"}",
+          "legendFormat": "RSS",
+          "datasource": { "type": "prometheus", "uid": "prometheus" }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "bytes",
+          "custom": { "drawStyle": "line", "fillOpacity": 10 }
+        }
+      }
+    },
+    {
+      "title": "Virtual Memory",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 8, "x": 8, "y": 36 },
+      "targets": [
+        {
+          "expr": "process_virtual_memory_bytes{namespace=~\"$namespace\", job=~\"$job\"}",
+          "legendFormat": "VMem",
+          "datasource": { "type": "prometheus", "uid": "prometheus" }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "bytes",
+          "custom": { "drawStyle": "line", "fillOpacity": 10 }
+        }
+      }
+    },
+    {
+      "title": "RSS Rate of Change",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 8, "x": 16, "y": 36 },
+      "targets": [
+        {
+          "expr": "deriv(process_resident_memory_bytes{namespace=~\"$namespace\", job=~\"$job\"}[5m])",
+          "legendFormat": "RSS deriv",
+          "datasource": { "type": "prometheus", "uid": "prometheus" }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "Bps",
+          "custom": { "drawStyle": "line", "fillOpacity": 5 }
+        }
+      }
+    },
+    {
+      "title": "Row: CPU & Tokio Scheduler",
+      "type": "row",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 44 },
+      "collapsed": false
+    },
+    {
+      "title": "CPU Usage (cores)",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 6, "x": 0, "y": 45 },
+      "targets": [
+        {
+          "expr": "rate(process_cpu_seconds_total{namespace=~\"$namespace\", job=~\"$job\"}[1m])",
+          "legendFormat": "CPU",
+          "datasource": { "type": "prometheus", "uid": "prometheus" }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": { "drawStyle": "line", "fillOpacity": 10 }
+        }
+      }
+    },
+    {
+      "title": "Tokio Busy Ratio",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 6, "x": 6, "y": 45 },
+      "targets": [
+        {
+          "expr": "rate(ugwc_tokio_total_busy_duration_seconds{namespace=~\"$namespace\", job=~\"$job\"}[1m]) / ugwc_tokio_workers_count{namespace=~\"$namespace\", job=~\"$job\"}",
+          "legendFormat": "busy ratio",
+          "datasource": { "type": "prometheus", "uid": "prometheus" }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "min": 0,
+          "max": 1,
+          "custom": { "drawStyle": "line", "fillOpacity": 10 }
+        }
+      }
+    },
+    {
+      "title": "Tokio Polls/s",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 4, "x": 12, "y": 45 },
+      "targets": [
+        {
+          "expr": "rate(ugwc_tokio_total_polls_count{namespace=~\"$namespace\", job=~\"$job\"}[1m])",
+          "legendFormat": "polls/s",
+          "datasource": { "type": "prometheus", "uid": "prometheus" }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
+          "custom": { "drawStyle": "line", "fillOpacity": 5 }
+        }
+      }
+    },
+    {
+      "title": "Tokio Steal Rate",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 4, "x": 16, "y": 45 },
+      "targets": [
+        {
+          "expr": "rate(ugwc_tokio_total_steal_count{namespace=~\"$namespace\", job=~\"$job\"}[1m])",
+          "legendFormat": "steals/s",
+          "datasource": { "type": "prometheus", "uid": "prometheus" }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
+          "custom": { "drawStyle": "line", "fillOpacity": 5 }
+        }
+      }
+    },
+    {
+      "title": "Mean Poll Duration",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 4, "x": 20, "y": 45 },
+      "targets": [
+        {
+          "expr": "ugwc_tokio_mean_poll_duration_seconds{namespace=~\"$namespace\", job=~\"$job\"}",
+          "legendFormat": "mean poll",
+          "datasource": { "type": "prometheus", "uid": "prometheus" }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "custom": { "drawStyle": "line", "fillOpacity": 5 }
+        }
+      }
+    },
+    {
+      "title": "Row: Scale Indicators",
+      "type": "row",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 53 },
+      "collapsed": false
+    },
+    {
+      "title": "Active xDS Streams",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 5, "x": 0, "y": 54 },
+      "targets": [
+        {
+          "expr": "ugwc_xds_streams_active{namespace=~\"$namespace\", job=~\"$job\"}",
+          "legendFormat": "streams",
+          "datasource": { "type": "prometheus", "uid": "prometheus" }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": { "drawStyle": "line", "fillOpacity": 10 }
+        }
+      }
+    },
+    {
+      "title": "Workqueue Depth",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 5, "x": 5, "y": 54 },
+      "targets": [
+        {
+          "expr": "ugwc_workqueue_depth{namespace=~\"$namespace\", job=~\"$job\"}",
+          "legendFormat": "depth",
+          "datasource": { "type": "prometheus", "uid": "prometheus" }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": { "drawStyle": "line", "fillOpacity": 10 }
+        }
+      }
+    },
+    {
+      "title": "IR Output Size",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 5, "x": 10, "y": 54 },
+      "targets": [
+        {
+          "expr": "ugwc_compile_ir_listeners{namespace=~\"$namespace\", job=~\"$job\"}",
+          "legendFormat": "listeners",
+          "datasource": { "type": "prometheus", "uid": "prometheus" }
+        },
+        {
+          "expr": "ugwc_compile_ir_routes{namespace=~\"$namespace\", job=~\"$job\"}",
+          "legendFormat": "routes",
+          "datasource": { "type": "prometheus", "uid": "prometheus" }
+        },
+        {
+          "expr": "ugwc_compile_ir_backends{namespace=~\"$namespace\", job=~\"$job\"}",
+          "legendFormat": "backends",
+          "datasource": { "type": "prometheus", "uid": "prometheus" }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": { "drawStyle": "line", "fillOpacity": 5 }
+        }
+      }
+    },
+    {
+      "title": "xDS Push Bytes/s",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 5, "x": 15, "y": 54 },
+      "targets": [
+        {
+          "expr": "rate(ugwc_xds_push_bytes_total{namespace=~\"$namespace\", job=~\"$job\"}[1m])",
+          "legendFormat": "bytes/s",
+          "datasource": { "type": "prometheus", "uid": "prometheus" }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "Bps",
+          "custom": { "drawStyle": "line", "fillOpacity": 10 }
+        }
+      }
+    },
+    {
+      "title": "Open File Descriptors",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 4, "x": 20, "y": 54 },
+      "targets": [
+        {
+          "expr": "process_open_fds{namespace=~\"$namespace\", job=~\"$job\"}",
+          "legendFormat": "open FDs",
+          "datasource": { "type": "prometheus", "uid": "prometheus" }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": { "drawStyle": "line", "fillOpacity": 10 }
+        }
+      }
+    }
+  ]
+}

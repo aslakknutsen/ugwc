@@ -11,7 +11,7 @@ use tokio::sync::Mutex;
 use http::{Request, Response};
 use kube::client::ClientBuilder;
 use kube::{Client, Config};
-use metrics::histogram;
+use metrics::{counter, histogram};
 use tower::{Layer, Service};
 
 /// Build a [`Client`] with REST request duration metrics on the HTTP stack.
@@ -80,6 +80,13 @@ where
                 .ok()
                 .map(|r| r.status().as_u16().to_string())
                 .unwrap_or_else(|| "0".to_string());
+            counter!(
+                "ugwc_rest_client_requests_total",
+                "verb" => verb.clone(),
+                "resource" => resource.clone(),
+                "code" => code.clone()
+            )
+            .increment(1);
             histogram!(
                 "ugwc_rest_client_request_duration_seconds",
                 "verb" => verb,

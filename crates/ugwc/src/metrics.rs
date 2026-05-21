@@ -152,6 +152,12 @@ pub fn observe_snapshot_load_seconds(seconds: f64) {
     histogram!("ugwc_snapshot_load_duration_seconds").record(seconds);
 }
 
+pub fn set_compile_output_size(listeners: usize, routes: usize, backends: usize) {
+    gauge!("ugwc_compile_ir_listeners").set(listeners as f64);
+    gauge!("ugwc_compile_ir_routes").set(routes as f64);
+    gauge!("ugwc_compile_ir_backends").set(backends as f64);
+}
+
 pub fn record_dataplane_apply() {
     counter!("ugwc_dataplane_apply_total").increment(1);
 }
