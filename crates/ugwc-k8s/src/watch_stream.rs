@@ -1,11 +1,12 @@
 //! Shared kube-runtime watch streams: generation predicates, managedFields pruning, default backoff.
 
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
 use std::hash::Hash;
 use std::pin::Pin;
+use std::sync::{Arc, Mutex};
+use std::task::{Context, Poll};
 
-use futures::{Stream, StreamExt, TryStreamExt};
+use futures::{Stream, TryStreamExt};
 use kube::api::{Api, PartialObjectMeta};
 use kube::runtime::watcher::{self, Config as WatcherConfig, Event};
 use kube::runtime::{metadata_watcher, predicates, WatchStreamExt};
@@ -113,6 +114,88 @@ where
     }
 }
 
+/// Max inner events to process in one `poll_next` before yielding (avoids busy-loop on resync).
+const MAX_COALESCE_PER_POLL: u32 = 64;
+
+/// Poll inner watch events, map to [`WatchItem`], and yield when filtering bursts of duplicates.
+fn demux_poll<T, Map>(
+    mut inner: Pin<&mut (dyn Stream<Item = Result<Event<T>, watcher::Error>> + Send)>,
+    last_gen: &Arc<Mutex<HashMap<(String, String), u64>>>,
+    coalesce: &mut u32,
+    cx: &mut Context<'_>,
+    map: Map,
+) -> Poll<Option<Result<WatchItem<T>, watcher::Error>>>
+where
+    Map: Fn(&Arc<Mutex<HashMap<(String, String), u64>>>, Event<T>) -> Option<WatchItem<T>>,
+{
+    loop {
+        if *coalesce >= MAX_COALESCE_PER_POLL {
+            *coalesce = 0;
+            cx.waker().wake_by_ref();
+            return Poll::Pending;
+        }
+        match inner.as_mut().poll_next(cx) {
+            Poll::Ready(Some(Ok(ev))) => {
+                if let Some(item) = map(last_gen, ev) {
+                    return Poll::Ready(Some(Ok(item)));
+                }
+                *coalesce += 1;
+            }
+            Poll::Ready(Some(Err(e))) => return Poll::Ready(Some(Err(e))),
+            Poll::Ready(None) => return Poll::Ready(None),
+            Poll::Pending => return Poll::Pending,
+        }
+    }
+}
+
+struct WatchDemuxStream<T> {
+    inner: Pin<Box<dyn Stream<Item = Result<Event<T>, watcher::Error>> + Send>>,
+    last_gen: Arc<Mutex<HashMap<(String, String), u64>>>,
+    coalesce: u32,
+}
+
+impl<K> Stream for WatchDemuxStream<K>
+where
+    K: Resource<DynamicType: Default> + Send + 'static,
+{
+    type Item = Result<WatchItem<K>, watcher::Error>;
+
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        let this = self.as_mut().get_mut();
+        demux_poll(
+            this.inner.as_mut(),
+            &this.last_gen,
+            &mut this.coalesce,
+            cx,
+            map_event::<K>,
+        )
+    }
+}
+
+struct MetaWatchDemuxStream<K> {
+    inner: Pin<Box<dyn Stream<Item = Result<Event<PartialObjectMeta<K>>, watcher::Error>> + Send>>,
+    last_gen: Arc<Mutex<HashMap<(String, String), u64>>>,
+    coalesce: u32,
+}
+
+impl<K> Stream for MetaWatchDemuxStream<K>
+where
+    K: Resource<DynamicType: Default> + Send + 'static,
+{
+    type Item = Result<WatchItem<PartialObjectMeta<K>>, watcher::Error>;
+
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        let this = self.as_mut().get_mut();
+        demux_poll(
+            this.inner.as_mut(),
+            &this.last_gen,
+            &mut this.coalesce,
+            cx,
+            map_meta_event::<K>,
+        )
+    }
+}
+
 /// Full-resource watch: prune → backoff → apply/delete with generation filter on apply only.
 pub fn full_watch_stream<K>(
     api: Api<K>,
@@ -128,18 +211,16 @@ where
         + 'static,
 {
     let last_gen = Arc::new(Mutex::new(HashMap::new()));
-    let raw = watcher::watcher(api, cfg)
-        .modify(strip_managed_fields)
-        .default_backoff();
-    Box::pin(raw.filter_map(move |ev| {
-        let last_gen = Arc::clone(&last_gen);
-        async move {
-            match ev {
-                Ok(e) => map_event(&last_gen, e).map(Ok),
-                Err(e) => Some(Err(e)),
-            }
-        }
-    }))
+    let inner: Pin<Box<dyn Stream<Item = Result<Event<K>, watcher::Error>> + Send>> = Box::pin(
+        watcher::watcher(api, cfg)
+            .modify(strip_managed_fields)
+            .default_backoff(),
+    );
+    Box::pin(WatchDemuxStream {
+        inner,
+        last_gen,
+        coalesce: 0,
+    })
 }
 
 /// Metadata-only watch for resources where delete only needs name/namespace (e.g. Gateway).
@@ -157,18 +238,18 @@ where
         + 'static,
 {
     let last_gen = Arc::new(Mutex::new(HashMap::new()));
-    let raw = metadata_watcher(api, cfg)
-        .modify(strip_meta_managed_fields)
-        .default_backoff();
-    Box::pin(raw.filter_map(move |ev| {
-        let last_gen = Arc::clone(&last_gen);
-        async move {
-            match ev {
-                Ok(e) => map_meta_event(&last_gen, e).map(Ok),
-                Err(e) => Some(Err(e)),
-            }
-        }
-    }))
+    let inner: Pin<
+        Box<dyn Stream<Item = Result<Event<PartialObjectMeta<K>>, watcher::Error>> + Send>,
+    > = Box::pin(
+        metadata_watcher(api, cfg)
+            .modify(strip_meta_managed_fields)
+            .default_backoff(),
+    );
+    Box::pin(MetaWatchDemuxStream {
+        inner,
+        last_gen,
+        coalesce: 0,
+    })
 }
 
 /// Drive a delete-aware watch stream until `token` is cancelled or the handler returns false.
