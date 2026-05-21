@@ -8,10 +8,16 @@ mod template;
 
 use std::collections::HashSet;
 
+use k8s_openapi::api::apps::v1::Deployment;
+use k8s_openapi::api::autoscaling::v2::HorizontalPodAutoscaler;
+use k8s_openapi::api::core::v1::{Service, ServiceAccount};
+use k8s_openapi::api::policy::v1::PodDisruptionBudget;
+use kube::api::DeleteParams;
 use kube::api::PatchParams;
-use kube::Client;
+use kube::{Api, Client};
+use serde::de::DeserializeOwned;
 use thiserror::Error;
-use tracing::{debug, warn};
+use tracing::{debug, info, warn};
 
 use crate::resources::Gateway;
 
@@ -269,6 +275,78 @@ pub async fn reconcile_per_gateway_praxis(
     let pp = PatchParams::apply("ugwc").force();
     template::apply_manifests_dynamic(client, ns, documents, &pp).await?;
 
+    Ok(())
+}
+
+/// Delete per-gateway Praxis workload objects when the owning Gateway is gone.
+///
+/// Ignores `NotFound` on each resource. Resources with Gateway `ownerReferences` may
+/// already be garbage-collected; explicit delete covers races and partial provision.
+pub async fn deprovision_per_gateway_praxis(
+    client: &Client,
+    gateway_namespace: &str,
+    gateway_name: &str,
+) -> Result<(), ProvisionError> {
+    if gateway_namespace.is_empty() || gateway_name.is_empty() {
+        return Ok(());
+    }
+    let dep_name = per_gateway_dataplane_name(gateway_name);
+    let sa_name = service_account_name(&dep_name);
+    let dp = DeleteParams::default();
+
+    async fn delete_ignoring_not_found<T>(
+        api: kube::Api<T>,
+        name: &str,
+        dp: &DeleteParams,
+    ) -> Result<(), ProvisionError>
+    where
+        T: kube::Resource + std::fmt::Debug + Clone + DeserializeOwned + Send + Sync,
+        T::DynamicType: Default,
+    {
+        match api.delete(name, dp).await {
+            Ok(_) => Ok(()),
+            Err(kube::Error::Api(a)) if a.code == 404 => Ok(()),
+            Err(e) => Err(ProvisionError::Kube(e)),
+        }
+    }
+
+    delete_ignoring_not_found(
+        Api::<PodDisruptionBudget>::namespaced(client.clone(), gateway_namespace),
+        &dep_name,
+        &dp,
+    )
+    .await?;
+    delete_ignoring_not_found(
+        Api::<HorizontalPodAutoscaler>::namespaced(client.clone(), gateway_namespace),
+        &dep_name,
+        &dp,
+    )
+    .await?;
+    delete_ignoring_not_found(
+        Api::<Service>::namespaced(client.clone(), gateway_namespace),
+        &dep_name,
+        &dp,
+    )
+    .await?;
+    delete_ignoring_not_found(
+        Api::<Deployment>::namespaced(client.clone(), gateway_namespace),
+        &dep_name,
+        &dp,
+    )
+    .await?;
+    delete_ignoring_not_found(
+        Api::<ServiceAccount>::namespaced(client.clone(), gateway_namespace),
+        &sa_name,
+        &dp,
+    )
+    .await?;
+
+    info!(
+        %gateway_namespace,
+        %gateway_name,
+        %dep_name,
+        "deprovisioned per-gateway praxis dataplane"
+    );
     Ok(())
 }
 

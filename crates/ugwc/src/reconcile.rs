@@ -7,11 +7,12 @@ use std::time::Instant;
 use kube::api::Api;
 use kube::Client;
 use tracing::{instrument, warn, Span};
+use ugwc_core::ir::IrScopeId;
 use ugwc_core::publish::plan_publish;
 use ugwc_core::{
     grpc_route_resolved_refs_row, http_route_resolved_refs_row, tcp_route_resolved_refs_row,
     tls_route_resolved_refs_row, udp_route_resolved_refs_row, CompileInput, CompileOutcome,
-    FailurePolicy, PublishAction, PublishPlan,
+    FailurePolicy, IrSnapshot, PublishAction, PublishPlan,
 };
 use ugwc_k8s::resources::{Gateway, ListenerSet};
 use ugwc_xds::{MultiScopeSnapshot, XdsSnapshotSource};
@@ -47,8 +48,14 @@ pub struct ReconcileCtx {
     )
 )]
 pub async fn reconcile_gateway(ctx: ReconcileCtx, ns: String, name: String) -> Result<(), String> {
-let api: Api<Gateway> = Api::namespaced(ctx.client.clone(), &ns);
-                    let latest = api.get(&name).await.map_err(|e| e.to_string())?;
+    let api: Api<Gateway> = Api::namespaced(ctx.client.clone(), &ns);
+    let latest = match api.get(&name).await {
+        Ok(gw) => gw,
+        Err(kube::Error::Api(a)) if a.code == 404 => {
+            return reconcile_gateway_gone(&ctx, &ns, &name).await;
+        }
+        Err(e) => return Err(e.to_string()),
+    };
     Span::current().record("k8s.resource.generation", latest.metadata.generation);
 
                     let t_load = Instant::now();
@@ -452,6 +459,23 @@ let api: Api<Gateway> = Api::namespaced(ctx.client.clone(), &ns);
 }
 
 #[instrument(name = "compile", skip_all)]
+async fn reconcile_gateway_gone(ctx: &ReconcileCtx, ns: &str, name: &str) -> Result<(), String> {
+    let scope = IrScopeId::new(ns, name);
+    let empty = IrSnapshot::empty_for_scope(scope.clone());
+    if ctx.leader.is_leader() {
+        ctx.cache.store_scoped(empty);
+        let _ = ctx.cache.remove_scoped(&scope);
+        metrics::record_publish_applied();
+    }
+    if ctx.dataplane_enable {
+        if let Err(e) = ugwc_k8s::deprovision_per_gateway_praxis(&ctx.client, ns, name).await {
+            warn!(error = %e, %ns, %name, "dataplane deprovision after gateway delete");
+            metrics::record_dataplane_error();
+        }
+    }
+    Ok(())
+}
+
 fn do_compile(fp: &FailurePolicy, input: &CompileInput) -> Result<CompileOutcome, String> {
     ugwc_core::compile(fp, input).map_err(|e| e.to_string())
 }

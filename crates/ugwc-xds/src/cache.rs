@@ -121,6 +121,19 @@ impl XdsSnapshotSource for MultiScopeSnapshot {
     }
 }
 
+impl MultiScopeSnapshot {
+    /// Remove a per-gateway scope from the cache and notify ADS watchers.
+    #[must_use]
+    pub fn remove_scoped(&self, scope: &IrScopeId) -> bool {
+        let removed = self.by_scope.write().remove(&scope.0).is_some();
+        if removed {
+            let cur = *self.rev_tx.borrow();
+            let _ = self.rev_tx.send(cur.saturating_add(1));
+        }
+        removed
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -148,6 +161,19 @@ mod tests {
         m.store_scoped(IrSnapshot::empty_for_scope(IrScopeId::new("ns", "gw")));
         let r = m.resolve_for_discovery(Some("ns/gw"));
         assert_eq!(r.scope.0, "ns/gw");
+    }
+
+    #[test]
+    fn remove_scoped_drops_entry() {
+        let initial = IrSnapshot::empty_for_scope(IrScopeId::new("default", "a"));
+        let m = MultiScopeSnapshot::new(initial);
+        m.store_scoped(IrSnapshot::empty_for_scope(IrScopeId::new("ns", "gw")));
+        assert_eq!(m.resolve_for_discovery(Some("ns/gw")).scope.0, "ns/gw");
+        assert!(m.remove_scoped(&IrScopeId::new("ns", "gw")));
+        assert_eq!(
+            m.resolve_for_discovery(Some("ns/gw")).scope.0,
+            "ns/gw"
+        );
     }
 
     #[tokio::test]
