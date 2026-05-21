@@ -2,3 +2,6 @@
 .cargo-target/
 .tmp/
 **/*.rs.bk
+crates/metrics-prometheus-client/.cargo-ok
+crates/metrics-prometheus-client/.cargo_vcs_info.json
+crates/metrics-prometheus-client/Cargo.toml.orig

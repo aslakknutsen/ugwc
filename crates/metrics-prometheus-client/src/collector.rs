@@ -8,6 +8,7 @@ use metrics::{Counter, Gauge, Histogram, Key, KeyName, Metadata, Recorder, Share
 use prometheus_client::{
     collector::Collector,
     encoding::{DescriptorEncoder, EncodeMetric},
+    metrics::MetricType,
     registry::Unit as PrometheusUnit,
 };
 
@@ -68,8 +69,12 @@ impl Collector for MetricsCollector {
             let has_labels = !metrics[0].0.is_empty();
 
             // Encode descriptor and metric.
+            let export_name = match metric_type {
+                MetricType::Counter => prometheus_counter_base_name(key_name.as_str()),
+                _ => key_name.as_str(),
+            };
             let mut descriptor_encoder =
-                encoder.encode_descriptor(key_name.as_str(), help, unit, metric_type)?;
+                encoder.encode_descriptor(export_name, help, unit, metric_type)?;
 
             // Encode metrics for this key.
             // If labels are present, encode the metric as a family.

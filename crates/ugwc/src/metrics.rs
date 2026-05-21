@@ -200,6 +200,10 @@ mod tests {
             "missing reconcile counter in:\n{body}"
         );
         assert!(
+            !body.contains("ugwc_reconcile_runs_total_total"),
+            "double _total suffix in:\n{body}"
+        );
+        assert!(
             body.contains("gatewayapi_gateway_status"),
             "missing gateway status gauge in:\n{body}"
         );

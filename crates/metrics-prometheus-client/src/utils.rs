@@ -1,6 +1,11 @@
 use metrics::{Label, Unit};
 use prometheus_client::registry::Unit as PrometheusUnit;
 
+/// Base counter name for [`prometheus_client`] encoding, which appends `_total`.
+pub(crate) fn prometheus_counter_base_name(name: &str) -> &str {
+    name.strip_suffix("_total").unwrap_or(name)
+}
+
 pub(crate) fn convert_labels_to_prometheus(labels: Vec<Label>) -> Vec<(String, String)> {
     labels
         .into_iter()
@@ -28,5 +33,22 @@ pub(crate) fn convert_unit_to_prometheus(unit: Unit) -> PrometheusUnit {
         Unit::KilobitsPerSecond => PrometheusUnit::Other("kilobits per second".to_string()),
         Unit::BitsPerSecond => PrometheusUnit::Other("bits per second".to_string()),
         Unit::CountPerSecond => PrometheusUnit::Other("count per second".to_string()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::prometheus_counter_base_name;
+
+    #[test]
+    fn counter_base_name_strips_redundant_total_suffix() {
+        assert_eq!(
+            prometheus_counter_base_name("ugwc_reconcile_runs_total"),
+            "ugwc_reconcile_runs"
+        );
+        assert_eq!(
+            prometheus_counter_base_name("ugwc_reconcile_runs"),
+            "ugwc_reconcile_runs"
+        );
     }
 }
