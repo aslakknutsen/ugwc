@@ -114,14 +114,11 @@ where
     }
 }
 
-/// Max inner events to process in one `poll_next` before yielding (avoids busy-loop on resync).
-const MAX_COALESCE_PER_POLL: u32 = 64;
-
-/// Poll inner watch events, map to [`WatchItem`], and yield when filtering bursts of duplicates.
+/// Poll inner watch events, map to [`WatchItem`]; loops over filtered-out events until one
+/// maps to a value or the inner stream returns Pending/None.
 fn demux_poll<T, Map>(
     mut inner: Pin<&mut (dyn Stream<Item = Result<Event<T>, watcher::Error>> + Send)>,
     last_gen: &Arc<Mutex<HashMap<(String, String), u64>>>,
-    coalesce: &mut u32,
     cx: &mut Context<'_>,
     map: Map,
 ) -> Poll<Option<Result<WatchItem<T>, watcher::Error>>>
@@ -129,17 +126,11 @@ where
     Map: Fn(&Arc<Mutex<HashMap<(String, String), u64>>>, Event<T>) -> Option<WatchItem<T>>,
 {
     loop {
-        if *coalesce >= MAX_COALESCE_PER_POLL {
-            *coalesce = 0;
-            cx.waker().wake_by_ref();
-            return Poll::Pending;
-        }
         match inner.as_mut().poll_next(cx) {
             Poll::Ready(Some(Ok(ev))) => {
                 if let Some(item) = map(last_gen, ev) {
                     return Poll::Ready(Some(Ok(item)));
                 }
-                *coalesce += 1;
             }
             Poll::Ready(Some(Err(e))) => return Poll::Ready(Some(Err(e))),
             Poll::Ready(None) => return Poll::Ready(None),
@@ -151,7 +142,6 @@ where
 struct WatchDemuxStream<T> {
     inner: Pin<Box<dyn Stream<Item = Result<Event<T>, watcher::Error>> + Send>>,
     last_gen: Arc<Mutex<HashMap<(String, String), u64>>>,
-    coalesce: u32,
 }
 
 impl<K> Stream for WatchDemuxStream<K>
@@ -165,7 +155,6 @@ where
         demux_poll(
             this.inner.as_mut(),
             &this.last_gen,
-            &mut this.coalesce,
             cx,
             map_event::<K>,
         )
@@ -175,7 +164,6 @@ where
 struct MetaWatchDemuxStream<K> {
     inner: Pin<Box<dyn Stream<Item = Result<Event<PartialObjectMeta<K>>, watcher::Error>> + Send>>,
     last_gen: Arc<Mutex<HashMap<(String, String), u64>>>,
-    coalesce: u32,
 }
 
 impl<K> Stream for MetaWatchDemuxStream<K>
@@ -189,7 +177,6 @@ where
         demux_poll(
             this.inner.as_mut(),
             &this.last_gen,
-            &mut this.coalesce,
             cx,
             map_meta_event::<K>,
         )
@@ -219,7 +206,6 @@ where
     Box::pin(WatchDemuxStream {
         inner,
         last_gen,
-        coalesce: 0,
     })
 }
 
@@ -248,7 +234,6 @@ where
     Box::pin(MetaWatchDemuxStream {
         inner,
         last_gen,
-        coalesce: 0,
     })
 }
 

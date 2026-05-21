@@ -12,6 +12,7 @@ pub fn spawn() {
                 .set(m.total_busy_duration.as_secs_f64());
             metrics::gauge!("ugwc_tokio_total_polls_count").set(m.total_polls_count as f64);
             metrics::gauge!("ugwc_tokio_total_noop_count").set(m.total_noop_count as f64);
+            tokio::time::sleep(std::time::Duration::from_secs(5)).await;
         }
     });
 }
