@@ -17,12 +17,15 @@ ugwc exposes Prometheus metrics on the admin HTTP server. Gateway API **resource
 | Metric | Type | Labels |
 |--------|------|--------|
 | `ugwc_workqueue_depth` | Gauge | `queue_name` |
+| `ugwc_workqueue_in_flight` | Gauge | `queue_name` (reconciles currently processing) |
 | `ugwc_workqueue_adds_total` | Counter | `queue_name` |
 | `ugwc_workqueue_dedup_total` | Counter | `queue_name` (enqueue skipped — key already pending) |
 | `ugwc_workqueue_queue_duration_seconds` | Histogram | `queue_name` |
 | `ugwc_workqueue_unfinished_work_seconds` | Gauge | `queue_name` (sum of in-flight reconcile ages) |
 | `ugwc_workqueue_longest_running_processor_seconds` | Gauge | `queue_name` |
 | `ugwc_workqueue_retries_total` | Counter | `queue_name` |
+| `ugwc_index_fanout_size` | Histogram | `event_kind` (`endpointslice`, `secret`, `configmap`) |
+| `ugwc_index_gateways_indexed` | Gauge | — (gateways in reverse index) |
 | `ugwc_reconcile_duration_seconds` | Histogram | `controller_name` |
 | `ugwc_reconcile_runs_total` | Counter | `controller_name`, `status` |
 | `ugwc_rest_client_request_duration_seconds` | Histogram | `verb`, `resource`, `code` |

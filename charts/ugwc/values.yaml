@@ -33,6 +33,7 @@ ugwc:
   # (Deployments, Services, ServiceAccounts). Enable only when using per-gateway Praxis mode.
   dataplaneEnable: false
   endpointDebounceMs: 200
+  reconcileConcurrency: 16
   # If empty, the chart sets bootstrap to <fullname>.<namespace>.svc.cluster.local:<xds port>.
   controlPlaneXdsBootstrapAddr: ""
   # Optional OTLP endpoint (metrics/traces when built with otlp features).

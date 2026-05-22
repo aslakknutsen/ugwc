@@ -10,6 +10,8 @@ pub mod kube_metrics;
 pub mod reconcile_queue;
 mod watch_enqueue;
 mod watch_helpers;
+mod watch_helpers_store;
+mod gateway_index;
 pub mod stores;
 
 pub mod controller;
@@ -20,6 +22,9 @@ pub mod resources;
 pub mod status;
 
 pub use controller::{build_shared_stores, run_gateway_controller, AlwaysOnWriters, ReconcileFn};
+pub use gateway_index::{
+    refs_from_snapshot, GatewayIndex, GatewayIndexMetrics, GatewayRefs, IndexEventKindLabels,
+};
 pub use reconcile_queue::{
     new_reconcile_queue, record_workqueue_retry, ReconcileQueue, ReconcileQueueMetrics,
     ReconcileSender, WorkqueueMetrics, GATEWAY_RECONCILE_QUEUE,

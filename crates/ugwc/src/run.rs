@@ -144,6 +144,7 @@ pub async fn run(cfg: Config) -> Result<(), Box<dyn std::error::Error + Send + S
             .unwrap_or_default();
         let xds_insecure = cfg.xds_insecure;
         let xds_wire = cfg.xds_wire.clone();
+        let reconcile_concurrency = cfg.reconcile_concurrency;
         let status_cache: std::sync::Arc<
             std::sync::Mutex<std::collections::HashMap<String, String>>,
         > = std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new()));
@@ -159,6 +160,8 @@ pub async fn run(cfg: Config) -> Result<(), Box<dyn std::error::Error + Send + S
             Readiness::on_cache_synced_callback(readiness.clone()),
         )));
         let (shared_stores, always_on_writers) = ugwc_k8s::build_shared_stores();
+        let gateway_index = Arc::new(ugwc_k8s::GatewayIndex::new(m.index.clone()));
+        let gateway_index_ctrl = gateway_index.clone();
         let reconcile_tx_shutdown = reconcile_tx.clone();
         let kube_task = ugwc_k8s::spawn_with_trace_context(async move {
             let stores_rfn = shared_stores.clone();
@@ -179,6 +182,7 @@ pub async fn run(cfg: Config) -> Result<(), Box<dyn std::error::Error + Send + S
                 let gateway_events = gateway_events.clone();
                 let gateway_state_metrics = gateway_state_metrics.clone();
                 let stores = stores_rfn.clone();
+                let gateway_index = gateway_index.clone();
                 Box::pin(async move {
                     let reconcile_started = Instant::now();
                     let outcome = crate::reconcile::reconcile_gateway(
@@ -198,6 +202,7 @@ pub async fn run(cfg: Config) -> Result<(), Box<dyn std::error::Error + Send + S
                             events: Some(gateway_events.clone()),
                             gateway_state_metrics,
                             stores,
+                            gateway_index,
                         },
                         ns,
                         name,
@@ -218,11 +223,13 @@ pub async fn run(cfg: Config) -> Result<(), Box<dyn std::error::Error + Send + S
                 reconcile_tx,
                 work_queue,
                 rfn,
+                reconcile_concurrency,
                 controller_names.clone(),
                 active_crds,
                 Some(sync_gate),
                 shared_stores,
                 always_on_writers,
+                gateway_index_ctrl,
             )
             .await;
         });

@@ -27,6 +27,9 @@ fn default_endpoint_debounce_ms() -> u64 {
 fn default_xds_wire() -> String {
     "gwxds".into()
 }
+fn default_reconcile_concurrency() -> usize {
+    16
+}
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct Config {
@@ -54,6 +57,9 @@ pub struct Config {
     /// Coalesce `EndpointSlice` churn before reconciling all Gateways cluster-wide.
     #[serde(default = "default_endpoint_debounce_ms")]
     pub endpoint_debounce_ms: u64,
+    /// Concurrent gateway reconcile workers (dedup queue consumers).
+    #[serde(default = "default_reconcile_concurrency")]
+    pub reconcile_concurrency: usize,
     /// xDS wire profile for ADS responses: `gwxds` (Praxis) or `envoy` (RDS-only slice).
     #[serde(default = "default_xds_wire")]
     pub xds_wire: String,
@@ -97,6 +103,10 @@ pub enum ConfigError {
     BootstrapAddrRequired,
     #[error("per_gateway_praxis profile requires non-empty proxy_image for controller {0:?}")]
     ProxyImageRequired(String),
+    #[error("UGWC_RECONCILE_CONCURRENCY must be >= 1")]
+    ReconcileConcurrencyZero,
+    #[error("UGWC_RECONCILE_CONCURRENCY must be <= 128")]
+    ReconcileConcurrencyTooHigh,
 }
 
 impl Config {
@@ -178,6 +188,12 @@ impl Config {
         if has_cert != has_key {
             return Err(ConfigError::TlsMismatch);
         }
+        if self.reconcile_concurrency == 0 {
+            return Err(ConfigError::ReconcileConcurrencyZero);
+        }
+        if self.reconcile_concurrency > 128 {
+            return Err(ConfigError::ReconcileConcurrencyTooHigh);
+        }
         Ok(())
     }
 
@@ -195,7 +211,7 @@ impl Config {
     #[must_use]
     pub fn log_summary(&self) -> String {
         format!(
-            "admin={} xds={} kube={} kube_watch=cluster insecure={} delta={} profile={} leader={} debounce_ms={} xds_wire={} controllers={:?} dataplane={} profiles={}",
+            "admin={} xds={} kube={} kube_watch=cluster insecure={} delta={} profile={} leader={} debounce_ms={} reconcile_workers={} xds_wire={} controllers={:?} dataplane={} profiles={}",
             self.admin_listen_addr,
             self.xds_listen_addr,
             self.kube_enable,
@@ -204,6 +220,7 @@ impl Config {
             self.run_profile,
             self.leader_election,
             self.endpoint_debounce_ms,
+            self.reconcile_concurrency,
             self.xds_wire,
             self.controller_name_list(),
             self.dataplane_enable,
@@ -230,6 +247,18 @@ mod tests {
         assert!(matches!(c.validate(), Err(ConfigError::EmptyControllers)));
     }
 
+    #[test]
+    fn rejects_zero_reconcile_concurrency() {
+        let c = Config {
+            reconcile_concurrency: 0,
+            ..sample()
+        };
+        assert!(matches!(
+            c.validate(),
+            Err(ConfigError::ReconcileConcurrencyZero)
+        ));
+    }
+
     fn sample() -> Config {
         Config {
             admin_listen_addr: default_admin(),
@@ -245,6 +274,7 @@ mod tests {
             run_profile: default_profile(),
             leader_election: false,
             endpoint_debounce_ms: default_endpoint_debounce_ms(),
+            reconcile_concurrency: default_reconcile_concurrency(),
             xds_wire: default_xds_wire(),
             implementation_profiles_path: None,
             dataplane_enable: false,

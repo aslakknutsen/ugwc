@@ -156,6 +156,16 @@ impl HttpBackendRefSnap {
         let g = self.group.as_deref().unwrap_or("");
         g.is_empty() || g == "inference.networking.k8s.io"
     }
+
+    /// Core `Service` backend (default kind/group), excluding `InferencePool`.
+    #[must_use]
+    pub fn is_core_service(&self) -> bool {
+        if self.is_inference_pool() {
+            return false;
+        }
+        self.kind.as_deref().unwrap_or("Service") == "Service"
+            && self.group.as_deref().unwrap_or("").is_empty()
+    }
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
@@ -765,5 +775,134 @@ impl ClusterSnapshot {
         out.sort();
         out.dedup();
         out
+    }
+
+    /// Distinct `(namespace, name)` pairs for `Service` backends on routes in this snapshot,
+    /// plus any resolved `Service` rows loaded into [`Self::services`].
+    #[must_use]
+    pub fn referenced_services(&self) -> Vec<(String, String)> {
+        let mut out: Vec<(String, String)> = Vec::new();
+        for r in &self.http_routes {
+            for rule in &r.rules {
+                for br in &rule.backend_refs {
+                    if br.is_core_service() {
+                        let sns = br
+                            .namespace
+                            .as_deref()
+                            .unwrap_or(r.namespace.as_str())
+                            .to_string();
+                        out.push((sns, br.name.clone()));
+                    }
+                }
+            }
+        }
+        for r in &self.grpc_routes {
+            for rule in &r.rules {
+                for br in &rule.backend_refs {
+                    if br.is_core_service() {
+                        let sns = br
+                            .namespace
+                            .as_deref()
+                            .unwrap_or(r.namespace.as_str())
+                            .to_string();
+                        out.push((sns, br.name.clone()));
+                    }
+                }
+            }
+        }
+        for r in &self.tls_routes {
+            for rule in &r.rules {
+                for br in &rule.backend_refs {
+                    if br.is_core_service() {
+                        let sns = br
+                            .namespace
+                            .as_deref()
+                            .unwrap_or(r.namespace.as_str())
+                            .to_string();
+                        out.push((sns, br.name.clone()));
+                    }
+                }
+            }
+        }
+        for r in &self.tcp_routes {
+            for rule in &r.rules {
+                for br in &rule.backend_refs {
+                    if br.is_core_service() {
+                        let sns = br
+                            .namespace
+                            .as_deref()
+                            .unwrap_or(r.namespace.as_str())
+                            .to_string();
+                        out.push((sns, br.name.clone()));
+                    }
+                }
+            }
+        }
+        for r in &self.udp_routes {
+            for rule in &r.rules {
+                for br in &rule.backend_refs {
+                    if br.is_core_service() {
+                        let sns = br
+                            .namespace
+                            .as_deref()
+                            .unwrap_or(r.namespace.as_str())
+                            .to_string();
+                        out.push((sns, br.name.clone()));
+                    }
+                }
+            }
+        }
+        for s in &self.services {
+            out.push((s.namespace.clone(), s.name.clone()));
+        }
+        out.sort();
+        out.dedup();
+        out
+    }
+
+    /// TLS `certificateRefs` on inline listeners, effective listeners, and attached ListenerSets.
+    #[must_use]
+    pub fn referenced_tls_secrets(&self, gateway_ns: &str) -> Vec<(String, String)> {
+        let mut out: Vec<(String, String)> = Vec::new();
+        Self::collect_listener_tls_secrets(gateway_ns, &self.listeners, &mut out);
+        Self::collect_effective_listener_tls_secrets(gateway_ns, &self.effective_listeners, &mut out);
+        for ls in &self.listener_sets {
+            Self::collect_listener_tls_secrets(&ls.namespace, &ls.listeners, &mut out);
+        }
+        out.sort();
+        out.dedup();
+        out
+    }
+
+    fn collect_listener_tls_secrets(
+        default_ns: &str,
+        listeners: &[GatewayListenerSnap],
+        out: &mut Vec<(String, String)>,
+    ) {
+        for l in listeners {
+            let Some(ref tls) = l.tls else {
+                continue;
+            };
+            for r in &tls.certificate_refs {
+                let ns = r.namespace.as_deref().unwrap_or(default_ns);
+                out.push((ns.to_string(), r.name.clone()));
+            }
+        }
+    }
+
+    fn collect_effective_listener_tls_secrets(
+        default_ns: &str,
+        listeners: &[EffectiveListenerSnap],
+        out: &mut Vec<(String, String)>,
+    ) {
+        for l in listeners {
+            let Some(ref tls) = l.tls else {
+                continue;
+            };
+            for r in &tls.certificate_refs {
+                let ns = r.namespace.as_deref().unwrap_or(default_ns);
+                out.push((ns.to_string(), r.name.clone()));
+            }
+        }
     }
 }

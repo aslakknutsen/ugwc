@@ -30,6 +30,7 @@ pub struct WorkqueueMetrics {
     pub retries: Family<QueueNameLabels, Counter>,
     pub dedup: Family<QueueNameLabels, Counter>,
     pub depth: Family<QueueNameLabels, Gauge>,
+    pub in_flight: Family<QueueNameLabels, Gauge>,
     pub longest_running_processor_seconds: Family<QueueNameLabels, Gauge>,
     pub unfinished_work_seconds: Family<QueueNameLabels, Gauge>,
     pub queue_duration_seconds: Family<QueueNameLabels, Histogram>,
@@ -44,6 +45,7 @@ impl WorkqueueMetrics {
             retries: Family::default(),
             dedup: Family::default(),
             depth: Family::default(),
+            in_flight: Family::default(),
             longest_running_processor_seconds: Family::default(),
             unfinished_work_seconds: Family::default(),
             queue_duration_seconds: Family::new_with_constructor(|| {
@@ -247,7 +249,7 @@ fn sync_depth(stats: &QueueStats, inner: &DedupInner) {
 struct QueueStats {
     depth: AtomicUsize,
     in_flight: AtomicUsize,
-    longest_running_secs: AtomicU64,
+    longest_running_millis: AtomicU64,
     in_flight_started: Mutex<Vec<Instant>>,
 }
 
@@ -256,7 +258,7 @@ impl QueueStats {
         Self {
             depth: AtomicUsize::new(0),
             in_flight: AtomicUsize::new(0),
-            longest_running_secs: AtomicU64::new(0),
+            longest_running_millis: AtomicU64::new(0),
             in_flight_started: Mutex::new(Vec::new()),
         }
     }
@@ -280,9 +282,14 @@ impl QueueStats {
             .get_or_create(&labels)
             .set(self.depth.load(Ordering::Relaxed) as i64);
         wq_metrics
+            .in_flight
+            .get_or_create(&labels)
+            .set(self.in_flight.load(Ordering::Relaxed) as i64);
+        let longest_ms = self.longest_running_millis.load(Ordering::Relaxed);
+        wq_metrics
             .longest_running_processor_seconds
             .get_or_create(&labels)
-            .set(self.longest_running_secs.load(Ordering::Relaxed) as i64);
+            .set(((longest_ms + 999) / 1000) as i64);
         wq_metrics
             .unfinished_work_seconds
             .get_or_create(&labels)
@@ -365,24 +372,41 @@ impl ReconcileQueueMetrics {
     }
 
     fn end_processing(&self, started: Instant) {
-        let elapsed = started.elapsed().as_secs();
+        let elapsed_ms = started.elapsed().as_millis() as u64;
         self.stats.in_flight.fetch_sub(1, Ordering::Relaxed);
         if let Ok(mut v) = self.stats.in_flight_started.lock() {
             if let Some(pos) = v.iter().position(|t| *t == started) {
                 v.remove(pos);
             }
         }
-        let prev_longest = self.stats.longest_running_secs.load(Ordering::Relaxed);
-        if elapsed > prev_longest {
-            self.stats
-                .longest_running_secs
-                .store(elapsed, Ordering::Relaxed);
+        loop {
+            let prev = self
+                .stats
+                .longest_running_millis
+                .load(Ordering::Relaxed);
+            if elapsed_ms <= prev {
+                break;
+            }
+            if self
+                .stats
+                .longest_running_millis
+                .compare_exchange_weak(
+                    prev,
+                    elapsed_ms,
+                    Ordering::Relaxed,
+                    Ordering::Relaxed,
+                )
+                .is_ok()
+            {
+                break;
+            }
         }
         self.stats.publish_gauges(&self.wq_metrics, GATEWAY_RECONCILE_QUEUE);
     }
 }
 
 /// Consumes reconcile keys from the workqueue.
+#[derive(Clone)]
 pub struct ReconcileQueue {
     queue: Arc<DedupQueue>,
     metrics: ReconcileQueueMetrics,
@@ -417,7 +441,7 @@ pub fn new_reconcile_queue(
 }
 
 impl ReconcileQueue {
-    pub async fn recv(&mut self) -> Option<(String, String)> {
+    pub async fn recv(&self) -> Option<(String, String)> {
         let (ns, name, enqueued_at) =
             self.queue
                 .dequeue(&self.metrics.stats, &self.metrics.wq_metrics)
@@ -486,7 +510,7 @@ mod tests {
     #[tokio::test]
     async fn depth_tracks_send_and_recv() {
         let wq = WorkqueueMetrics::noop();
-        let (tx, mut queue, metrics) = new_reconcile_queue(8, wq);
+        let (tx, queue, metrics) = new_reconcile_queue(8, wq);
         assert_eq!(metrics.in_flight(), 0);
         tx.send("ns".into(), "gw".into()).await.unwrap();
         assert_eq!(
@@ -505,7 +529,7 @@ mod tests {
     #[tokio::test]
     async fn pending_dedup_collapses_duplicate_sends() {
         let wq = WorkqueueMetrics::noop();
-        let (tx, mut queue, _metrics) = new_reconcile_queue(8, wq.clone());
+        let (tx, queue, _metrics) = new_reconcile_queue(8, wq.clone());
         tx.send("ns".into(), "gw".into()).await.unwrap();
         tx.send("ns".into(), "gw".into()).await.unwrap();
         tx.send("ns".into(), "gw".into()).await.unwrap();
@@ -528,7 +552,7 @@ mod tests {
     #[tokio::test]
     async fn dirty_while_in_flight_requeues_once() {
         let wq = WorkqueueMetrics::noop();
-        let (tx, mut queue, _metrics) = new_reconcile_queue(8, wq);
+        let (tx, queue, _metrics) = new_reconcile_queue(8, wq);
         tx.send("ns".into(), "gw".into()).await.unwrap();
         assert_eq!(queue.recv().await, Some(("ns".into(), "gw".into())));
         tx.send("ns".into(), "gw".into()).await.unwrap();
@@ -546,7 +570,7 @@ mod tests {
     #[tokio::test]
     async fn dirty_coalesces_multiple_sends_while_in_flight() {
         let wq = WorkqueueMetrics::noop();
-        let (tx, mut queue, _metrics) = new_reconcile_queue(8, wq);
+        let (tx, queue, _metrics) = new_reconcile_queue(8, wq);
         tx.send("a".into(), "1".into()).await.unwrap();
         assert_eq!(queue.recv().await, Some(("a".into(), "1".into())));
         for _ in 0..5 {
@@ -562,7 +586,7 @@ mod tests {
     #[tokio::test]
     async fn fifo_ordering_across_keys() {
         let wq = WorkqueueMetrics::noop();
-        let (tx, mut queue, _metrics) = new_reconcile_queue(8, wq);
+        let (tx, queue, _metrics) = new_reconcile_queue(8, wq);
         tx.send("ns".into(), "a".into()).await.unwrap();
         tx.send("ns".into(), "b".into()).await.unwrap();
         tx.send("ns".into(), "a".into()).await.unwrap();
@@ -575,7 +599,7 @@ mod tests {
     #[tokio::test]
     async fn in_flight_key_does_not_increment_depth() {
         let wq = WorkqueueMetrics::noop();
-        let (tx, mut queue, _metrics) = new_reconcile_queue(8, wq);
+        let (tx, queue, _metrics) = new_reconcile_queue(8, wq);
         tx.send("ns".into(), "gw".into()).await.unwrap();
         assert_eq!(queue.recv().await, Some(("ns".into(), "gw".into())));
         assert_eq!(
@@ -606,7 +630,7 @@ mod tests {
     #[tokio::test]
     async fn close_drains_pending_then_returns_none() {
         let wq = WorkqueueMetrics::noop();
-        let (tx, mut queue, _metrics) = new_reconcile_queue(8, wq);
+        let (tx, queue, _metrics) = new_reconcile_queue(8, wq);
         tx.send("ns".into(), "gw".into()).await.unwrap();
         tx.close();
         assert!(tx.send("ns".into(), "other".into()).await.is_err());
@@ -618,7 +642,7 @@ mod tests {
     #[tokio::test]
     async fn close_drops_dirty_reenqueue() {
         let wq = WorkqueueMetrics::noop();
-        let (tx, mut queue, _metrics) = new_reconcile_queue(8, wq);
+        let (tx, queue, _metrics) = new_reconcile_queue(8, wq);
         tx.send("ns".into(), "gw".into()).await.unwrap();
         assert_eq!(queue.recv().await, Some(("ns".into(), "gw".into())));
         tx.send("ns".into(), "gw".into()).await.unwrap();
@@ -630,7 +654,7 @@ mod tests {
     #[tokio::test]
     async fn capacity_backpressure_unblocks_after_dequeue_and_done() {
         let wq = WorkqueueMetrics::noop();
-        let (tx, mut queue, _metrics) = new_reconcile_queue(2, wq);
+        let (tx, queue, _metrics) = new_reconcile_queue(2, wq);
         tx.send("ns".into(), "a".into()).await.unwrap();
         tx.send("ns".into(), "b".into()).await.unwrap();
         let tx_bg = tx.clone();
@@ -677,5 +701,78 @@ mod tests {
         let (tx, _queue, _metrics) = new_reconcile_queue(8, wq);
         tx.close();
         assert!(tx.send("ns".into(), "gw".into()).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn concurrent_dequeue_processes_distinct_keys() {
+        let wq = WorkqueueMetrics::noop();
+        let (tx, queue, metrics) = new_reconcile_queue(8, wq);
+        for i in 0..4 {
+            tx.send("ns".into(), format!("gw-{i}")).await.unwrap();
+        }
+
+        let mut handles = Vec::new();
+        for _ in 0..4 {
+            let q = queue.clone();
+            handles.push(tokio::spawn(async move {
+                let pair = q.recv().await;
+                let Some((ns, name)) = pair else {
+                    return None;
+                };
+                Some((ns, name))
+            }));
+        }
+
+        let mut keys = Vec::new();
+        let mut started = Vec::new();
+        for h in handles {
+            if let Ok(Some(k)) = h.await {
+                keys.push(k);
+            }
+        }
+        assert_eq!(keys.len(), 4, "each worker should dequeue one key");
+        for _ in &keys {
+            started.push(queue.begin_reconcile());
+        }
+        assert_eq!(metrics.in_flight(), 4);
+        for (i, (_, name)) in keys.iter().enumerate() {
+            queue.end_reconcile(started[i]);
+            queue.done("ns", name);
+        }
+        assert_eq!(metrics.in_flight(), 0);
+        tx.close();
+        assert!(queue.recv().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn concurrent_dequeue_same_key_not_doubled() {
+        let wq = WorkqueueMetrics::noop();
+        let (tx, queue, _metrics) = new_reconcile_queue(8, wq);
+        tx.send("ns".into(), "gw".into()).await.unwrap();
+
+        let q1 = queue.clone();
+        let q2 = queue.clone();
+        let first = tokio::spawn(async move { q1.recv().await });
+        tokio::task::yield_now().await;
+        let second = tokio::spawn(async move { q2.recv().await });
+
+        let k1 = first.await.unwrap();
+        assert_eq!(k1, Some(("ns".into(), "gw".into())));
+        let started = queue.begin_reconcile();
+
+        let blocked = tokio::time::timeout(
+            std::time::Duration::from_millis(50),
+            second,
+        )
+        .await;
+        assert!(
+            blocked.is_err(),
+            "second worker must block until key is done"
+        );
+
+        queue.end_reconcile(started);
+        queue.done("ns", "gw");
+        tx.close();
+        assert!(queue.recv().await.is_none());
     }
 }

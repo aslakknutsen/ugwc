@@ -1,8 +1,7 @@
 //! Gateway API state gauges (`gatewayapi_*`) from reconciled cluster snapshots.
 //!
-//! Uses `prometheus-client` `Family` types directly with clear-and-rebuild:
-//! each reconcile clears all series for the gateway scope and re-emits only
-//! what is currently present, preventing stale series from leaking memory.
+//! Each reconcile updates only the Prometheus series for the gateway being
+//! reconciled, so concurrent workers do not clobber each other's metrics.
 
 use prometheus_client::encoding::EncodeLabelSet;
 use prometheus_client::metrics::family::Family;
@@ -152,19 +151,9 @@ impl GatewayStateMetrics {
         }
     }
 
-    /// Clear all series and re-emit from the current snapshot.
-    /// This prevents stale series from accumulating when routes/gateways are deleted.
+    /// Update metrics for one gateway reconcile; only touches this gateway's label set.
     pub fn record_from_reconcile(&self, snap: &ClusterSnapshot, programmed_ok: bool) {
-        // Clear high-cardinality families before rebuilding.
-        self.gateway_status.clear();
-        self.httproute_attached.clear();
-        self.grpcroute_attached.clear();
-        self.tlsroute_attached.clear();
-        self.tcproute_attached.clear();
-        self.udproute_attached.clear();
-        self.route_rules.clear();
-        self.referencegrant_status.clear();
-        self.inferencepool_status.clear();
+        self.clear_gateway_scope(snap);
 
         self.gateway_created
             .get_or_create(&GatewayLabels {
@@ -266,8 +255,48 @@ impl GatewayStateMetrics {
         }
     }
 
-    /// Remove all series for a deleted gateway.
+    /// Remove all series for a deleted gateway (gateway-level labels only).
     pub fn clear_gateway(&self, ns: &str, name: &str) {
+        self.remove_gateway_labels(ns, name);
+    }
+
+    /// Remove series for one gateway's current snapshot scope before re-emitting.
+    fn clear_gateway_scope(&self, snap: &ClusterSnapshot) {
+        self.remove_gateway_labels(&snap.gateway_namespace, &snap.gateway_name);
+
+        for r in &snap.http_routes {
+            self.remove_route_labels("HTTPRoute", &r.namespace, &r.name);
+        }
+        for r in &snap.grpc_routes {
+            self.remove_route_labels("GRPCRoute", &r.namespace, &r.name);
+        }
+        for r in &snap.tls_routes {
+            self.remove_route_labels("TLSRoute", &r.namespace, &r.name);
+        }
+        for r in &snap.tcp_routes {
+            self.remove_route_labels("TCPRoute", &r.namespace, &r.name);
+        }
+        for r in &snap.udp_routes {
+            self.remove_route_labels("UDPRoute", &r.namespace, &r.name);
+        }
+        for g in &snap.reference_grants {
+            self.referencegrant_status.remove(&RefGrantLabels {
+                namespace: g.namespace.clone(),
+                name: g.name.clone(),
+                validated: "present".to_string(),
+                source: SOURCE.to_string(),
+            });
+        }
+        for pool in &snap.inference_pools {
+            self.inferencepool_status.remove(&GatewayLabels {
+                namespace: pool.namespace.clone(),
+                name: pool.name.clone(),
+                source: SOURCE.to_string(),
+            });
+        }
+    }
+
+    fn remove_gateway_labels(&self, ns: &str, name: &str) {
         self.gateway_created.remove(&GatewayLabels {
             namespace: ns.to_string(),
             name: name.to_string(),
@@ -283,6 +312,28 @@ impl GatewayStateMetrics {
             namespace: ns.to_string(),
             name: name.to_string(),
             status: "NotProgrammed".to_string(),
+            source: SOURCE.to_string(),
+        });
+    }
+
+    fn remove_route_labels(&self, kind: &str, route_ns: &str, route_name: &str) {
+        let labels = RouteLabels {
+            namespace: route_ns.to_string(),
+            name: route_name.to_string(),
+            source: SOURCE.to_string(),
+        };
+        match kind {
+            "HTTPRoute" => self.httproute_attached.remove(&labels),
+            "GRPCRoute" => self.grpcroute_attached.remove(&labels),
+            "TLSRoute" => self.tlsroute_attached.remove(&labels),
+            "TCPRoute" => self.tcproute_attached.remove(&labels),
+            "UDPRoute" => self.udproute_attached.remove(&labels),
+            _ => self.httproute_attached.remove(&labels),
+        };
+        self.route_rules.remove(&RouteRulesLabels {
+            namespace: route_ns.to_string(),
+            name: route_name.to_string(),
+            kind: kind.to_string(),
             source: SOURCE.to_string(),
         });
     }
@@ -342,4 +393,40 @@ fn parent_attaches_to_gateway(
     }
     let pns = parent.namespace.as_deref().unwrap_or(route_ns);
     pns == gw_ns && parent.name == gw_name
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ugwc_core::snapshot::ClusterSnapshot;
+
+    fn snap_for_gateway(ns: &str, name: &str) -> ClusterSnapshot {
+        ClusterSnapshot {
+            gateway_namespace: ns.into(),
+            gateway_name: name.into(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn concurrent_gateways_keep_distinct_series() {
+        let mut registry = Registry::default();
+        let metrics = GatewayStateMetrics::register(&mut registry);
+
+        metrics.record_from_reconcile(&snap_for_gateway("ns-a", "gw-a"), true);
+        metrics.record_from_reconcile(&snap_for_gateway("ns-b", "gw-b"), true);
+
+        let a = metrics.gateway_created.get_or_create(&GatewayLabels {
+            namespace: "ns-a".into(),
+            name: "gw-a".into(),
+            source: SOURCE.to_string(),
+        });
+        let b = metrics.gateway_created.get_or_create(&GatewayLabels {
+            namespace: "ns-b".into(),
+            name: "gw-b".into(),
+            source: SOURCE.to_string(),
+        });
+        assert_eq!(a.get(), 1);
+        assert_eq!(b.get(), 1);
+    }
 }

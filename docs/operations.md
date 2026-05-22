@@ -18,6 +18,7 @@ All settings are prefixed `UGWC_` and parsed at startup via `envy`.
 | `UGWC_RUN_PROFILE` | `dev` | `dev` or `prod` — prod rejects insecure xDS |
 | `UGWC_LEADER_ELECTION` | `false` | Lease-based leader election for HA replicas |
 | `UGWC_ENDPOINT_DEBOUNCE_MS` | `200` | Coalesce EndpointSlice churn before reconciling |
+| `UGWC_RECONCILE_CONCURRENCY` | `16` | Concurrent gateway reconcile workers |
 | `UGWC_XDS_WIRE` | `gwxds` | Wire profile: `gwxds` (Praxis) or `envoy` |
 | `UGWC_DATAPLANE_ENABLE` | `false` | Create per-gateway Praxis workloads |
 | `UGWC_CONTROL_PLANE_XDS_BOOTSTRAP_ADDR` | — | Praxis ISTIOD_ADDR bootstrap (`host:port` or URI) |

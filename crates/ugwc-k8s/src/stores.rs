@@ -281,4 +281,8 @@ impl SharedStores {
     pub fn get_inference_pool(&self, ns: &str, name: &str) -> Option<Arc<InferencePool>> {
         Self::crd_get(&self.inference_pools, ns, name)
     }
+
+    pub fn get_backend_tls_policy(&self, ns: &str, name: &str) -> Option<Arc<BackendTLSPolicy>> {
+        Self::crd_get(&self.backend_tls_policies, ns, name)
+    }
 }

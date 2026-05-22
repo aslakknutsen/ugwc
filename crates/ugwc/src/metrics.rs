@@ -134,6 +134,7 @@ pub struct Metrics {
     pub xds: XdsMetrics,
     pub tokio: TokioMetrics,
     pub gateway_state: crate::gateway_state_metrics::GatewayStateMetrics,
+    pub index: ugwc_k8s::GatewayIndexMetrics,
 }
 
 // ---------------------------------------------------------------------------
@@ -271,6 +272,13 @@ pub fn install() -> Result<Metrics, String> {
 
     let wq_depth = Family::<QueueNameLabels, Gauge>::default();
     registry.register("ugwc_workqueue_depth", "Workqueue depth", wq_depth.clone());
+
+    let wq_in_flight = Family::<QueueNameLabels, Gauge>::default();
+    registry.register(
+        "ugwc_workqueue_in_flight",
+        "Reconcile keys currently being processed",
+        wq_in_flight.clone(),
+    );
 
     let wq_longest = Family::<QueueNameLabels, Gauge>::default();
     registry.register(
@@ -434,6 +442,26 @@ pub fn install() -> Result<Metrics, String> {
     // -- Gateway API state gauges --
     let gateway_state = crate::gateway_state_metrics::GatewayStateMetrics::register(&mut registry);
 
+    // -- Reverse index fan-out --
+    let index_fanout_size =
+        Family::<ugwc_k8s::IndexEventKindLabels, Histogram>::new_with_constructor(|| {
+            Histogram::new(
+                [0.0, 1.0, 2.0, 5.0, 10.0, 25.0, 50.0, 100.0, 250.0, 500.0, 1000.0].into_iter(),
+            )
+        });
+    registry.register(
+        "ugwc_index_fanout_size",
+        "Gateways enqueued per reverse-index fan-out event",
+        index_fanout_size.clone(),
+    );
+
+    let index_gateways_indexed = Gauge::default();
+    registry.register(
+        "ugwc_index_gateways_indexed",
+        "Gateways present in the reverse index",
+        index_gateways_indexed.clone(),
+    );
+
     let handles = Metrics {
         reconcile: ReconcileMetrics {
             reconcile_runs,
@@ -460,6 +488,7 @@ pub fn install() -> Result<Metrics, String> {
             retries: wq_retries,
             dedup: wq_dedup,
             depth: wq_depth,
+            in_flight: wq_in_flight,
             longest_running_processor_seconds: wq_longest,
             unfinished_work_seconds: wq_unfinished,
             queue_duration_seconds: wq_queue_duration,
@@ -493,6 +522,10 @@ pub fn install() -> Result<Metrics, String> {
             mean_poll_duration_seconds: tokio_mean_poll,
         },
         gateway_state,
+        index: ugwc_k8s::GatewayIndexMetrics {
+            fanout_size: index_fanout_size,
+            gateways_indexed: index_gateways_indexed,
+        },
     };
 
     let _ = STATE.set(MetricsState {

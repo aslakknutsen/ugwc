@@ -40,6 +40,7 @@ pub struct ReconcileCtx {
     pub events: Option<ugwc_k8s::GatewayEvents>,
     pub gateway_state_metrics: GatewayStateMetrics,
     pub stores: Arc<SharedStores>,
+    pub gateway_index: Arc<ugwc_k8s::GatewayIndex>,
 }
 
 #[instrument(
@@ -64,7 +65,11 @@ pub async fn reconcile_gateway(ctx: ReconcileCtx, ns: String, name: String) -> R
                     let t_load = Instant::now();
                     let cluster =
                         match ugwc_k8s::load_cluster_snapshot(&ctx.stores, &ns, &name, &ctx.active_crds) {
-                            Ok(c) => Some(c),
+                            Ok(c) => {
+                                let refs = ugwc_k8s::refs_from_snapshot(&ctx.stores, &c);
+                                ctx.gateway_index.update_gateway(&ns, &name, refs);
+                                Some(c)
+                            }
                             Err(e) => {
                                 warn!(error = %e, %ns, %name, "cluster snapshot load");
                                 None
@@ -476,6 +481,7 @@ async fn reconcile_gateway_gone(ctx: &ReconcileCtx, ns: &str, name: &str) -> Res
         metrics::record_publish_applied();
     }
     ctx.gateway_state_metrics.clear_gateway(ns, name);
+    ctx.gateway_index.remove_gateway(ns, name);
     if ctx.dataplane_enable {
         if let Err(e) = ugwc_k8s::deprovision_per_gateway_praxis(&ctx.client, ns, name).await {
             warn!(error = %e, %ns, %name, "dataplane deprovision after gateway delete");

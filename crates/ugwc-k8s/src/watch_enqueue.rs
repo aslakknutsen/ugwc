@@ -8,6 +8,7 @@ use kube::{Api, Client, ResourceExt};
 use tracing::warn;
 
 use crate::reconcile_queue::ReconcileSender;
+use crate::stores::SharedStores;
 use crate::resources::{
     backend_tls_policy_spec_references_configmap, backend_tls_policy_spec_references_secret,
     gateway_spec_references_secret, listenerset_spec_references_secret, BackendTLSPolicy, Gateway,
@@ -252,85 +253,6 @@ pub async fn gateway_keys_for_inference_pool(
     gateway_targets_for_inference_pool(client, pool_ns, pool_name).await
 }
 
-/// Gateways referencing a Secret (TLS cert, BackendTLS, etc.).
-pub async fn gateway_keys_for_secret(
-    client: &Client,
-    secret_ns: &str,
-    secret_name: &str,
-) -> HashSet<(String, String)> {
-    let mut keys = HashSet::new();
-    let gw_api: Api<Gateway> = Api::all(client.clone());
-    match gw_api.list(&ListParams::default()).await {
-        Ok(list) => {
-            for gw in list.items {
-                let gwns = gw.namespace().unwrap_or_default();
-                if gateway_spec_references_secret(&gw.spec, &gwns, secret_ns, secret_name) {
-                    keys.insert((gwns, gw.name_any()));
-                }
-            }
-        }
-        Err(e) => warn!(error = %e, "list gateways after secret change"),
-    }
-    let ls_api: Api<ListenerSet> = Api::all(client.clone());
-    match ls_api.list(&ListParams::default()).await {
-        Ok(ls_list) => {
-            for ls in ls_list.items {
-                let ls_ns = ls.namespace().unwrap_or_default();
-                if !listenerset_spec_references_secret(&ls.spec, &ls_ns, secret_ns, secret_name) {
-                    continue;
-                }
-                if let Some(k) = gateway_key_for_listener_set(&ls) {
-                    keys.insert(k);
-                }
-            }
-        }
-        Err(e) => warn!(error = %e, "list listenersets after secret change"),
-    }
-    let pol_api: Api<BackendTLSPolicy> = Api::all(client.clone());
-    match pol_api.list(&ListParams::default()).await {
-        Ok(pol_list) => {
-            for pol in pol_list.items {
-                let pol_ns = pol.metadata.namespace.as_deref().unwrap_or("");
-                if backend_tls_policy_spec_references_secret(
-                    &pol.spec,
-                    pol_ns,
-                    secret_ns,
-                    secret_name,
-                ) {
-                    keys.extend(gateway_targets_for_backend_tls_policy(client, &pol).await);
-                }
-            }
-        }
-        Err(e) => warn!(error = %e, "list BackendTLSPolicy after secret change"),
-    }
-    keys
-}
-
-/// Gateways affected by a BackendTLS CA ConfigMap change.
-pub async fn gateway_keys_for_configmap(
-    client: &Client,
-    cm_ns: &str,
-    cm_name: &str,
-) -> HashSet<(String, String)> {
-    let mut keys = HashSet::new();
-    let pol_api: Api<BackendTLSPolicy> = Api::all(client.clone());
-    let policies = match pol_api.list(&ListParams::default()).await {
-        Ok(l) => l.items,
-        Err(e) => {
-            warn!(error = %e, "list BackendTLSPolicy after ConfigMap change");
-            return keys;
-        }
-    };
-    for pol in policies {
-        let pol_ns = pol.metadata.namespace.as_deref().unwrap_or("");
-        if !backend_tls_policy_spec_references_configmap(&pol.spec, pol_ns, cm_ns, cm_name) {
-            continue;
-        }
-        keys.extend(gateway_targets_for_backend_tls_policy(client, &pol).await);
-    }
-    keys
-}
-
 /// Owning gateway for a ugwc-managed dataplane Service (from labels).
 pub fn gateway_key_for_managed_service(svc: &Service) -> Option<(String, String)> {
     let labels = svc.metadata.labels.as_ref()?;
@@ -347,17 +269,66 @@ pub fn gateway_key_for_managed_service(svc: &Service) -> Option<(String, String)
     }
 }
 
-/// All gateways in the cluster.
-pub async fn gateway_keys_all(client: &Client) -> HashSet<(String, String)> {
+/// All gateways in the cluster (store-backed).
+#[must_use]
+pub fn all_gateway_keys_from_stores(stores: &SharedStores) -> HashSet<(String, String)> {
     let mut keys = HashSet::new();
-    let gw_api: Api<Gateway> = Api::all(client.clone());
-    match gw_api.list(&ListParams::default()).await {
-        Ok(list) => {
-            for gw in list.items {
-                keys.insert((gw.namespace().unwrap_or_default(), gw.name_any()));
-            }
+    for gw in stores.list_gateways() {
+        keys.insert((gw.namespace().unwrap_or_default(), gw.name_any()));
+    }
+    keys
+}
+
+/// Gateways referencing a Secret (TLS cert, BackendTLS, etc.) — store-backed.
+#[must_use]
+pub fn gateway_keys_for_secret_from_stores(
+    stores: &SharedStores,
+    secret_ns: &str,
+    secret_name: &str,
+) -> HashSet<(String, String)> {
+    let mut keys = HashSet::new();
+    for gw in stores.list_gateways() {
+        let gwns = gw.namespace().unwrap_or_default();
+        if gateway_spec_references_secret(&gw.spec, &gwns, secret_ns, secret_name) {
+            keys.insert((gwns, gw.name_any()));
         }
-        Err(e) => warn!(error = %e, "list all gateways"),
+    }
+    for ls in stores.list_listener_sets() {
+        let ls_ns = ls.namespace().unwrap_or_default();
+        if !listenerset_spec_references_secret(&ls.spec, &ls_ns, secret_ns, secret_name) {
+            continue;
+        }
+        if let Some(k) = gateway_key_for_listener_set(&ls) {
+            keys.insert(k);
+        }
+    }
+    for pol in stores.list_backend_tls_policies() {
+        let pol_ns = pol.metadata.namespace.as_deref().unwrap_or("");
+        if backend_tls_policy_spec_references_secret(&pol.spec, pol_ns, secret_ns, secret_name) {
+            keys.extend(crate::watch_helpers_store::gateway_targets_for_backend_tls_policy_from_stores(
+                stores, &pol,
+            ));
+        }
+    }
+    keys
+}
+
+/// Gateways affected by a BackendTLS CA ConfigMap change — store-backed.
+#[must_use]
+pub fn gateway_keys_for_configmap_from_stores(
+    stores: &SharedStores,
+    cm_ns: &str,
+    cm_name: &str,
+) -> HashSet<(String, String)> {
+    let mut keys = HashSet::new();
+    for pol in stores.list_backend_tls_policies() {
+        let pol_ns = pol.metadata.namespace.as_deref().unwrap_or("");
+        if !backend_tls_policy_spec_references_configmap(&pol.spec, pol_ns, cm_ns, cm_name) {
+            continue;
+        }
+        keys.extend(crate::watch_helpers_store::gateway_targets_for_backend_tls_policy_from_stores(
+            stores, &pol,
+        ));
     }
     keys
 }

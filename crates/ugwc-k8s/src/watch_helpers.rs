@@ -347,7 +347,7 @@ pub(crate) async fn gateway_targets_for_inference_pool(
     out
 }
 
-fn http_route_references_backend_tls_policy_target(
+pub(crate) fn http_route_references_backend_tls_policy_target(
     pol: &BackendTLSPolicy,
     route: &HTTPRoute,
 ) -> bool {
@@ -369,7 +369,7 @@ fn http_route_references_backend_tls_policy_target(
     false
 }
 
-fn grpc_route_references_backend_tls_policy_target(
+pub(crate) fn grpc_route_references_backend_tls_policy_target(
     pol: &BackendTLSPolicy,
     route: &GRPCRoute,
 ) -> bool {
@@ -391,7 +391,7 @@ fn grpc_route_references_backend_tls_policy_target(
     false
 }
 
-fn tls_route_references_backend_tls_policy_target(
+pub(crate) fn tls_route_references_backend_tls_policy_target(
     pol: &BackendTLSPolicy,
     route: &TLSRoute,
 ) -> bool {
@@ -414,7 +414,7 @@ fn tls_route_references_backend_tls_policy_target(
     false
 }
 
-fn tcp_route_references_backend_tls_policy_target(
+pub(crate) fn tcp_route_references_backend_tls_policy_target(
     pol: &BackendTLSPolicy,
     route: &TCPRoute,
 ) -> bool {
@@ -437,7 +437,7 @@ fn tcp_route_references_backend_tls_policy_target(
     false
 }
 
-fn udp_route_references_backend_tls_policy_target(
+pub(crate) fn udp_route_references_backend_tls_policy_target(
     pol: &BackendTLSPolicy,
     route: &UDPRoute,
 ) -> bool {

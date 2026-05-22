@@ -12,15 +12,15 @@ use k8s_openapi::api::core::v1::{ConfigMap, Namespace, Secret, Service};
 use k8s_openapi::api::discovery::v1::EndpointSlice;
 use kube::runtime::reflector;
 use kube::{Api, Client, ResourceExt};
-use tracing::{info, instrument, warn};
+use tracing::{debug, info, instrument, warn};
 
 use crate::crd_supervisor::{run_crd_supervisor, ActiveCrds};
 use crate::initial_sync::InitialSyncGate;
+use crate::gateway_index::GatewayIndex;
 use crate::reconcile_queue::{ReconcileQueue, ReconcileSender};
 use crate::stores::SharedStores;
 use crate::watch_enqueue::{
-    drain_gateway_keys, gateway_key_for_managed_service, gateway_keys_all,
-    gateway_keys_for_configmap, gateway_keys_for_secret,
+    drain_gateway_keys, gateway_key_for_managed_service,
 };
 use crate::watch_stream::{self, watcher_config, WatchItem};
 
@@ -70,19 +70,21 @@ pub struct AlwaysOnWriters {
 
 /// Observe gateways (CRD-gated via [`run_crd_supervisor`]), routes, grants, backend TLS policies,
 /// CA ConfigMaps, endpoints, secrets, classes, and inference pools.
-#[instrument(skip(client, shutdown, reconcile, work_queue, reconcile_tx, sync_gate, stores, writers))]
+#[instrument(skip(client, shutdown, reconcile, work_queue, reconcile_tx, sync_gate, stores, writers, gateway_index))]
 pub async fn run_gateway_controller(
     client: Client,
     shutdown: tokio_util::sync::CancellationToken,
     endpoint_debounce: Duration,
     reconcile_tx: ReconcileSender,
-    mut work_queue: ReconcileQueue,
+    work_queue: ReconcileQueue,
     reconcile: ReconcileFn,
+    reconcile_concurrency: usize,
     owned_controller_names: Vec<String>,
     active_crds: ActiveCrds,
     sync_gate: Option<Arc<InitialSyncGate>>,
     stores: Arc<SharedStores>,
     writers: AlwaysOnWriters,
+    gateway_index: Arc<GatewayIndex>,
 ) {
     let tx = reconcile_tx;
 
@@ -109,10 +111,11 @@ pub async fn run_gateway_controller(
 
     // ── EndpointSlice watcher (reflector-backed) ────────────────────────
     let sd_ep = shutdown.clone();
-    let c_ep = client.clone();
     let tx_ep = tx.clone();
+    let stores_ep = stores.clone();
+    let index_ep = gateway_index.clone();
     let (_, mut ep_stream) = watch_stream::reflector_full_watch_stream(
-        Api::<EndpointSlice>::all(c_ep.clone()),
+        Api::<EndpointSlice>::all(client.clone()),
         watcher_config(),
         writers.endpoint_slices,
     );
@@ -124,12 +127,22 @@ pub async fn run_gateway_controller(
                     match ev {
                         None => break,
                         Some(Err(e)) => warn!(error = %e, "endpointslice watch stream"),
-                        Some(Ok(WatchItem::Applied(_) | WatchItem::Deleted(_))) => {
+                        Some(Ok(WatchItem::Applied(es) | WatchItem::Deleted(es))) => {
                             tokio::time::sleep(endpoint_debounce).await;
                             if sd_ep.is_cancelled() {
                                 break;
                             }
-                            let keys = gateway_keys_all(&c_ep).await;
+                            let svc_ns = es.namespace().unwrap_or_default();
+                            let Some(svc_name) = es
+                                .metadata
+                                .labels
+                                .as_ref()
+                                .and_then(|l| l.get("kubernetes.io/service-name").cloned())
+                            else {
+                                debug!(endpointslice_ns = %svc_ns, "endpointslice event without service-name label");
+                                continue;
+                            };
+                            let keys = index_ep.resolve_service_fanout(&stores_ep, &svc_ns, &svc_name);
                             if !drain_gateway_keys(keys, &tx_ep).await {
                                 return;
                             }
@@ -175,11 +188,12 @@ pub async fn run_gateway_controller(
 
     // ── Secret watcher (reflector-backed) ───────────────────────────────
     let sd_sec = shutdown.clone();
-    let c_sec = client.clone();
     let tx_sec = tx.clone();
+    let stores_sec = stores.clone();
+    let index_sec = gateway_index.clone();
     let secret_debounce = endpoint_debounce;
     let (_, mut sec_stream) = watch_stream::reflector_full_watch_stream(
-        Api::<Secret>::all(c_sec.clone()),
+        Api::<Secret>::all(client.clone()),
         watcher_config(),
         writers.secrets,
     );
@@ -196,7 +210,7 @@ pub async fn run_gateway_controller(
                             if sd_sec.is_cancelled() {
                                 break;
                             }
-                            let keys = gateway_keys_for_secret(&c_sec, &sns, &sn).await;
+                            let keys = index_sec.resolve_secret_fanout(&stores_sec, &sns, &sn);
                             if !drain_gateway_keys(keys, &tx_sec).await {
                                 return;
                             }
@@ -212,10 +226,11 @@ pub async fn run_gateway_controller(
 
     // ── ConfigMap watcher (reflector-backed) ────────────────────────────
     let sd_cm = shutdown.clone();
-    let c_cm = client.clone();
     let tx_cm = tx.clone();
+    let stores_cm = stores.clone();
+    let index_cm = gateway_index.clone();
     let (_, mut cm_stream) = watch_stream::reflector_full_watch_stream(
-        Api::<ConfigMap>::all(c_cm.clone()),
+        Api::<ConfigMap>::all(client.clone()),
         watcher_config(),
         writers.config_maps,
     );
@@ -228,7 +243,7 @@ pub async fn run_gateway_controller(
                         Some(Ok(WatchItem::Applied(cm) | WatchItem::Deleted(cm))) => {
                             let cm_ns = cm.namespace().unwrap_or_default();
                             let cm_name = cm.name_any();
-                            let keys = gateway_keys_for_configmap(&c_cm, &cm_ns, &cm_name).await;
+                            let keys = index_cm.resolve_configmap_fanout(&stores_cm, &cm_ns, &cm_name);
                             if !drain_gateway_keys(keys, &tx_cm).await {
                                 return;
                             }
@@ -265,13 +280,30 @@ pub async fn run_gateway_controller(
         info!("namespace watcher shutdown");
     });
 
-    // ── Reconcile loop (serial, unchanged) ──────────────────────────────
+    // ── Reconcile workers (concurrent, dedup queue per-key lock) ─────────
+    let mut workers = tokio::task::JoinSet::new();
+    for worker_id in 0..reconcile_concurrency {
+        let wq = work_queue.clone();
+        let reconcile = reconcile.clone();
+        let sd = shutdown.clone();
+        workers.spawn(async move {
+            reconcile_worker(worker_id, sd, wq, reconcile).await;
+        });
+    }
+
+    while workers.join_next().await.is_some() {}
+    info!("reconcile workers shutdown");
+}
+
+async fn reconcile_worker(
+    worker_id: usize,
+    shutdown: tokio_util::sync::CancellationToken,
+    work_queue: ReconcileQueue,
+    reconcile: ReconcileFn,
+) {
     loop {
         tokio::select! {
-            _ = shutdown.cancelled() => {
-                info!("graph controller shutdown");
-                break;
-            }
+            _ = shutdown.cancelled() => break,
             pair = work_queue.recv() => {
                 let Some((ns, name)) = pair else { break };
                 let proc_started = work_queue.begin_reconcile();
@@ -280,7 +312,7 @@ pub async fn run_gateway_controller(
                 work_queue.done(&ns, &name);
                 if let Err(e) = result {
                     work_queue.record_retry();
-                    warn!(error = %e, "reconcile");
+                    warn!(error = %e, worker_id, "reconcile");
                 }
             }
         }

@@ -66,6 +66,8 @@ spec:
               value: {{ .Values.ugwc.dataplaneEnable | quote }}
             - name: UGWC_ENDPOINT_DEBOUNCE_MS
               value: {{ .Values.ugwc.endpointDebounceMs | quote }}
+            - name: UGWC_RECONCILE_CONCURRENCY
+              value: {{ .Values.ugwc.reconcileConcurrency | quote }}
             {{- if .Values.ugwc.otlpEndpoint }}
             - name: UGWC_OTLP_ENDPOINT
               value: {{ .Values.ugwc.otlpEndpoint | quote }}
