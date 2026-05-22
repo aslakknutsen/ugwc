@@ -75,6 +75,8 @@ pub struct ReconcileMetrics {
     pub compile_errors: Counter,
     pub compile_duration: Family<NoLabels, Histogram>,
     pub snapshot_load_duration: Family<NoLabels, Histogram>,
+    pub status_patch_duration: Family<NoLabels, Histogram>,
+    pub status_patch_count: Family<NoLabels, Histogram>,
     pub publish_skipped: Counter,
     pub publish_applied: Counter,
     pub leader_active: Gauge,
@@ -200,6 +202,24 @@ pub fn install() -> Result<Metrics, String> {
         "ugwc_snapshot_load_duration_seconds",
         "Duration of cluster snapshot load in seconds",
         snapshot_load_duration.clone(),
+    );
+
+    let status_patch_duration = Family::<NoLabels, Histogram>::new_with_constructor(|| {
+        Histogram::new(exponential_buckets(0.001, 2.0, 14))
+    });
+    registry.register(
+        "ugwc_status_patch_duration_seconds",
+        "Duration of attached resource status patches per gateway reconcile",
+        status_patch_duration.clone(),
+    );
+
+    let status_patch_count = Family::<NoLabels, Histogram>::new_with_constructor(|| {
+        Histogram::new(exponential_buckets(1.0, 2.0, 12))
+    });
+    registry.register(
+        "ugwc_status_patch_count",
+        "Number of status patch tasks per gateway reconcile",
+        status_patch_count.clone(),
     );
 
     let publish_skipped = Counter::default();
@@ -469,6 +489,8 @@ pub fn install() -> Result<Metrics, String> {
             compile_errors,
             compile_duration,
             snapshot_load_duration,
+            status_patch_duration,
+            status_patch_count,
             publish_skipped,
             publish_applied,
             leader_active,
@@ -631,6 +653,22 @@ pub fn observe_snapshot_load_seconds(seconds: f64) {
         .observe(seconds);
 }
 
+pub fn observe_status_patch_duration_seconds(seconds: f64) {
+    get()
+        .reconcile
+        .status_patch_duration
+        .get_or_create(&NoLabels)
+        .observe(seconds);
+}
+
+pub fn record_status_patch_count(count: usize) {
+    get()
+        .reconcile
+        .status_patch_count
+        .get_or_create(&NoLabels)
+        .observe(count as f64);
+}
+
 pub fn set_compile_output_size(listeners: usize, routes: usize, backends: usize) {
     let m = get();
     m.reconcile.ir_listeners.set(listeners as i64);
@@ -670,6 +708,8 @@ mod tests {
         record_reconcile_run("test", true);
         record_compile_error();
         set_leader_active(true);
+        observe_status_patch_duration_seconds(0.05);
+        record_status_patch_count(20);
         let body = render().expect("render");
         assert!(
             body.contains("ugwc_reconcile_runs"),
@@ -682,6 +722,14 @@ mod tests {
         assert!(
             body.contains("ugwc_leader_active"),
             "missing leader active in:\n{body}"
+        );
+        assert!(
+            body.contains("ugwc_status_patch_duration_seconds"),
+            "missing status patch duration in:\n{body}"
+        );
+        assert!(
+            body.contains("ugwc_status_patch_count"),
+            "missing status patch count in:\n{body}"
         );
     }
 }

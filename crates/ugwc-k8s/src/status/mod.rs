@@ -6,6 +6,9 @@ mod route_status;
 mod listenerset_status;
 mod backend_tls_status;
 mod inference_status;
+mod parallel;
+
+pub use parallel::run_bounded;
 
 pub use route_status::{
     apply_http_route_merged_parent_status, apply_grpc_route_merged_parent_status,

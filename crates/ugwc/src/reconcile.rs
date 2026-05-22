@@ -41,6 +41,7 @@ pub struct ReconcileCtx {
     pub gateway_state_metrics: GatewayStateMetrics,
     pub stores: Arc<SharedStores>,
     pub gateway_index: Arc<ugwc_k8s::GatewayIndex>,
+    pub status_patch_concurrency: usize,
 }
 
 #[instrument(
@@ -151,222 +152,15 @@ pub async fn reconcile_gateway(ctx: ReconcileCtx, ns: String, name: String) -> R
                     }
 
                     if let Some(ref snap) = input.cluster {
-                        for r in &snap.http_routes {
-                            let (rs, rr, rm) = http_route_resolved_refs_row(&co.report, r);
-                            if let Err(e) = ugwc_k8s::apply_http_route_merged_parent_status(
-                                ugwc_k8s::HttpRouteMergedParentStatusArgs {
-                                    client: &ctx.client,
-                                    route_ns: &r.namespace,
-                                    route_name: &r.name,
-                                    controller_name: &ctx.primary_controller,
-                                    route_generation: r.generation,
-                                    programmed_ok,
-                                    resolved_refs_status: rs,
-                                    resolved_refs_reason: rr,
-                                    resolved_refs_message: rm,
-                                    reconciled_gateway_ns: &ns,
-                                    reconciled_gateway_name: &name,
-                                    snapshot: snap,
-                                    compile_report: &co.report,
-                                    status_cache: Some(ctx.status_cache.clone()),
-                                },
-                            )
-                            .await
-                            {
-                                warn!(error = %e, route = %r.name, "httproute status patch");
-                            }
-                        }
-
-                        for r in &snap.grpc_routes {
-                            let (rs, rr, rm) = grpc_route_resolved_refs_row(&co.report, r);
-                            if let Err(e) = ugwc_k8s::apply_grpc_route_merged_parent_status(
-                                ugwc_k8s::GrpcRouteMergedParentStatusArgs {
-                                    client: &ctx.client,
-                                    route_ns: &r.namespace,
-                                    route_name: &r.name,
-                                    controller_name: &ctx.primary_controller,
-                                    route_generation: r.generation,
-                                    programmed_ok,
-                                    resolved_refs_status: rs,
-                                    resolved_refs_reason: rr,
-                                    resolved_refs_message: rm,
-                                    reconciled_gateway_ns: &ns,
-                                    reconciled_gateway_name: &name,
-                                    snapshot: snap,
-                                    compile_report: &co.report,
-                                    status_cache: Some(ctx.status_cache.clone()),
-                                },
-                            )
-                            .await
-                            {
-                                warn!(error = %e, route = %r.name, "grpcroute status patch");
-                            }
-                        }
-
-                        for r in &snap.tls_routes {
-                            let (rs, rr, rm) = tls_route_resolved_refs_row(&co.report, r);
-                            if let Err(e) = ugwc_k8s::apply_tls_route_merged_parent_status(
-                                ugwc_k8s::TlsRouteMergedParentStatusArgs {
-                                    client: &ctx.client,
-                                    route_ns: &r.namespace,
-                                    route_name: &r.name,
-                                    controller_name: &ctx.primary_controller,
-                                    route_generation: r.generation,
-                                    programmed_ok,
-                                    resolved_refs_status: rs,
-                                    resolved_refs_reason: rr,
-                                    resolved_refs_message: rm,
-                                    reconciled_gateway_ns: &ns,
-                                    reconciled_gateway_name: &name,
-                                    snapshot: snap,
-                                    compile_report: &co.report,
-                                    status_cache: Some(ctx.status_cache.clone()),
-                                },
-                            )
-                            .await
-                            {
-                                warn!(error = %e, route = %r.name, "tlsroute status patch");
-                            }
-                        }
-
-                        for r in &snap.tcp_routes {
-                            let (rs, rr, rm) = tcp_route_resolved_refs_row(&co.report, r);
-                            if let Err(e) = ugwc_k8s::apply_tcp_route_merged_parent_status(
-                                ugwc_k8s::TcpRouteMergedParentStatusArgs {
-                                    client: &ctx.client,
-                                    route_ns: &r.namespace,
-                                    route_name: &r.name,
-                                    controller_name: &ctx.primary_controller,
-                                    route_generation: r.generation,
-                                    programmed_ok,
-                                    resolved_refs_status: rs,
-                                    resolved_refs_reason: rr,
-                                    resolved_refs_message: rm,
-                                    reconciled_gateway_ns: &ns,
-                                    reconciled_gateway_name: &name,
-                                    snapshot: snap,
-                                    compile_report: &co.report,
-                                    status_cache: Some(ctx.status_cache.clone()),
-                                },
-                            )
-                            .await
-                            {
-                                warn!(error = %e, route = %r.name, "tcproute status patch");
-                            }
-                        }
-
-                        for r in &snap.udp_routes {
-                            let (rs, rr, rm) = udp_route_resolved_refs_row(&co.report, r);
-                            if let Err(e) = ugwc_k8s::apply_udp_route_merged_parent_status(
-                                ugwc_k8s::UdpRouteMergedParentStatusArgs {
-                                    client: &ctx.client,
-                                    route_ns: &r.namespace,
-                                    route_name: &r.name,
-                                    controller_name: &ctx.primary_controller,
-                                    route_generation: r.generation,
-                                    programmed_ok,
-                                    resolved_refs_status: rs,
-                                    resolved_refs_reason: rr,
-                                    resolved_refs_message: rm,
-                                    reconciled_gateway_ns: &ns,
-                                    reconciled_gateway_name: &name,
-                                    snapshot: snap,
-                                    compile_report: &co.report,
-                                    status_cache: Some(ctx.status_cache.clone()),
-                                },
-                            )
-                            .await
-                            {
-                                warn!(error = %e, route = %r.name, "udproute status patch");
-                            }
-                        }
-
-                        for ls_snap in &snap.listener_sets {
-                            let ls_api: Api<ListenerSet> =
-                                Api::namespaced(ctx.client.clone(), &ls_snap.namespace);
-                            match ls_api.get(&ls_snap.name).await {
-                                Ok(ls) => {
-                                    if let Err(e) = ugwc_k8s::apply_listenerset_reconciled_status(
-                                        &ctx.client,
-                                        &ls,
-                                        snap,
-                                        programmed_ok,
-                                        &co,
-                                        Some(ctx.status_cache.clone()),
-                                    )
-                                    .await
-                                    {
-                                        warn!(
-                                            error = %e,
-                                            listenerset = %ls_snap.name,
-                                            "listenerset status patch"
-                                        );
-                                    }
-                                }
-                                Err(e) => warn!(
-                                    error = %e,
-                                    listenerset = %ls_snap.name,
-                                    "get listenerset for status"
-                                ),
-                            }
-                        }
-
-                        for rej in &snap.rejected_listener_sets {
-                            let ls_api: Api<ListenerSet> =
-                                Api::namespaced(ctx.client.clone(), &rej.namespace);
-                            match ls_api.get(&rej.name).await {
-                                Ok(ls) => {
-                                    if let Err(e) =
-                                        ugwc_k8s::apply_listenerset_rejected_status(
-                                            &ctx.client,
-                                            &ls,
-                                            &rej.reason,
-                                            Some(ctx.status_cache.clone()),
-                                        )
-                                        .await
-                                    {
-                                        warn!(
-                                            error = %e,
-                                            listenerset = %rej.name,
-                                            "rejected listenerset status patch"
-                                        );
-                                    }
-                                }
-                                Err(e) => warn!(
-                                    error = %e,
-                                    listenerset = %rej.name,
-                                    "get rejected listenerset for status"
-                                ),
-                            }
-                        }
-
-                        if let Err(e) = ugwc_k8s::apply_backend_tls_policies_for_gateway(
-                            &ctx.client,
-                            &ns,
-                            &name,
-                            &ctx.primary_controller,
+                        apply_attached_resource_statuses(
+                            &ctx,
                             snap,
-                            Some(ctx.status_cache.clone()),
-                        )
-                        .await
-                        {
-                            warn!(error = %e, "backend TLS policy status patch");
-                        }
-
-                        if let Err(e) = ugwc_k8s::apply_inference_pools_for_gateway(
-                            &ctx.client,
-                            &ns,
-                            &name,
-                            &ctx.primary_controller,
-                            snap,
+                            &co,
                             programmed_ok,
-                            &co.report,
-                            Some(ctx.status_cache.clone()),
+                            &ns,
+                            &name,
                         )
-                        .await
-                        {
-                            warn!(error = %e, "inferencepool status patch");
-                        }
+                        .await;
                     }
 
                     if !ctx.leader.is_leader() {
@@ -493,6 +287,304 @@ async fn reconcile_gateway_gone(ctx: &ReconcileCtx, ns: &str, name: &str) -> Res
 
 fn do_compile(fp: &FailurePolicy, input: &CompileInput) -> Result<CompileOutcome, String> {
     ugwc_core::compile(fp, input).map_err(|e| e.to_string())
+}
+
+async fn apply_attached_resource_statuses(
+    ctx: &ReconcileCtx,
+    snap: &ugwc_core::ClusterSnapshot,
+    co: &CompileOutcome,
+    programmed_ok: bool,
+    gateway_ns: &str,
+    gateway_name: &str,
+) {
+    let concurrency = ctx.status_patch_concurrency;
+    let status_cache = Some(ctx.status_cache.clone());
+    let t_status = Instant::now();
+
+    let patch_count = snap.http_routes.len()
+        + snap.grpc_routes.len()
+        + snap.tls_routes.len()
+        + snap.tcp_routes.len()
+        + snap.udp_routes.len()
+        + snap.listener_sets.len()
+        + snap.rejected_listener_sets.len()
+        + snap.backend_tls_policy_outcomes.len()
+        + snap.referenced_inference_pools().len();
+
+    let mut futs: Vec<
+        std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + '_>>,
+    > = Vec::new();
+
+    futs.extend(snap.http_routes.iter().map(|r| {
+        let (rs, rr, rm) = http_route_resolved_refs_row(&co.report, r);
+        Box::pin(async {
+            let route_name = r.name.clone();
+            if let Err(e) = ugwc_k8s::apply_http_route_merged_parent_status(
+                ugwc_k8s::HttpRouteMergedParentStatusArgs {
+                    client: &ctx.client,
+                    route_ns: &r.namespace,
+                    route_name: &r.name,
+                    controller_name: &ctx.primary_controller,
+                    route_generation: r.generation,
+                    programmed_ok,
+                    resolved_refs_status: rs,
+                    resolved_refs_reason: rr,
+                    resolved_refs_message: rm,
+                    reconciled_gateway_ns: gateway_ns,
+                    reconciled_gateway_name: gateway_name,
+                    snapshot: snap,
+                    compile_report: &co.report,
+                    status_cache: status_cache.clone(),
+                },
+            )
+            .await
+            {
+                warn!(error = %e, route = %route_name, "httproute status patch");
+            }
+        }) as std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + '_>>
+    }));
+
+    futs.extend(snap.grpc_routes.iter().map(|r| {
+        let (rs, rr, rm) = grpc_route_resolved_refs_row(&co.report, r);
+        Box::pin(async {
+            let route_name = r.name.clone();
+            if let Err(e) = ugwc_k8s::apply_grpc_route_merged_parent_status(
+                ugwc_k8s::GrpcRouteMergedParentStatusArgs {
+                    client: &ctx.client,
+                    route_ns: &r.namespace,
+                    route_name: &r.name,
+                    controller_name: &ctx.primary_controller,
+                    route_generation: r.generation,
+                    programmed_ok,
+                    resolved_refs_status: rs,
+                    resolved_refs_reason: rr,
+                    resolved_refs_message: rm,
+                    reconciled_gateway_ns: gateway_ns,
+                    reconciled_gateway_name: gateway_name,
+                    snapshot: snap,
+                    compile_report: &co.report,
+                    status_cache: status_cache.clone(),
+                },
+            )
+            .await
+            {
+                warn!(error = %e, route = %route_name, "grpcroute status patch");
+            }
+        }) as std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + '_>>
+    }));
+
+    futs.extend(snap.tls_routes.iter().map(|r| {
+        let (rs, rr, rm) = tls_route_resolved_refs_row(&co.report, r);
+        Box::pin(async {
+            let route_name = r.name.clone();
+            if let Err(e) = ugwc_k8s::apply_tls_route_merged_parent_status(
+                ugwc_k8s::TlsRouteMergedParentStatusArgs {
+                    client: &ctx.client,
+                    route_ns: &r.namespace,
+                    route_name: &r.name,
+                    controller_name: &ctx.primary_controller,
+                    route_generation: r.generation,
+                    programmed_ok,
+                    resolved_refs_status: rs,
+                    resolved_refs_reason: rr,
+                    resolved_refs_message: rm,
+                    reconciled_gateway_ns: gateway_ns,
+                    reconciled_gateway_name: gateway_name,
+                    snapshot: snap,
+                    compile_report: &co.report,
+                    status_cache: status_cache.clone(),
+                },
+            )
+            .await
+            {
+                warn!(error = %e, route = %route_name, "tlsroute status patch");
+            }
+        }) as std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + '_>>
+    }));
+
+    futs.extend(snap.tcp_routes.iter().map(|r| {
+        let (rs, rr, rm) = tcp_route_resolved_refs_row(&co.report, r);
+        Box::pin(async {
+            let route_name = r.name.clone();
+            if let Err(e) = ugwc_k8s::apply_tcp_route_merged_parent_status(
+                ugwc_k8s::TcpRouteMergedParentStatusArgs {
+                    client: &ctx.client,
+                    route_ns: &r.namespace,
+                    route_name: &r.name,
+                    controller_name: &ctx.primary_controller,
+                    route_generation: r.generation,
+                    programmed_ok,
+                    resolved_refs_status: rs,
+                    resolved_refs_reason: rr,
+                    resolved_refs_message: rm,
+                    reconciled_gateway_ns: gateway_ns,
+                    reconciled_gateway_name: gateway_name,
+                    snapshot: snap,
+                    compile_report: &co.report,
+                    status_cache: status_cache.clone(),
+                },
+            )
+            .await
+            {
+                warn!(error = %e, route = %route_name, "tcproute status patch");
+            }
+        }) as std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + '_>>
+    }));
+
+    futs.extend(snap.udp_routes.iter().map(|r| {
+        let (rs, rr, rm) = udp_route_resolved_refs_row(&co.report, r);
+        Box::pin(async {
+            let route_name = r.name.clone();
+            if let Err(e) = ugwc_k8s::apply_udp_route_merged_parent_status(
+                ugwc_k8s::UdpRouteMergedParentStatusArgs {
+                    client: &ctx.client,
+                    route_ns: &r.namespace,
+                    route_name: &r.name,
+                    controller_name: &ctx.primary_controller,
+                    route_generation: r.generation,
+                    programmed_ok,
+                    resolved_refs_status: rs,
+                    resolved_refs_reason: rr,
+                    resolved_refs_message: rm,
+                    reconciled_gateway_ns: gateway_ns,
+                    reconciled_gateway_name: gateway_name,
+                    snapshot: snap,
+                    compile_report: &co.report,
+                    status_cache: status_cache.clone(),
+                },
+            )
+            .await
+            {
+                warn!(error = %e, route = %route_name, "udproute status patch");
+            }
+        }) as std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + '_>>
+    }));
+
+    futs.extend(snap.listener_sets.iter().map(|ls_snap| {
+        let ls_ns = ls_snap.namespace.clone();
+        let ls_name = ls_snap.name.clone();
+        let cache = status_cache.clone();
+        Box::pin(patch_listenerset_reconciled(
+            ctx,
+            snap,
+            co,
+            programmed_ok,
+            ls_ns,
+            ls_name,
+            cache,
+        )) as std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + '_>>
+    }));
+
+    futs.extend(snap.rejected_listener_sets.iter().map(|rej| {
+        let ls_ns = rej.namespace.clone();
+        let ls_name = rej.name.clone();
+        let reason = rej.reason.clone();
+        let cache = status_cache.clone();
+        Box::pin(patch_listenerset_rejected(
+            ctx,
+            ls_ns,
+            ls_name,
+            reason,
+            cache,
+        )) as std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + '_>>
+    }));
+
+    ugwc_k8s::status::run_bounded(concurrency, futs).await;
+
+    if let Err(e) = ugwc_k8s::apply_backend_tls_policies_for_gateway(
+        &ctx.client,
+        gateway_ns,
+        gateway_name,
+        &ctx.primary_controller,
+        snap,
+        status_cache.clone(),
+        concurrency,
+    )
+    .await
+    {
+        warn!(error = %e, "backend TLS policy status patch");
+    }
+
+    if let Err(e) = ugwc_k8s::apply_inference_pools_for_gateway(
+        &ctx.client,
+        gateway_ns,
+        gateway_name,
+        &ctx.primary_controller,
+        snap,
+        programmed_ok,
+        &co.report,
+        status_cache,
+        concurrency,
+    )
+    .await
+    {
+        warn!(error = %e, "inferencepool status patch");
+    }
+
+    metrics::record_status_patch_count(patch_count);
+    metrics::observe_status_patch_duration_seconds(t_status.elapsed().as_secs_f64());
+}
+
+async fn patch_listenerset_reconciled(
+    ctx: &ReconcileCtx,
+    snap: &ugwc_core::ClusterSnapshot,
+    co: &CompileOutcome,
+    programmed_ok: bool,
+    ls_ns: String,
+    ls_name: String,
+    status_cache: Option<std::sync::Arc<std::sync::Mutex<HashMap<String, String>>>>,
+) {
+    let ls_api: Api<ListenerSet> = Api::namespaced(ctx.client.clone(), &ls_ns);
+    match ls_api.get(&ls_name).await {
+        Ok(ls) => {
+            if let Err(e) = ugwc_k8s::apply_listenerset_reconciled_status(
+                &ctx.client,
+                &ls,
+                snap,
+                programmed_ok,
+                co,
+                status_cache,
+            )
+            .await
+            {
+                warn!(error = %e, listenerset = %ls_name, "listenerset status patch");
+            }
+        }
+        Err(e) => warn!(error = %e, listenerset = %ls_name, "get listenerset for status"),
+    }
+}
+
+async fn patch_listenerset_rejected(
+    ctx: &ReconcileCtx,
+    ls_ns: String,
+    ls_name: String,
+    reason: String,
+    status_cache: Option<std::sync::Arc<std::sync::Mutex<HashMap<String, String>>>>,
+) {
+    let ls_api: Api<ListenerSet> = Api::namespaced(ctx.client.clone(), &ls_ns);
+    match ls_api.get(&ls_name).await {
+        Ok(ls) => {
+            if let Err(e) = ugwc_k8s::apply_listenerset_rejected_status(
+                &ctx.client,
+                &ls,
+                &reason,
+                status_cache,
+            )
+            .await
+            {
+                warn!(
+                    error = %e,
+                    listenerset = %ls_name,
+                    "rejected listenerset status patch"
+                );
+            }
+        }
+        Err(e) => warn!(
+            error = %e,
+            listenerset = %ls_name,
+            "get rejected listenerset for status"
+        ),
+    }
 }
 
 #[instrument(name = "publish", skip_all, fields(action = ?plan.action))]

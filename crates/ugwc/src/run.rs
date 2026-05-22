@@ -145,6 +145,7 @@ pub async fn run(cfg: Config) -> Result<(), Box<dyn std::error::Error + Send + S
         let xds_insecure = cfg.xds_insecure;
         let xds_wire = cfg.xds_wire.clone();
         let reconcile_concurrency = cfg.reconcile_concurrency;
+        let status_patch_concurrency = cfg.status_patch_concurrency;
         let status_cache: std::sync::Arc<
             std::sync::Mutex<std::collections::HashMap<String, String>>,
         > = std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new()));
@@ -183,6 +184,7 @@ pub async fn run(cfg: Config) -> Result<(), Box<dyn std::error::Error + Send + S
                 let gateway_state_metrics = gateway_state_metrics.clone();
                 let stores = stores_rfn.clone();
                 let gateway_index = gateway_index.clone();
+                let status_patch_concurrency = status_patch_concurrency;
                 Box::pin(async move {
                     let reconcile_started = Instant::now();
                     let outcome = crate::reconcile::reconcile_gateway(
@@ -203,6 +205,7 @@ pub async fn run(cfg: Config) -> Result<(), Box<dyn std::error::Error + Send + S
                             gateway_state_metrics,
                             stores,
                             gateway_index,
+                            status_patch_concurrency,
                         },
                         ns,
                         name,

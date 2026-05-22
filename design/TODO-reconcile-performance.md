@@ -153,25 +153,25 @@ These numbers scale roughly linearly with gateway count.
 
 ---
 
-## Phase 5 — Concurrent status writes (reduce per-reconcile wall time)
+## Phase 5 — Concurrent status writes (reduce per-reconcile wall time) ✅
 
 **Goal:** Route status patches within a single reconcile run in parallel instead of sequentially.
 
 ### What changes
 
-- **`crates/ugwc/src/reconcile.rs`** — replace the sequential `for r in &snap.http_routes { apply_status(...).await }` loops with `futures::future::join_all` (or `FuturesUnordered` with a concurrency cap). Apply to all route types (HTTP, gRPC, TLS, TCP, UDP), ListenerSet status, BackendTLSPolicy status, and InferencePool status.
-
-- Consider a concurrency cap (e.g. 8-16 concurrent patches per reconcile) to avoid overwhelming the API server when a single gateway has hundreds of routes.
+- **`crates/ugwc-k8s/src/status/parallel.rs`** — `run_bounded` helper using `buffer_unordered` with a concurrency cap.
+- **`crates/ugwc/src/reconcile.rs`** — `apply_attached_resource_statuses` runs route and ListenerSet status patches in parallel after gateway status; BackendTLSPolicy and InferencePool delegate to parallelized ugwc-k8s helpers.
+- **`UGWC_STATUS_PATCH_CONCURRENCY`** env var (default 16) caps concurrent patches per reconcile.
 
 ### Verification
 
 - Perftest with 50 gateways / 100 routes: per-reconcile duration should drop proportionally to the number of routes per gateway.
-- `ugwc_reconcile_duration_seconds` histogram p99 should show the improvement.
+- `ugwc_reconcile_duration_seconds` and `ugwc_status_patch_duration_seconds` histogram p99 should show the improvement.
 
 ### Notes
 
-- Status cache checks (`status_cache`) must remain correct under concurrent writes. Since each route status patch uses a distinct cache key (`route_ns/route_name`), concurrent patches for different routes within the same reconcile won't conflict.
-- The Gateway's own status patch should still happen before route status patches (it sets `Programmed` which routes may depend on for their condition).
+- Status cache checks (`status_cache`) remain correct under concurrent writes. Each route status patch uses a distinct cache key (`route_ns/route_name`).
+- The Gateway's own status patch still happens before route status patches (it sets `Programmed` which routes may depend on for their condition).
 
 ---
 

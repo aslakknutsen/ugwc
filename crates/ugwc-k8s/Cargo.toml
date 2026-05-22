@@ -33,3 +33,4 @@ default = []
 otel-context = ["dep:opentelemetry"]
 
 [dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time"] }

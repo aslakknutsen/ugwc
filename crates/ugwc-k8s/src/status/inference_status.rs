@@ -195,6 +195,159 @@ fn inference_pool_resolved_refs_ok(
     true
 }
 
+use super::run_bounded;
+
+async fn apply_one_inference_pool(
+    client: &Client,
+    gateway_ns: &str,
+    gateway_name: &str,
+    controller_name: &str,
+    snapshot: &ugwc_core::ClusterSnapshot,
+    programmed_ok: bool,
+    report: &CompileReport,
+    status_cache: Option<Arc<Mutex<HashMap<String, String>>>>,
+    pool_ns: String,
+    pool_name: String,
+) {
+    let pool_loaded = snapshot
+        .inference_pools
+        .iter()
+        .any(|p| p.namespace == pool_ns && p.name == pool_name);
+    let resolved_refs_ok =
+        inference_pool_resolved_refs_ok(snapshot, report, &pool_ns, &pool_name);
+    let accepted_ok = programmed_ok && resolved_refs_ok;
+
+    let resolved_refs_reason = if resolved_refs_ok {
+        "ResolvedRefs"
+    } else if !pool_loaded {
+        "BackendNotFound"
+    } else {
+        "InvalidExtensionRef"
+    };
+    let resolved_refs_message: String = if resolved_refs_ok {
+        "inference pool refs resolved".into()
+    } else if !pool_loaded {
+        format!("InferencePool {pool_ns}/{pool_name} not found")
+    } else {
+        "see route compile errors for InvalidExtensionRef / RefNotPermitted".into()
+    };
+
+    let accepted_reason = if accepted_ok {
+        "Accepted"
+    } else if !programmed_ok {
+        "HTTPRouteNotAccepted"
+    } else {
+        "InvalidExtensionRef"
+    };
+    let accepted_message: String = if accepted_ok {
+        "inference pool accepted for this gateway".into()
+    } else if !programmed_ok {
+        "gateway compile did not succeed".into()
+    } else {
+        resolved_refs_message.clone()
+    };
+
+    let api: Api<InferencePool> = Api::namespaced(client.clone(), &pool_ns);
+    let pool = match api.get(&pool_name).await {
+        Ok(p) => p,
+        Err(e) => {
+            warn!(
+                error = %e,
+                pool_ns = %pool_ns,
+                pool_name = %pool_name,
+                "get InferencePool for status"
+            );
+            return;
+        }
+    };
+    let gen = pool.metadata.generation.unwrap_or(0);
+    let mut parents: Vec<serde_json::Value> = pool
+        .status
+        .as_ref()
+        .map(|s| s.parents.clone())
+        .unwrap_or_default();
+
+    parents.retain(|row| {
+        let ctrl = row.get("controllerName").and_then(|x| x.as_str());
+        if ctrl != Some(controller_name) {
+            return true;
+        }
+        let Some(pref) = row.get("parentRef") else {
+            return true;
+        };
+        let g = pref.get("group").and_then(|x| x.as_str());
+        let k = pref.get("kind").and_then(|x| x.as_str());
+        let ns = pref.get("namespace").and_then(|x| x.as_str());
+        let n = pref.get("name").and_then(|x| x.as_str());
+        !(g == Some("gateway.networking.k8s.io")
+            && k == Some("Gateway")
+            && ns == Some(gateway_ns)
+            && n == Some(gateway_name))
+    });
+
+    let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+    let acc_st = if accepted_ok { "True" } else { "False" };
+    let rr_st = if resolved_refs_ok { "True" } else { "False" };
+
+    parents.push(serde_json::json!({
+        "parentRef": {
+            "group": "gateway.networking.k8s.io",
+            "kind": "Gateway",
+            "namespace": gateway_ns,
+            "name": gateway_name,
+        },
+        "controllerName": controller_name,
+        "conditions": [
+            {
+                "type": "Accepted",
+                "status": acc_st,
+                "reason": accepted_reason,
+                "message": accepted_message,
+                "lastTransitionTime": now,
+                "observedGeneration": gen
+            },
+            {
+                "type": "ResolvedRefs",
+                "status": rr_st,
+                "reason": resolved_refs_reason,
+                "message": resolved_refs_message,
+                "lastTransitionTime": now,
+                "observedGeneration": gen
+            }
+        ]
+    }));
+
+    let status = serde_json::json!({ "status": { "parents": parents } });
+
+    let pending_cache: Option<(String, String)> = if let Some(cache) = &status_cache {
+        let key = format!("inferencepool-merge:{pool_ns}/{pool_name}/{gateway_ns}/{gateway_name}");
+        let serialized = serde_json::to_string(&status).unwrap_or_default();
+        if cache.lock().unwrap().get(&key) == Some(&serialized) {
+            return;
+        }
+        Some((key, serialized))
+    } else {
+        None
+    };
+
+    if let Err(e) = api
+        .patch_status(&pool_name, &PatchParams::apply("ugwc"), &Patch::Merge(status))
+        .await
+    {
+        warn!(
+            error = %e,
+            pool_ns = %pool_ns,
+            pool_name = %pool_name,
+            "inferencepool status patch"
+        );
+        return;
+    }
+
+    if let (Some(cache), Some((key, serialized))) = (status_cache.as_ref(), pending_cache) {
+        cache.lock().unwrap().insert(key, serialized);
+    }
+}
+
 /// Merge `InferencePool` `status.parents` for pools referenced by routes attached to this Gateway.
 pub async fn apply_inference_pools_for_gateway(
     client: &Client,
@@ -205,138 +358,24 @@ pub async fn apply_inference_pools_for_gateway(
     programmed_ok: bool,
     report: &CompileReport,
     status_cache: Option<Arc<Mutex<HashMap<String, String>>>>,
+    status_patch_concurrency: usize,
 ) -> Result<(), kube::Error> {
     let pools = snapshot.referenced_inference_pools();
-    for (pool_ns, pool_name) in pools {
-        let pool_loaded = snapshot
-            .inference_pools
-            .iter()
-            .any(|p| p.namespace == pool_ns && p.name == pool_name);
-        let resolved_refs_ok =
-            inference_pool_resolved_refs_ok(snapshot, report, &pool_ns, &pool_name);
-        let accepted_ok = programmed_ok && resolved_refs_ok;
+    let futs = pools.into_iter().map(|(pool_ns, pool_name)| {
+        apply_one_inference_pool(
+            client,
+            gateway_ns,
+            gateway_name,
+            controller_name,
+            snapshot,
+            programmed_ok,
+            report,
+            status_cache.clone(),
+            pool_ns,
+            pool_name,
+        )
+    });
 
-        let resolved_refs_reason = if resolved_refs_ok {
-            "ResolvedRefs"
-        } else if !pool_loaded {
-            "BackendNotFound"
-        } else {
-            "InvalidExtensionRef"
-        };
-        let resolved_refs_message: String = if resolved_refs_ok {
-            "inference pool refs resolved".into()
-        } else if !pool_loaded {
-            format!("InferencePool {pool_ns}/{pool_name} not found")
-        } else {
-            "see route compile errors for InvalidExtensionRef / RefNotPermitted".into()
-        };
-
-        let accepted_reason = if accepted_ok {
-            "Accepted"
-        } else if !programmed_ok {
-            "HTTPRouteNotAccepted"
-        } else {
-            "InvalidExtensionRef"
-        };
-        let accepted_message: String = if accepted_ok {
-            "inference pool accepted for this gateway".into()
-        } else if !programmed_ok {
-            "gateway compile did not succeed".into()
-        } else {
-            resolved_refs_message.clone()
-        };
-
-        let api: Api<InferencePool> = Api::namespaced(client.clone(), &pool_ns);
-        let pool = match api.get(&pool_name).await {
-            Ok(p) => p,
-            Err(e) => {
-                warn!(
-                    error = %e,
-                    pool_ns = %pool_ns,
-                    pool_name = %pool_name,
-                    "get InferencePool for status"
-                );
-                continue;
-            }
-        };
-        let gen = pool.metadata.generation.unwrap_or(0);
-        let mut parents: Vec<serde_json::Value> = pool
-            .status
-            .as_ref()
-            .map(|s| s.parents.clone())
-            .unwrap_or_default();
-
-        parents.retain(|row| {
-            let ctrl = row.get("controllerName").and_then(|x| x.as_str());
-            if ctrl != Some(controller_name) {
-                return true;
-            }
-            let Some(pref) = row.get("parentRef") else {
-                return true;
-            };
-            let g = pref.get("group").and_then(|x| x.as_str());
-            let k = pref.get("kind").and_then(|x| x.as_str());
-            let ns = pref.get("namespace").and_then(|x| x.as_str());
-            let n = pref.get("name").and_then(|x| x.as_str());
-            !(g == Some("gateway.networking.k8s.io")
-                && k == Some("Gateway")
-                && ns == Some(gateway_ns)
-                && n == Some(gateway_name))
-        });
-
-        let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
-        let acc_st = if accepted_ok { "True" } else { "False" };
-        let rr_st = if resolved_refs_ok { "True" } else { "False" };
-
-        parents.push(serde_json::json!({
-            "parentRef": {
-                "group": "gateway.networking.k8s.io",
-                "kind": "Gateway",
-                "namespace": gateway_ns,
-                "name": gateway_name,
-            },
-            "controllerName": controller_name,
-            "conditions": [
-                {
-                    "type": "Accepted",
-                    "status": acc_st,
-                    "reason": accepted_reason,
-                    "message": accepted_message,
-                    "lastTransitionTime": now,
-                    "observedGeneration": gen
-                },
-                {
-                    "type": "ResolvedRefs",
-                    "status": rr_st,
-                    "reason": resolved_refs_reason,
-                    "message": resolved_refs_message,
-                    "lastTransitionTime": now,
-                    "observedGeneration": gen
-                }
-            ]
-        }));
-
-        let status = serde_json::json!({ "status": { "parents": parents } });
-
-        let pending_cache: Option<(String, String)> = if let Some(cache) = &status_cache {
-            let key =
-                format!("inferencepool-merge:{pool_ns}/{pool_name}/{gateway_ns}/{gateway_name}");
-            let serialized = serde_json::to_string(&status).unwrap_or_default();
-            if cache.lock().unwrap().get(&key) == Some(&serialized) {
-                continue;
-            }
-            Some((key, serialized))
-        } else {
-            None
-        };
-
-        let patch = Patch::Merge(status);
-        let params = PatchParams::apply("ugwc");
-        api.patch_status(&pool_name, &params, &patch).await?;
-
-        if let (Some(cache), Some((key, serialized))) = (status_cache.as_ref(), pending_cache) {
-            cache.lock().unwrap().insert(key, serialized);
-        }
-    }
+    run_bounded(status_patch_concurrency, futs).await;
     Ok(())
 }

@@ -28,6 +28,8 @@ ugwc exposes Prometheus metrics on the admin HTTP server. Gateway API **resource
 | `ugwc_index_gateways_indexed` | Gauge | — (gateways in reverse index) |
 | `ugwc_reconcile_duration_seconds` | Histogram | `controller_name` |
 | `ugwc_reconcile_runs_total` | Counter | `controller_name`, `status` |
+| `ugwc_status_patch_duration_seconds` | Histogram | — (attached resource status patches per reconcile) |
+| `ugwc_status_patch_count` | Histogram | — (status patch tasks submitted per reconcile) |
 | `ugwc_rest_client_request_duration_seconds` | Histogram | `verb`, `resource`, `code` |
 | `ugwc_rest_client_requests_total` | Counter | `verb`, `resource`, `code` |
 | `ugwc_compile_ir_listeners` | Gauge | — |

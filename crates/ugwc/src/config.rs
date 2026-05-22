@@ -30,6 +30,9 @@ fn default_xds_wire() -> String {
 fn default_reconcile_concurrency() -> usize {
     16
 }
+fn default_status_patch_concurrency() -> usize {
+    16
+}
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct Config {
@@ -60,6 +63,9 @@ pub struct Config {
     /// Concurrent gateway reconcile workers (dedup queue consumers).
     #[serde(default = "default_reconcile_concurrency")]
     pub reconcile_concurrency: usize,
+    /// Concurrent status patches per gateway reconcile (routes, policies, etc.).
+    #[serde(default = "default_status_patch_concurrency")]
+    pub status_patch_concurrency: usize,
     /// xDS wire profile for ADS responses: `gwxds` (Praxis) or `envoy` (RDS-only slice).
     #[serde(default = "default_xds_wire")]
     pub xds_wire: String,
@@ -107,6 +113,10 @@ pub enum ConfigError {
     ReconcileConcurrencyZero,
     #[error("UGWC_RECONCILE_CONCURRENCY must be <= 128")]
     ReconcileConcurrencyTooHigh,
+    #[error("UGWC_STATUS_PATCH_CONCURRENCY must be >= 1")]
+    StatusPatchConcurrencyZero,
+    #[error("UGWC_STATUS_PATCH_CONCURRENCY must be <= 128")]
+    StatusPatchConcurrencyTooHigh,
 }
 
 impl Config {
@@ -194,6 +204,12 @@ impl Config {
         if self.reconcile_concurrency > 128 {
             return Err(ConfigError::ReconcileConcurrencyTooHigh);
         }
+        if self.status_patch_concurrency == 0 {
+            return Err(ConfigError::StatusPatchConcurrencyZero);
+        }
+        if self.status_patch_concurrency > 128 {
+            return Err(ConfigError::StatusPatchConcurrencyTooHigh);
+        }
         Ok(())
     }
 
@@ -211,7 +227,7 @@ impl Config {
     #[must_use]
     pub fn log_summary(&self) -> String {
         format!(
-            "admin={} xds={} kube={} kube_watch=cluster insecure={} delta={} profile={} leader={} debounce_ms={} reconcile_workers={} xds_wire={} controllers={:?} dataplane={} profiles={}",
+            "admin={} xds={} kube={} kube_watch=cluster insecure={} delta={} profile={} leader={} debounce_ms={} reconcile_workers={} status_patch_concurrency={} xds_wire={} controllers={:?} dataplane={} profiles={}",
             self.admin_listen_addr,
             self.xds_listen_addr,
             self.kube_enable,
@@ -221,6 +237,7 @@ impl Config {
             self.leader_election,
             self.endpoint_debounce_ms,
             self.reconcile_concurrency,
+            self.status_patch_concurrency,
             self.xds_wire,
             self.controller_name_list(),
             self.dataplane_enable,
@@ -259,6 +276,18 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn rejects_zero_status_patch_concurrency() {
+        let c = Config {
+            status_patch_concurrency: 0,
+            ..sample()
+        };
+        assert!(matches!(
+            c.validate(),
+            Err(ConfigError::StatusPatchConcurrencyZero)
+        ));
+    }
+
     fn sample() -> Config {
         Config {
             admin_listen_addr: default_admin(),
@@ -275,6 +304,7 @@ mod tests {
             leader_election: false,
             endpoint_debounce_ms: default_endpoint_debounce_ms(),
             reconcile_concurrency: default_reconcile_concurrency(),
+            status_patch_concurrency: default_status_patch_concurrency(),
             xds_wire: default_xds_wire(),
             implementation_profiles_path: None,
             dataplane_enable: false,
