@@ -11,7 +11,6 @@ use axum::middleware::{self, Next};
 use axum::response::Response;
 use axum::routing::{get, put};
 use axum::Router;
-use metrics::histogram;
 use tokio::net::TcpListener;
 use tokio_util::sync::CancellationToken;
 use tower::ServiceBuilder;
@@ -19,11 +18,13 @@ use tower_http::timeout::TimeoutLayer;
 use tower_http::trace::TraceLayer;
 
 use crate::logging;
+use crate::metrics::{AdminMetrics, MethodStatusLabels};
 use crate::readiness::Readiness;
 
 #[derive(Clone)]
 struct AdminState {
     readiness: Arc<Readiness>,
+    admin_metrics: AdminMetrics,
 }
 
 async fn healthz() -> StatusCode {
@@ -70,17 +71,19 @@ async fn put_log_level(body: Bytes) -> StatusCode {
     }
 }
 
-async fn request_metrics(req: Request, next: Next) -> Response {
+async fn request_metrics(
+    State(st): State<AdminState>,
+    req: Request,
+    next: Next,
+) -> Response {
     let method = req.method().as_str().to_string();
     let started = Instant::now();
     let resp = next.run(req).await;
     let status = resp.status().as_u16().to_string();
-    histogram!(
-        "ugwc_admin_request_duration_seconds",
-        "method" => method,
-        "status" => status
-    )
-    .record(started.elapsed().as_secs_f64());
+    st.admin_metrics
+        .request_duration
+        .get_or_create(&MethodStatusLabels { method, status })
+        .observe(started.elapsed().as_secs_f64());
     resp
 }
 
@@ -89,18 +92,22 @@ pub async fn serve(
     listen: std::net::SocketAddr,
     shutdown: CancellationToken,
     readiness: Arc<Readiness>,
+    admin_metrics: AdminMetrics,
 ) -> Result<(), std::io::Error> {
-    let state = AdminState { readiness };
+    let state = AdminState {
+        readiness,
+        admin_metrics,
+    };
     let routes = Router::new()
         .route("/healthz", get(healthz))
         .route("/readyz", get(readyz))
         .route("/metrics", get(metrics_prom))
         .route("/log-level", put(put_log_level))
-        .with_state(state);
+        .with_state(state.clone());
 
     let app = Router::new()
         .nest("/", routes)
-        .layer(middleware::from_fn(request_metrics))
+        .layer(middleware::from_fn_with_state(state, request_metrics))
         .layer(
             ServiceBuilder::new()
                 .layer(TraceLayer::new_for_http())

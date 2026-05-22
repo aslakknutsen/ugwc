@@ -4,8 +4,8 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use arc_swap::ArcSwap;
-use metrics::counter;
 use parking_lot::RwLock;
+use prometheus_client::metrics::counter::Counter;
 use tokio::sync::watch;
 use ugwc_core::ir::{IrScopeId, IrSnapshot};
 
@@ -70,16 +70,18 @@ pub struct MultiScopeSnapshot {
     by_scope: RwLock<HashMap<String, Arc<IrSnapshot>>>,
     /// Bumps on every [`Self::store_scoped`] so ADS streams can push when IR changes.
     rev_tx: watch::Sender<u64>,
+    scope_miss: Counter,
 }
 
 impl MultiScopeSnapshot {
     #[must_use]
-    pub fn new(global_initial: IrSnapshot) -> Self {
+    pub fn new(global_initial: IrSnapshot, scope_miss: Counter) -> Self {
         let (rev_tx, _rev_rx) = watch::channel(0u64);
         Self {
             global: ArcSwap::from_pointee(global_initial),
             by_scope: RwLock::new(HashMap::new()),
             rev_tx,
+            scope_miss,
         }
     }
 
@@ -102,7 +104,7 @@ impl XdsSnapshotSource for MultiScopeSnapshot {
         match key {
             None | Some("global") | Some("*") => self.global.load_full(),
             Some(k) => self.by_scope.read().get(k).cloned().unwrap_or_else(|| {
-                counter!("ugwc_xds_scope_miss_total").increment(1);
+                self.scope_miss.inc();
                 Arc::new(IrSnapshot::empty_for_scope(IrScopeId(k.to_string())))
             }),
         }
@@ -140,10 +142,14 @@ mod tests {
     use ugwc_core::ir::IrScopeId;
     use ugwc_core::IrSnapshot;
 
+    fn test_multi_scope(initial: IrSnapshot) -> MultiScopeSnapshot {
+        MultiScopeSnapshot::new(initial, Counter::default())
+    }
+
     #[test]
     fn multi_scope_global_aliases() {
         let initial = IrSnapshot::empty_for_scope(IrScopeId::new("default", "compile-stub"));
-        let m = MultiScopeSnapshot::new(initial);
+        let m = test_multi_scope(initial);
         assert_eq!(
             m.resolve_for_discovery(None).scope.0,
             "default/compile-stub"
@@ -157,7 +163,7 @@ mod tests {
     #[test]
     fn multi_scope_stores_and_resolves() {
         let initial = IrSnapshot::empty_for_scope(IrScopeId::new("default", "compile-stub"));
-        let m = MultiScopeSnapshot::new(initial);
+        let m = test_multi_scope(initial);
         m.store_scoped(IrSnapshot::empty_for_scope(IrScopeId::new("ns", "gw")));
         let r = m.resolve_for_discovery(Some("ns/gw"));
         assert_eq!(r.scope.0, "ns/gw");
@@ -166,7 +172,7 @@ mod tests {
     #[test]
     fn remove_scoped_drops_entry() {
         let initial = IrSnapshot::empty_for_scope(IrScopeId::new("default", "a"));
-        let m = MultiScopeSnapshot::new(initial);
+        let m = test_multi_scope(initial);
         m.store_scoped(IrSnapshot::empty_for_scope(IrScopeId::new("ns", "gw")));
         assert_eq!(m.resolve_for_discovery(Some("ns/gw")).scope.0, "ns/gw");
         assert!(m.remove_scoped(&IrScopeId::new("ns", "gw")));
@@ -179,7 +185,7 @@ mod tests {
     #[tokio::test]
     async fn store_scoped_notifies_all_revision_watchers() {
         let initial = IrSnapshot::empty_for_scope(IrScopeId::new("default", "a"));
-        let m = std::sync::Arc::new(MultiScopeSnapshot::new(initial));
+        let m = std::sync::Arc::new(test_multi_scope(initial));
         let mut rx1 = m.revision_sender().subscribe();
         let mut rx2 = m.revision_sender().subscribe();
         let h1 = tokio::spawn(async move {

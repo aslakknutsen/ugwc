@@ -1,17 +1,53 @@
 //! Gateway reconcile queue with workqueue-style Prometheus metrics.
 //!
-//! Workqueue metrics use the global `metrics` recorder (installed by `ugwc::metrics::install`).
-//! Keep label sets fixed per metric name to avoid facade cardinality panics.
+//! Metrics are prometheus-client Family types passed in at construction.
 
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
-use metrics::{counter, gauge, histogram};
+use prometheus_client::encoding::EncodeLabelSet;
+use prometheus_client::metrics::counter::Counter;
+use prometheus_client::metrics::family::Family;
+use prometheus_client::metrics::gauge::Gauge;
+use prometheus_client::metrics::histogram::Histogram;
 use tokio::sync::mpsc;
 
 /// Queue name label for `ugwc_workqueue_*` metrics.
 pub const GATEWAY_RECONCILE_QUEUE: &str = "gateway_reconcile";
+
+#[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
+pub struct QueueNameLabels {
+    pub queue_name: String,
+}
+
+/// Metric handles for the workqueue, passed from the binary crate.
+#[derive(Clone)]
+pub struct WorkqueueMetrics {
+    pub adds: Family<QueueNameLabels, Counter>,
+    pub retries: Family<QueueNameLabels, Counter>,
+    pub depth: Family<QueueNameLabels, Gauge>,
+    pub longest_running_processor_seconds: Family<QueueNameLabels, Gauge>,
+    pub unfinished_work_seconds: Family<QueueNameLabels, Gauge>,
+    pub queue_duration_seconds: Family<QueueNameLabels, Histogram>,
+}
+
+impl WorkqueueMetrics {
+    /// Create a no-op metrics set (for tests or non-k8s mode).
+    #[must_use]
+    pub fn noop() -> Self {
+        Self {
+            adds: Family::default(),
+            retries: Family::default(),
+            depth: Family::default(),
+            longest_running_processor_seconds: Family::default(),
+            unfinished_work_seconds: Family::default(),
+            queue_duration_seconds: Family::new_with_constructor(|| {
+                Histogram::new(std::iter::once(1.0))
+            }),
+        }
+    }
+}
 
 struct QueueItem {
     ns: String,
@@ -24,7 +60,6 @@ struct QueueStats {
     depth: AtomicUsize,
     in_flight: AtomicUsize,
     longest_running_secs: AtomicU64,
-    /// Start time of each in-flight reconcile (sum of ages → unfinished_work gauge).
     in_flight_started: Mutex<Vec<Instant>>,
 }
 
@@ -48,19 +83,22 @@ impl QueueStats {
             .sum()
     }
 
-    fn publish_gauges(&self, queue_name: &str) {
-        gauge!("ugwc_workqueue_depth", "queue_name" => queue_name.to_string())
-            .set(self.depth.load(Ordering::Relaxed) as f64);
-        gauge!(
-            "ugwc_workqueue_longest_running_processor_seconds",
-            "queue_name" => queue_name.to_string()
-        )
-        .set(self.longest_running_secs.load(Ordering::Relaxed) as f64);
-        gauge!(
-            "ugwc_workqueue_unfinished_work_seconds",
-            "queue_name" => queue_name.to_string()
-        )
-        .set(self.unfinished_work_seconds());
+    fn publish_gauges(&self, wq_metrics: &WorkqueueMetrics, queue_name: &str) {
+        let labels = QueueNameLabels {
+            queue_name: queue_name.to_string(),
+        };
+        wq_metrics
+            .depth
+            .get_or_create(&labels)
+            .set(self.depth.load(Ordering::Relaxed) as i64);
+        wq_metrics
+            .longest_running_processor_seconds
+            .get_or_create(&labels)
+            .set(self.longest_running_secs.load(Ordering::Relaxed) as i64);
+        wq_metrics
+            .unfinished_work_seconds
+            .get_or_create(&labels)
+            .set(self.unfinished_work_seconds() as i64);
     }
 }
 
@@ -70,6 +108,7 @@ pub struct ReconcileSender {
     tx: mpsc::Sender<QueueItem>,
     stats: Arc<QueueStats>,
     draining: Arc<AtomicBool>,
+    wq_metrics: WorkqueueMetrics,
 }
 
 impl ReconcileSender {
@@ -77,18 +116,12 @@ impl ReconcileSender {
         if self.draining.load(Ordering::Relaxed) {
             return Err(());
         }
-        counter!(
-            "ugwc_workqueue_adds_total",
-            "queue_name" => GATEWAY_RECONCILE_QUEUE.to_string()
-        )
-        .increment(1);
-        let depth = self.stats.depth.fetch_add(1, Ordering::Relaxed) + 1;
-        gauge!(
-            "ugwc_workqueue_depth",
-            "queue_name" => GATEWAY_RECONCILE_QUEUE.to_string()
-        )
-        .set(depth as f64);
-        self.stats.publish_gauges(GATEWAY_RECONCILE_QUEUE);
+        let labels = QueueNameLabels {
+            queue_name: GATEWAY_RECONCILE_QUEUE.to_string(),
+        };
+        self.wq_metrics.adds.get_or_create(&labels).inc();
+        self.stats.depth.fetch_add(1, Ordering::Relaxed);
+        self.stats.publish_gauges(&self.wq_metrics, GATEWAY_RECONCILE_QUEUE);
         self.tx
             .send(QueueItem {
                 ns,
@@ -114,6 +147,7 @@ impl ReconcileSender {
 #[derive(Clone)]
 pub struct ReconcileQueueMetrics {
     stats: Arc<QueueStats>,
+    wq_metrics: WorkqueueMetrics,
 }
 
 impl ReconcileQueueMetrics {
@@ -122,6 +156,7 @@ impl ReconcileQueueMetrics {
     pub fn noop() -> Self {
         Self {
             stats: Arc::new(QueueStats::new()),
+            wq_metrics: WorkqueueMetrics::noop(),
         }
     }
 
@@ -143,7 +178,7 @@ impl ReconcileQueueMetrics {
             .lock()
             .expect("in_flight_started lock")
             .push(started);
-        self.stats.publish_gauges(GATEWAY_RECONCILE_QUEUE);
+        self.stats.publish_gauges(&self.wq_metrics, GATEWAY_RECONCILE_QUEUE);
         started
     }
 
@@ -161,7 +196,7 @@ impl ReconcileQueueMetrics {
                 .longest_running_secs
                 .store(elapsed, Ordering::Relaxed);
         }
-        self.stats.publish_gauges(GATEWAY_RECONCILE_QUEUE);
+        self.stats.publish_gauges(&self.wq_metrics, GATEWAY_RECONCILE_QUEUE);
     }
 }
 
@@ -175,6 +210,7 @@ pub struct ReconcileQueue {
 #[must_use]
 pub fn new_reconcile_queue(
     capacity: usize,
+    wq_metrics: WorkqueueMetrics,
 ) -> (ReconcileSender, ReconcileQueue, ReconcileQueueMetrics) {
     let (tx, rx) = mpsc::channel(capacity);
     let stats = Arc::new(QueueStats::new());
@@ -182,36 +218,38 @@ pub fn new_reconcile_queue(
         tx,
         stats: stats.clone(),
         draining: Arc::new(AtomicBool::new(false)),
+        wq_metrics: wq_metrics.clone(),
     };
-    let metrics = ReconcileQueueMetrics { stats: stats.clone() };
+    let queue_metrics = ReconcileQueueMetrics {
+        stats: stats.clone(),
+        wq_metrics: wq_metrics.clone(),
+    };
     let queue = ReconcileQueue {
         rx,
-        metrics: metrics.clone(),
+        metrics: queue_metrics.clone(),
     };
-    (sender, queue, metrics)
+    (sender, queue, queue_metrics)
 }
 
 impl ReconcileQueue {
     pub async fn recv(&mut self) -> Option<(String, String)> {
         let item = self.rx.recv().await?;
         let wait = item.enqueued_at.elapsed().as_secs_f64();
-        histogram!(
-            "ugwc_workqueue_queue_duration_seconds",
-            "queue_name" => GATEWAY_RECONCILE_QUEUE.to_string()
-        )
-        .record(wait);
-        let depth = self
-            .metrics
+        let labels = QueueNameLabels {
+            queue_name: GATEWAY_RECONCILE_QUEUE.to_string(),
+        };
+        self.metrics
+            .wq_metrics
+            .queue_duration_seconds
+            .get_or_create(&labels)
+            .observe(wait);
+        self.metrics
             .stats
             .depth
-            .fetch_sub(1, Ordering::Relaxed)
-            .saturating_sub(1);
-        gauge!(
-            "ugwc_workqueue_depth",
-            "queue_name" => GATEWAY_RECONCILE_QUEUE.to_string()
-        )
-        .set(depth as f64);
-        self.metrics.stats.publish_gauges(GATEWAY_RECONCILE_QUEUE);
+            .fetch_sub(1, Ordering::Relaxed);
+        self.metrics
+            .stats
+            .publish_gauges(&self.metrics.wq_metrics, GATEWAY_RECONCILE_QUEUE);
         Some((item.ns, item.name))
     }
 
@@ -229,12 +267,17 @@ impl ReconcileQueue {
     }
 }
 
-pub fn record_workqueue_retry(queue_name: &str) {
-    counter!(
-        "ugwc_workqueue_retries_total",
-        "queue_name" => queue_name.to_string()
-    )
-    .increment(1);
+pub fn record_workqueue_retry(wq_metrics: &WorkqueueMetrics, queue_name: &str) {
+    let labels = QueueNameLabels {
+        queue_name: queue_name.to_string(),
+    };
+    wq_metrics.retries.get_or_create(&labels).inc();
+}
+
+impl ReconcileQueue {
+    pub fn record_retry(&self) {
+        record_workqueue_retry(&self.metrics.wq_metrics, GATEWAY_RECONCILE_QUEUE);
+    }
 }
 
 #[cfg(test)]
@@ -243,7 +286,8 @@ mod tests {
 
     #[tokio::test]
     async fn depth_tracks_send_and_recv() {
-        let (tx, mut queue, metrics) = new_reconcile_queue(8);
+        let wq = WorkqueueMetrics::noop();
+        let (tx, mut queue, metrics) = new_reconcile_queue(8, wq);
         assert_eq!(metrics.in_flight(), 0);
         tx.send("ns".into(), "gw".into()).await.unwrap();
         assert_eq!(
@@ -260,7 +304,8 @@ mod tests {
 
     #[tokio::test]
     async fn unfinished_work_seconds_accumulates_while_reconcile_in_flight() {
-        let (_tx, queue, metrics) = new_reconcile_queue(8);
+        let wq = WorkqueueMetrics::noop();
+        let (_tx, queue, metrics) = new_reconcile_queue(8, wq);
         let started = queue.begin_reconcile();
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         let unfinished = metrics.unfinished_work_seconds();
@@ -277,7 +322,8 @@ mod tests {
 
     #[tokio::test]
     async fn send_rejected_after_close() {
-        let (tx, _queue, _metrics) = new_reconcile_queue(8);
+        let wq = WorkqueueMetrics::noop();
+        let (tx, _queue, _metrics) = new_reconcile_queue(8, wq);
         tx.close();
         assert!(tx.send("ns".into(), "gw".into()).await.is_err());
     }

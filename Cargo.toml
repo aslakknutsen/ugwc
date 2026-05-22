@@ -7,6 +7,7 @@ members = [
     "crates/ugwc-k8s",
     "crates/ugwc-xds",
 ]
+exclude = ["crates/metrics-prometheus-client"]
 
 [workspace.package]
 version = "0.1.0"
@@ -60,19 +61,10 @@ hex = "0.4"
 tokio-stream = { version = "0.1", features = ["sync"] }
 tokio-util = "0.7"
 strum = { version = "0.26", features = ["derive"] }
-metrics = "0.24"
-metrics-exporter-prometheus = { version = "0.16", default-features = false, features = [
-    "http-listener",
-] }
-prometheus-client = "0.22"
-metrics-prometheus-client = "0.0.1"
-metrics-process = "2.4"
+prometheus-client = "0.23"
+kubert-prometheus-process = "0.2"
 hyper-util = { version = "0.1", features = ["client", "client-legacy", "tokio"] }
 tokio-metrics = "0.4"
 opentelemetry = "0.27"
 opentelemetry_sdk = { version = "0.27", features = ["rt-tokio"] }
 opentelemetry-otlp = { version = "0.27", features = ["grpc-tonic", "metrics", "trace"] }
-
-# metrics-prometheus-client 0.0.1 on crates.io pins metrics 0.23; ugwc uses 0.24.
-[patch.crates-io]
-metrics-prometheus-client = { path = "crates/metrics-prometheus-client" }

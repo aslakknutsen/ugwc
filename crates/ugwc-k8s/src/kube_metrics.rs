@@ -11,25 +11,49 @@ use tokio::sync::Mutex;
 use http::{Request, Response};
 use kube::client::ClientBuilder;
 use kube::{Client, Config};
-use metrics::{counter, histogram};
+use prometheus_client::encoding::EncodeLabelSet;
+use prometheus_client::metrics::counter::Counter;
+use prometheus_client::metrics::family::Family;
+use prometheus_client::metrics::histogram::Histogram;
 use tower::{Layer, Service};
 
+#[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
+pub struct RestClientLabels {
+    pub verb: String,
+    pub resource: String,
+    pub code: String,
+}
+
+/// Metrics families for the Kubernetes REST client layer.
+#[derive(Clone)]
+pub struct KubeClientMetrics {
+    pub requests: Family<RestClientLabels, Counter>,
+    pub request_duration: Family<RestClientLabels, Histogram>,
+}
+
 /// Build a [`Client`] with REST request duration metrics on the HTTP stack.
-pub async fn try_default_instrumented() -> Result<Client, kube::Error> {
+pub async fn try_default_instrumented(
+    metrics: KubeClientMetrics,
+) -> Result<Client, kube::Error> {
     let config = Config::infer()
         .await
         .map_err(|e| kube::Error::Service(format!("config infer: {e}").into()))?;
-    instrumented_client(config).await
+    instrumented_client(config, metrics).await
 }
 
 /// Build a [`Client`] from `config` with REST metrics.
-pub async fn instrumented_client(config: Config) -> Result<Client, kube::Error> {
+pub async fn instrumented_client(
+    config: Config,
+    metrics: KubeClientMetrics,
+) -> Result<Client, kube::Error> {
     let builder = ClientBuilder::try_from(config)?;
-    Ok(builder.with_layer(&RestMetricsLayer).build())
+    Ok(builder.with_layer(&RestMetricsLayer { metrics }).build())
 }
 
-#[derive(Clone, Copy, Default)]
-pub struct RestMetricsLayer;
+#[derive(Clone)]
+pub struct RestMetricsLayer {
+    metrics: KubeClientMetrics,
+}
 
 impl<S> Layer<S> for RestMetricsLayer {
     type Service = RestMetricsService<S>;
@@ -37,6 +61,7 @@ impl<S> Layer<S> for RestMetricsLayer {
     fn layer(&self, inner: S) -> Self::Service {
         RestMetricsService {
             inner: Arc::new(Mutex::new(inner)),
+            metrics: self.metrics.clone(),
         }
     }
 }
@@ -44,6 +69,7 @@ impl<S> Layer<S> for RestMetricsLayer {
 #[derive(Clone)]
 pub struct RestMetricsService<S> {
     inner: Arc<Mutex<S>>,
+    metrics: KubeClientMetrics,
 }
 
 impl<S, ReqBody, ResBody> Service<Request<ReqBody>> for RestMetricsService<S>
@@ -58,7 +84,6 @@ where
     type Future = Pin<Box<dyn Future<Output = Result<Self::Response, Self::Error>> + Send>>;
 
     fn poll_ready(&mut self, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
-        // Lock is taken per request in `call`; readiness is delegated to the inner service there.
         Poll::Ready(Ok(()))
     }
 
@@ -73,6 +98,7 @@ where
         let resource = k8s_resource_from_path(req.uri().path()).to_string();
         let started = Instant::now();
         let inner = self.inner.clone();
+        let metrics = self.metrics.clone();
         Box::pin(async move {
             let result = inner.lock().await.call(req).await;
             let code = result
@@ -80,20 +106,16 @@ where
                 .ok()
                 .map(|r| r.status().as_u16().to_string())
                 .unwrap_or_else(|| "0".to_string());
-            counter!(
-                "ugwc_rest_client_requests_total",
-                "verb" => verb.clone(),
-                "resource" => resource.clone(),
-                "code" => code.clone()
-            )
-            .increment(1);
-            histogram!(
-                "ugwc_rest_client_request_duration_seconds",
-                "verb" => verb,
-                "resource" => resource,
-                "code" => code
-            )
-            .record(started.elapsed().as_secs_f64());
+            let labels = RestClientLabels {
+                verb,
+                resource,
+                code,
+            };
+            metrics.requests.get_or_create(&labels).inc();
+            metrics
+                .request_duration
+                .get_or_create(&labels)
+                .observe(started.elapsed().as_secs_f64());
             result
         })
     }

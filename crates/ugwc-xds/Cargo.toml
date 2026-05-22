@@ -7,7 +7,7 @@ repository.workspace = true
 description = "xDS gRPC server and encoding for ugwc"
 
 [dependencies]
-metrics.workspace = true
+prometheus-client.workspace = true
 ugwc-core = { path = "../ugwc-core" }
 ugwc-gwxds = { path = "../ugwc-gwxds" }
 parking_lot.workspace = true

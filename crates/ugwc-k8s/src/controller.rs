@@ -16,7 +16,7 @@ use tracing::{info, instrument, warn};
 
 use crate::crd_supervisor::{run_crd_supervisor, ActiveCrds};
 use crate::initial_sync::InitialSyncGate;
-use crate::reconcile_queue::{record_workqueue_retry, ReconcileQueue, ReconcileSender, GATEWAY_RECONCILE_QUEUE};
+use crate::reconcile_queue::{ReconcileQueue, ReconcileSender};
 use crate::resources::Gateway;
 use crate::watch_enqueue::{
     drain_gateway_keys, gateway_key_for_managed_service, gateway_keys_all,
@@ -210,7 +210,7 @@ pub async fn run_gateway_controller(
                 let result = reconcile(ns, name).await;
                 work_queue.end_reconcile(proc_started);
                 if let Err(e) = result {
-                    record_workqueue_retry(GATEWAY_RECONCILE_QUEUE);
+                    work_queue.record_retry();
                     warn!(error = %e, "reconcile");
                 }
             }

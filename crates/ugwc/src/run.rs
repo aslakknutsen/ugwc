@@ -17,8 +17,8 @@ use crate::metrics;
 use crate::readiness::Readiness;
 
 pub async fn run(cfg: Config) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    metrics::install()?;
-    crate::tokio_runtime_metrics::spawn();
+    let m = metrics::install()?;
+    crate::tokio_runtime_metrics::spawn(m.tokio.clone());
     if let Some(ref ep) = cfg.otlp_endpoint {
         if !ep.trim().is_empty() {
             crate::otlp::init_metrics(
@@ -37,7 +37,9 @@ pub async fn run(cfg: Config) -> Result<(), Box<dyn std::error::Error + Send + S
             ..Default::default()
         },
     )?;
-    let cache: Arc<MultiScopeSnapshot> = Arc::new(MultiScopeSnapshot::new(initial_out.snapshot));
+    let cache: Arc<MultiScopeSnapshot> =
+        Arc::new(MultiScopeSnapshot::new(initial_out.snapshot, m.xds.scope_miss.clone()));
+    
 
     let shutdown = tokio_util::sync::CancellationToken::new();
     let admin_sd = shutdown.child_token();
@@ -50,10 +52,12 @@ pub async fn run(cfg: Config) -> Result<(), Box<dyn std::error::Error + Send + S
 
     let admin_addr: SocketAddr = cfg.admin_listen_addr.parse()?;
     let readiness_admin = readiness.clone();
+    let admin_metrics = m.admin.clone();
     let admin_task = ugwc_k8s::spawn_with_trace_context(crate::admin::serve(
         admin_addr,
         admin_sd,
         readiness_admin,
+        admin_metrics,
     ));
 
     let xds_addr: SocketAddr = cfg.xds_listen_addr.parse()?;
@@ -71,20 +75,24 @@ pub async fn run(cfg: Config) -> Result<(), Box<dyn std::error::Error + Send + S
 
     let cache_xds: Arc<dyn XdsSnapshotSource> = cache.clone();
     let revision_tx = Some(cache.revision_sender());
+    let xds_server_metrics = m.xds.server.clone();
     let xds_task = ugwc_k8s::spawn_with_trace_context(async move {
-        if let Err(e) = serve_xds(xds_cfg, cache_xds, revision_tx, xds_sd).await {
+        if let Err(e) = serve_xds(xds_cfg, cache_xds, revision_tx, xds_sd, xds_server_metrics).await {
             tracing::error!(error = %e, "xds server exited");
         }
     });
 
+    let gateway_state_metrics = m.gateway_state.clone();
+
     if cfg.kube_enable {
         let fp_k = fp.clone();
         let cache_k = cache.clone();
-        let client = match ugwc_k8s::try_default_instrumented().await {
+        let client = match ugwc_k8s::try_default_instrumented(m.kube_client.clone()).await {
             Ok(c) => c,
             Err(e) => {
                 warn!(error = %e, "kube client unavailable — disable UGWC_KUBE_ENABLE or fix kubeconfig");
-                let (noop_tx, _, noop_metrics) = ugwc_k8s::new_reconcile_queue(1);
+                let (noop_tx, _, noop_metrics) =
+                    ugwc_k8s::new_reconcile_queue(1, ugwc_k8s::WorkqueueMetrics::noop());
                 wait_shutdown(
                     shutdown,
                     readiness,
@@ -145,7 +153,8 @@ pub async fn run(cfg: Config) -> Result<(), Box<dyn std::error::Error + Send + S
         let active_crds_reconcile = active_crds.clone();
         let status_cache_k = status_cache.clone();
         let gateway_events = ugwc_k8s::GatewayEvents::new(client.clone());
-        let (reconcile_tx, work_queue, queue_metrics) = ugwc_k8s::new_reconcile_queue(256);
+        let (reconcile_tx, work_queue, queue_metrics) =
+            ugwc_k8s::new_reconcile_queue(256, m.workqueue.clone());
         let sync_gate = Arc::new(ugwc_k8s::InitialSyncGate::new(Some(
             Readiness::on_cache_synced_callback(readiness.clone()),
         )));
@@ -166,6 +175,7 @@ pub async fn run(cfg: Config) -> Result<(), Box<dyn std::error::Error + Send + S
                 let active_crds = active_crds_reconcile.clone();
                 let controller_name = primary_controller.clone();
                 let gateway_events = gateway_events.clone();
+                let gateway_state_metrics = gateway_state_metrics.clone();
                 Box::pin(async move {
                     let reconcile_started = Instant::now();
                     let outcome = crate::reconcile::reconcile_gateway(
@@ -183,6 +193,7 @@ pub async fn run(cfg: Config) -> Result<(), Box<dyn std::error::Error + Send + S
                             xds_wire,
                             active_crds,
                             events: Some(gateway_events.clone()),
+                            gateway_state_metrics,
                         },
                         ns,
                         name,
@@ -225,7 +236,8 @@ pub async fn run(cfg: Config) -> Result<(), Box<dyn std::error::Error + Send + S
             warn!("UGWC_LEADER_ELECTION requires UGWC_KUBE_ENABLE — running as single leader");
         }
         metrics::set_leader_active(true);
-        let (noop_tx, _, noop_metrics) = ugwc_k8s::new_reconcile_queue(1);
+        let (noop_tx, _, noop_metrics) =
+            ugwc_k8s::new_reconcile_queue(1, ugwc_k8s::WorkqueueMetrics::noop());
         wait_shutdown(
             shutdown,
             readiness,

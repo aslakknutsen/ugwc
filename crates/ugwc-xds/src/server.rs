@@ -6,11 +6,15 @@ use std::sync::Arc;
 
 use futures::Stream;
 use prost::Message;
+use prometheus_client::encoding::EncodeLabelSet;
+use prometheus_client::metrics::counter::Counter;
+use prometheus_client::metrics::family::Family;
+use prometheus_client::metrics::gauge::Gauge;
+use prometheus_client::metrics::histogram::Histogram;
 use tokio::sync::{mpsc, watch};
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::transport::{Identity, Certificate, Server, ServerTlsConfig};
 use tonic::{Request, Response, Status, Streaming};
-use metrics::{counter, gauge, histogram};
 use tracing::{info, warn, Instrument};
 use ugwc_core::IrSnapshot;
 
@@ -22,6 +26,33 @@ use xds_api::pb::envoy::service::discovery::v3::{
     DeltaDiscoveryRequest, DeltaDiscoveryResponse, DiscoveryRequest, DiscoveryResponse,
 };
 use xds_api::pb::google::protobuf::Any;
+
+#[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
+pub struct XdsDisconnectLabels {
+    pub reason: String,
+}
+
+#[derive(Clone, Debug, Hash, PartialEq, Eq)]
+pub struct NoLabels;
+
+impl prometheus_client::encoding::EncodeLabelSet for NoLabels {
+    fn encode(
+        &self,
+        _encoder: prometheus_client::encoding::LabelSetEncoder,
+    ) -> Result<(), std::fmt::Error> {
+        Ok(())
+    }
+}
+
+/// xDS server metric handles.
+#[derive(Clone)]
+pub struct XdsMetrics {
+    pub streams_active: Gauge,
+    pub stream_disconnects: Family<XdsDisconnectLabels, Counter>,
+    pub push_bytes: Counter,
+    pub push_resources: Gauge,
+    pub push_duration: Family<NoLabels, Histogram>,
+}
 
 /// Control-plane behaviour for plaintext vs TLS + explicit insecure prototype flag.
 #[derive(Clone, Debug)]
@@ -48,6 +79,7 @@ struct AdsService {
     xds_wire: String,
     /// When set, ADS streams subscribe for pushes after `store_scoped` bumps the watch.
     revision_tx: Option<watch::Sender<u64>>,
+    metrics: XdsMetrics,
 }
 
 #[tonic::async_trait]
@@ -66,11 +98,12 @@ impl AggregatedDiscoveryService for AdsService {
             ads.method = "StreamAggregatedResources",
             "xds stream opened"
         );
-        gauge!("ugwc_xds_streams_active").increment(1.0);
+        self.metrics.streams_active.inc();
 
         let cache = self.cache.clone();
         let wire = self.xds_wire.clone();
         let revision_tx = self.revision_tx.clone();
+        let metrics = self.metrics.clone();
         let (tx, rx) = mpsc::channel(8);
 
         tokio::spawn(async move {
@@ -97,7 +130,7 @@ impl AggregatedDiscoveryService for AdsService {
                                         last_type_url.clone_from(&req.type_url);
                                     }
                                     let type_url = last_type_url.as_str();
-                                    if send_discovery_response(snap.as_ref(), &wire, type_url, &tx)
+                                    if send_discovery_response(snap.as_ref(), &wire, type_url, &tx, &metrics)
                                         .await
                                         .is_err()
                                     {
@@ -127,6 +160,7 @@ impl AggregatedDiscoveryService for AdsService {
                                 Some(nk.as_str()),
                                 &mut last_sent_revision,
                                 &tx,
+                                &metrics,
                             )
                             .await
                             .is_err()
@@ -152,7 +186,7 @@ impl AggregatedDiscoveryService for AdsService {
                                 last_type_url.clone_from(&req.type_url);
                             }
                             let type_url = last_type_url.as_str();
-                            if send_discovery_response(snap.as_ref(), &wire, type_url, &tx)
+                            if send_discovery_response(snap.as_ref(), &wire, type_url, &tx, &metrics)
                                 .await
                                 .is_err()
                             {
@@ -168,12 +202,13 @@ impl AggregatedDiscoveryService for AdsService {
                 }
             }
 
-            gauge!("ugwc_xds_streams_active").decrement(1.0);
-            counter!(
-                "ugwc_xds_stream_disconnects_total",
-                "reason" => "stream_end"
-            )
-            .increment(1);
+            metrics.streams_active.dec();
+            metrics
+                .stream_disconnects
+                .get_or_create(&XdsDisconnectLabels {
+                    reason: "stream_end".to_string(),
+                })
+                .inc();
             info!(
                 ads.method = "StreamAggregatedResources",
                 "xds stream closed"
@@ -222,17 +257,21 @@ async fn send_discovery_response(
     wire: &str,
     type_url: &str,
     tx: &mpsc::Sender<Result<DiscoveryResponse, Status>>,
+    metrics: &XdsMetrics,
 ) -> Result<(), ()> {
     let push_started = std::time::Instant::now();
     let resp = discovery_response(snap, wire, type_url);
-    counter!("ugwc_xds_push_bytes_total").increment(resp.encoded_len() as u64);
-    gauge!("ugwc_xds_push_resources").set(resp.resources.len() as f64);
+    metrics.push_bytes.inc_by(resp.encoded_len() as u64);
+    metrics.push_resources.set(resp.resources.len() as i64);
     let out = if tx.send(Ok(resp)).await.is_err() {
         Err(())
     } else {
         Ok(())
     };
-    histogram!("ugwc_xds_push_duration_seconds").record(push_started.elapsed().as_secs_f64());
+    metrics
+        .push_duration
+        .get_or_create(&NoLabels)
+        .observe(push_started.elapsed().as_secs_f64());
     out
 }
 
@@ -243,13 +282,14 @@ async fn send_snapshot_if_revision_changed(
     node_key: Option<&str>,
     last_sent_revision: &mut Option<String>,
     tx: &mpsc::Sender<Result<DiscoveryResponse, Status>>,
+    metrics: &XdsMetrics,
 ) -> Result<(), ()> {
     let snap = cache.resolve_for_discovery(node_key);
     let rev = snap.revision_token();
     if last_sent_revision.as_deref() == Some(rev.as_str()) {
         return Ok(());
     }
-    send_discovery_response(snap.as_ref(), wire, type_url, tx).await?;
+    send_discovery_response(snap.as_ref(), wire, type_url, tx, metrics).await?;
     *last_sent_revision = Some(rev);
     Ok(())
 }
@@ -304,12 +344,14 @@ pub async fn serve(
     cache: Arc<dyn XdsSnapshotSource>,
     revision_tx: Option<watch::Sender<u64>>,
     shutdown: tokio_util::sync::CancellationToken,
+    metrics: XdsMetrics,
 ) -> Result<(), XdsServeError> {
     let svc = AdsService {
         cache,
         allow_delta: cfg.allow_delta,
         xds_wire: cfg.xds_wire.clone(),
         revision_tx,
+        metrics,
     };
 
     let ads = AggregatedDiscoveryServiceServer::new(svc);

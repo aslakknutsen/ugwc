@@ -17,6 +17,7 @@ use ugwc_core::{
 use ugwc_k8s::resources::{Gateway, ListenerSet};
 use ugwc_xds::{MultiScopeSnapshot, XdsSnapshotSource};
 
+use crate::gateway_state_metrics::GatewayStateMetrics;
 use crate::implementation_profiles::{self, DataPlaneKind};
 use crate::leader::LeaderState;
 use crate::metrics;
@@ -36,6 +37,7 @@ pub struct ReconcileCtx {
     pub xds_wire: String,
     pub active_crds: ugwc_k8s::ActiveCrds,
     pub events: Option<ugwc_k8s::GatewayEvents>,
+    pub gateway_state_metrics: GatewayStateMetrics,
 }
 
 #[instrument(
@@ -126,7 +128,7 @@ pub async fn reconcile_gateway(ctx: ReconcileCtx, ns: String, name: String) -> R
                     let programmed_ok =
                         !co.report.has_blocking_errors() && !co.snapshot.meta.has_errors;
                     if let Some(ref snap) = input.cluster {
-                        crate::gateway_state_metrics::record_from_reconcile(snap, programmed_ok);
+                        ctx.gateway_state_metrics.record_from_reconcile(snap, programmed_ok);
                     }
 
                     if let Err(e) = ugwc_k8s::apply_gateway_reconciled_status(
@@ -472,6 +474,7 @@ async fn reconcile_gateway_gone(ctx: &ReconcileCtx, ns: &str, name: &str) -> Res
         let _ = ctx.cache.remove_scoped(&scope);
         metrics::record_publish_applied();
     }
+    ctx.gateway_state_metrics.clear_gateway(ns, name);
     if ctx.dataplane_enable {
         if let Err(e) = ugwc_k8s::deprovision_per_gateway_praxis(&ctx.client, ns, name).await {
             warn!(error = %e, %ns, %name, "dataplane deprovision after gateway delete");

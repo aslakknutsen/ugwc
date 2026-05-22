@@ -1,51 +1,171 @@
 //! Prometheus metrics (`/metrics` on admin router).
 //!
-//! Facade macros bridge into a [`prometheus_client::Registry`] via
-//! [`metrics_prometheus_client::MetricsCollector`]. Process metrics use the
-//! `metrics-process` crate which registers through the `metrics` facade.
+//! All metrics use `prometheus-client` `Family` types directly — no global
+//! recorder or facade bridge.  Process metrics via `kubert-prometheus-process`.
 //!
-//! `reconcile_duration_seconds` uses a native `prometheus_client` histogram so
-//! that exemplars (with `trace_id`) can be attached — the facade bridge cannot
-//! carry exemplar labels.
+//! `reconcile_duration_seconds` carries trace-id exemplars.
 
 use std::sync::{Mutex, OnceLock};
 
-use metrics::{counter, gauge, histogram};
-use metrics_prometheus_client::MetricsCollector;
-use prometheus_client::encoding::{EncodeLabelSet, text::encode};
+use prometheus_client::encoding::text::encode;
+use prometheus_client::encoding::EncodeLabelSet;
+use prometheus_client::metrics::counter::Counter;
 use prometheus_client::metrics::exemplar::HistogramWithExemplars;
 use prometheus_client::metrics::family::Family;
-use prometheus_client::metrics::histogram::exponential_buckets;
+use prometheus_client::metrics::gauge::Gauge;
+use prometheus_client::metrics::histogram::{exponential_buckets, Histogram};
 use prometheus_client::registry::Registry;
 
+// ---------------------------------------------------------------------------
+// Label sets
+// ---------------------------------------------------------------------------
+
 #[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
-struct ControllerLabel {
-    controller_name: String,
+pub struct ControllerStatusLabels {
+    pub controller_name: String,
+    pub status: String,
 }
 
 #[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
-struct TraceIdLabel {
-    trace_id: String,
+pub struct ControllerLabel {
+    pub controller_name: String,
 }
+
+#[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
+pub struct TraceIdLabel {
+    pub trace_id: String,
+}
+
+#[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
+pub struct RouteKindLabels {
+    pub route_kind: String,
+}
+
+#[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
+pub struct MethodStatusLabels {
+    pub method: String,
+    pub status: String,
+}
+
+
+// Empty label set for metrics without labels.
+#[derive(Clone, Debug, Hash, PartialEq, Eq)]
+pub struct NoLabels;
+
+impl prometheus_client::encoding::EncodeLabelSet for NoLabels {
+    fn encode(
+        &self,
+        _encoder: prometheus_client::encoding::LabelSetEncoder,
+    ) -> Result<(), std::fmt::Error> {
+        Ok(())
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Metrics handles — passed into subsystems at startup
+// ---------------------------------------------------------------------------
 
 type ReconcileHistogramFamily = Family<ControllerLabel, HistogramWithExemplars<TraceIdLabel>>;
 
+/// Core reconcile/compile/publish metrics.
+#[derive(Clone)]
+pub struct ReconcileMetrics {
+    pub reconcile_runs: Family<ControllerStatusLabels, Counter>,
+    pub reconcile_duration: ReconcileHistogramFamily,
+    pub compile_errors: Counter,
+    pub compile_duration: Family<NoLabels, Histogram>,
+    pub snapshot_load_duration: Family<NoLabels, Histogram>,
+    pub publish_skipped: Counter,
+    pub publish_applied: Counter,
+    pub leader_active: Gauge,
+    pub cache_synced: Gauge,
+    pub ir_listeners: Gauge,
+    pub ir_routes: Gauge,
+    pub ir_backends: Gauge,
+    pub dataplane_apply: Counter,
+    pub dataplane_error: Counter,
+    pub ungranted_references: Family<RouteKindLabels, Counter>,
+}
+
+/// Admin HTTP request metrics.
+#[derive(Clone)]
+pub struct AdminMetrics {
+    pub request_duration: Family<MethodStatusLabels, Histogram>,
+}
+
+/// Workqueue metrics for ugwc-k8s (re-use the struct from ugwc_k8s).
+pub type WorkqueueMetrics = ugwc_k8s::WorkqueueMetrics;
+
+/// Kubernetes REST client metrics (re-use the struct from ugwc_k8s).
+pub type KubeClientMetrics = ugwc_k8s::KubeClientMetrics;
+
+/// xDS metrics: server-side handles + scope miss counter for cache.
+#[derive(Clone)]
+pub struct XdsMetrics {
+    pub server: ugwc_xds::XdsMetrics,
+    pub scope_miss: Counter,
+}
+
+/// Tokio runtime gauges (feature-gated).
+#[derive(Clone)]
+#[allow(dead_code)]
+pub struct TokioMetrics {
+    pub workers_count: Gauge,
+    pub total_busy_duration_seconds: Gauge,
+    pub total_polls_count: Gauge,
+    pub total_noop_count: Gauge,
+    pub total_steal_count: Gauge,
+    pub total_steal_operations: Gauge,
+    pub total_local_schedule_count: Gauge,
+    pub total_overflow_count: Gauge,
+    pub injection_queue_depth: Gauge,
+    pub budget_forced_yield_count: Gauge,
+    pub total_local_queue_depth: Gauge,
+    pub mean_poll_duration_seconds: Gauge,
+}
+
+/// Top-level handle holding all metric families. Cheap to clone (all Arc-backed internally).
+#[derive(Clone)]
+pub struct Metrics {
+    pub reconcile: ReconcileMetrics,
+    pub admin: AdminMetrics,
+    pub workqueue: WorkqueueMetrics,
+    pub kube_client: KubeClientMetrics,
+    pub xds: XdsMetrics,
+    pub tokio: TokioMetrics,
+    pub gateway_state: crate::gateway_state_metrics::GatewayStateMetrics,
+}
+
+// ---------------------------------------------------------------------------
+// Global state (registry + handles)
+// ---------------------------------------------------------------------------
+
 struct MetricsState {
     registry: Mutex<Registry>,
-    reconcile_duration: ReconcileHistogramFamily,
+    handles: Metrics,
 }
 
 static STATE: OnceLock<MetricsState> = OnceLock::new();
-static PROCESS_COLLECTOR: OnceLock<metrics_process::Collector> = OnceLock::new();
 
-/// Install the global metrics recorder and process collector.
-pub fn install() -> Result<(), String> {
-    if STATE.get().is_some() {
-        return Ok(());
+/// Build the registry, register all families, and return the metrics handles.
+/// Safe to call multiple times (idempotent).
+pub fn install() -> Result<Metrics, String> {
+    if let Some(s) = STATE.get() {
+        return Ok(s.handles.clone());
     }
+
     let mut registry = Registry::default();
-    let collector: MetricsCollector = metrics_prometheus_client::install();
-    registry.register_collector(Box::new(collector));
+
+    // -- Process metrics (kubert-prometheus-process) --
+    let _ = kubert_prometheus_process::register(registry.sub_registry_with_prefix("process"));
+
+    // -- Reconcile --
+    let reconcile_runs = Family::<ControllerStatusLabels, Counter>::default();
+    registry.register(
+        "ugwc_reconcile_runs",
+        "Total gateway reconcile runs",
+        reconcile_runs.clone(),
+    );
 
     let reconcile_duration: ReconcileHistogramFamily = Family::new_with_constructor(|| {
         HistogramWithExemplars::new(exponential_buckets(0.005, 2.0, 12))
@@ -56,57 +176,367 @@ pub fn install() -> Result<(), String> {
         reconcile_duration.clone(),
     );
 
+    let compile_errors = Counter::default();
+    registry.register(
+        "ugwc_compile_errors",
+        "Compile errors total",
+        compile_errors.clone(),
+    );
+
+    let compile_duration = Family::<NoLabels, Histogram>::new_with_constructor(|| {
+        Histogram::new(exponential_buckets(0.001, 2.0, 14))
+    });
+    registry.register(
+        "ugwc_compile_duration_seconds",
+        "Duration of compile step in seconds",
+        compile_duration.clone(),
+    );
+
+    let snapshot_load_duration = Family::<NoLabels, Histogram>::new_with_constructor(|| {
+        Histogram::new(exponential_buckets(0.001, 2.0, 14))
+    });
+    registry.register(
+        "ugwc_snapshot_load_duration_seconds",
+        "Duration of cluster snapshot load in seconds",
+        snapshot_load_duration.clone(),
+    );
+
+    let publish_skipped = Counter::default();
+    registry.register(
+        "ugwc_publish_skipped",
+        "Publish skipped total",
+        publish_skipped.clone(),
+    );
+
+    let publish_applied = Counter::default();
+    registry.register(
+        "ugwc_publish_applied",
+        "Publish applied total",
+        publish_applied.clone(),
+    );
+
+    let leader_active = Gauge::default();
+    registry.register("ugwc_leader_active", "Leader election active", leader_active.clone());
+
+    let cache_synced = Gauge::default();
+    registry.register("ugwc_cache_synced", "Cache synced (readiness)", cache_synced.clone());
+
+    let ir_listeners = Gauge::default();
+    registry.register("ugwc_compile_ir_listeners", "IR listener count", ir_listeners.clone());
+
+    let ir_routes = Gauge::default();
+    registry.register("ugwc_compile_ir_routes", "IR route count", ir_routes.clone());
+
+    let ir_backends = Gauge::default();
+    registry.register("ugwc_compile_ir_backends", "IR backend count", ir_backends.clone());
+
+    let dataplane_apply = Counter::default();
+    registry.register("ugwc_dataplane_apply", "Dataplane apply total", dataplane_apply.clone());
+
+    let dataplane_error = Counter::default();
+    registry.register("ugwc_dataplane_error", "Dataplane error total", dataplane_error.clone());
+
+    let ungranted_references = Family::<RouteKindLabels, Counter>::default();
+    registry.register(
+        "ugwc_ungranted_reference",
+        "Cross-namespace RefNotPermitted findings",
+        ungranted_references.clone(),
+    );
+
+    // -- Admin --
+    let admin_request_duration =
+        Family::<MethodStatusLabels, Histogram>::new_with_constructor(|| {
+            Histogram::new(exponential_buckets(0.001, 2.0, 12))
+        });
+    registry.register(
+        "ugwc_admin_request_duration_seconds",
+        "Admin HTTP request duration",
+        admin_request_duration.clone(),
+    );
+
+    // -- Workqueue --
+    use ugwc_k8s::reconcile_queue::QueueNameLabels;
+    let wq_adds = Family::<QueueNameLabels, Counter>::default();
+    registry.register("ugwc_workqueue_adds", "Workqueue adds total", wq_adds.clone());
+
+    let wq_retries = Family::<QueueNameLabels, Counter>::default();
+    registry.register("ugwc_workqueue_retries", "Workqueue retries total", wq_retries.clone());
+
+    let wq_depth = Family::<QueueNameLabels, Gauge>::default();
+    registry.register("ugwc_workqueue_depth", "Workqueue depth", wq_depth.clone());
+
+    let wq_longest = Family::<QueueNameLabels, Gauge>::default();
+    registry.register(
+        "ugwc_workqueue_longest_running_processor_seconds",
+        "Longest running processor seconds",
+        wq_longest.clone(),
+    );
+
+    let wq_unfinished = Family::<QueueNameLabels, Gauge>::default();
+    registry.register(
+        "ugwc_workqueue_unfinished_work_seconds",
+        "Unfinished work seconds",
+        wq_unfinished.clone(),
+    );
+
+    let wq_queue_duration =
+        Family::<QueueNameLabels, Histogram>::new_with_constructor(|| {
+            Histogram::new(exponential_buckets(0.001, 2.0, 14))
+        });
+    registry.register(
+        "ugwc_workqueue_queue_duration_seconds",
+        "Time spent in queue before processing",
+        wq_queue_duration.clone(),
+    );
+
+    // -- Kube REST client --
+    use ugwc_k8s::kube_metrics::RestClientLabels;
+    let kube_requests = Family::<RestClientLabels, Counter>::default();
+    registry.register(
+        "ugwc_rest_client_requests",
+        "Kubernetes REST client requests total",
+        kube_requests.clone(),
+    );
+
+    let kube_request_duration =
+        Family::<RestClientLabels, Histogram>::new_with_constructor(|| {
+            Histogram::new(exponential_buckets(0.001, 2.0, 14))
+        });
+    registry.register(
+        "ugwc_rest_client_request_duration_seconds",
+        "Kubernetes REST client request duration",
+        kube_request_duration.clone(),
+    );
+
+    // -- xDS --
+    let xds_streams_active = Gauge::default();
+    registry.register(
+        "ugwc_xds_streams_active",
+        "Active ADS streams",
+        xds_streams_active.clone(),
+    );
+
+    let xds_disconnects =
+        Family::<ugwc_xds::XdsDisconnectLabels, Counter>::default();
+    registry.register(
+        "ugwc_xds_stream_disconnects",
+        "xDS stream disconnects total",
+        xds_disconnects.clone(),
+    );
+
+    let xds_push_bytes = Counter::default();
+    registry.register("ugwc_xds_push_bytes", "xDS push bytes total", xds_push_bytes.clone());
+
+    let xds_push_resources = Gauge::default();
+    registry.register(
+        "ugwc_xds_push_resources",
+        "xDS push resource count",
+        xds_push_resources.clone(),
+    );
+
+    let xds_push_duration =
+        Family::<ugwc_xds::XdsNoLabels, Histogram>::new_with_constructor(|| {
+            Histogram::new(exponential_buckets(0.0001, 2.0, 14))
+        });
+    registry.register(
+        "ugwc_xds_push_duration_seconds",
+        "xDS push encoding duration",
+        xds_push_duration.clone(),
+    );
+
+    let xds_scope_miss = Counter::default();
+    registry.register(
+        "ugwc_xds_scope_miss",
+        "xDS scope miss total",
+        xds_scope_miss.clone(),
+    );
+
+    // -- Tokio runtime --
+    let tokio_workers = Gauge::default();
+    registry.register("ugwc_tokio_workers_count", "Tokio worker count", tokio_workers.clone());
+
+    let tokio_busy = Gauge::default();
+    registry.register(
+        "ugwc_tokio_total_busy_duration_seconds",
+        "Tokio total busy duration",
+        tokio_busy.clone(),
+    );
+
+    let tokio_polls = Gauge::default();
+    registry.register("ugwc_tokio_total_polls_count", "Tokio total polls", tokio_polls.clone());
+
+    let tokio_noop = Gauge::default();
+    registry.register("ugwc_tokio_total_noop_count", "Tokio total noop count", tokio_noop.clone());
+
+    let tokio_steal = Gauge::default();
+    registry.register(
+        "ugwc_tokio_total_steal_count",
+        "Tokio total steal count",
+        tokio_steal.clone(),
+    );
+
+    let tokio_steal_ops = Gauge::default();
+    registry.register(
+        "ugwc_tokio_total_steal_operations",
+        "Tokio total steal operations",
+        tokio_steal_ops.clone(),
+    );
+
+    let tokio_local_sched = Gauge::default();
+    registry.register(
+        "ugwc_tokio_total_local_schedule_count",
+        "Tokio local schedule count",
+        tokio_local_sched.clone(),
+    );
+
+    let tokio_overflow = Gauge::default();
+    registry.register(
+        "ugwc_tokio_total_overflow_count",
+        "Tokio overflow count",
+        tokio_overflow.clone(),
+    );
+
+    let tokio_inject_depth = Gauge::default();
+    registry.register(
+        "ugwc_tokio_injection_queue_depth",
+        "Tokio injection queue depth",
+        tokio_inject_depth.clone(),
+    );
+
+    let tokio_yield = Gauge::default();
+    registry.register(
+        "ugwc_tokio_budget_forced_yield_count",
+        "Tokio budget forced yield count",
+        tokio_yield.clone(),
+    );
+
+    let tokio_local_depth = Gauge::default();
+    registry.register(
+        "ugwc_tokio_total_local_queue_depth",
+        "Tokio total local queue depth",
+        tokio_local_depth.clone(),
+    );
+
+    let tokio_mean_poll = Gauge::default();
+    registry.register(
+        "ugwc_tokio_mean_poll_duration_seconds",
+        "Tokio mean poll duration",
+        tokio_mean_poll.clone(),
+    );
+
+    // -- Gateway API state gauges --
+    let gateway_state = crate::gateway_state_metrics::GatewayStateMetrics::register(&mut registry);
+
+    let handles = Metrics {
+        reconcile: ReconcileMetrics {
+            reconcile_runs,
+            reconcile_duration,
+            compile_errors,
+            compile_duration,
+            snapshot_load_duration,
+            publish_skipped,
+            publish_applied,
+            leader_active,
+            cache_synced,
+            ir_listeners,
+            ir_routes,
+            ir_backends,
+            dataplane_apply,
+            dataplane_error,
+            ungranted_references,
+        },
+        admin: AdminMetrics {
+            request_duration: admin_request_duration,
+        },
+        workqueue: WorkqueueMetrics {
+            adds: wq_adds,
+            retries: wq_retries,
+            depth: wq_depth,
+            longest_running_processor_seconds: wq_longest,
+            unfinished_work_seconds: wq_unfinished,
+            queue_duration_seconds: wq_queue_duration,
+        },
+        kube_client: KubeClientMetrics {
+            requests: kube_requests,
+            request_duration: kube_request_duration,
+        },
+        xds: XdsMetrics {
+            server: ugwc_xds::XdsMetrics {
+                streams_active: xds_streams_active,
+                stream_disconnects: xds_disconnects,
+                push_bytes: xds_push_bytes,
+                push_resources: xds_push_resources,
+                push_duration: xds_push_duration,
+            },
+            scope_miss: xds_scope_miss,
+        },
+        tokio: TokioMetrics {
+            workers_count: tokio_workers,
+            total_busy_duration_seconds: tokio_busy,
+            total_polls_count: tokio_polls,
+            total_noop_count: tokio_noop,
+            total_steal_count: tokio_steal,
+            total_steal_operations: tokio_steal_ops,
+            total_local_schedule_count: tokio_local_sched,
+            total_overflow_count: tokio_overflow,
+            injection_queue_depth: tokio_inject_depth,
+            budget_forced_yield_count: tokio_yield,
+            total_local_queue_depth: tokio_local_depth,
+            mean_poll_duration_seconds: tokio_mean_poll,
+        },
+        gateway_state,
+    };
+
     let _ = STATE.set(MetricsState {
         registry: Mutex::new(registry),
-        reconcile_duration,
+        handles: handles.clone(),
     });
-    let process = PROCESS_COLLECTOR.get_or_init(|| {
-        let c = metrics_process::Collector::default();
-        c.describe();
-        c
-    });
-    let _ = process;
-    Ok(())
+
+    Ok(handles)
+}
+
+/// Get the installed metrics handles (panics if install() was not called).
+pub fn get() -> &'static Metrics {
+    &STATE.get().expect("metrics::install() not called").handles
 }
 
 /// Full Prometheus text exposition for `/metrics`.
 pub fn render() -> Result<String, String> {
     let state = STATE.get().ok_or_else(|| "metrics not installed".to_string())?;
-    if let Some(process) = PROCESS_COLLECTOR.get() {
-        process.collect();
-    }
     let registry = state.registry.lock().map_err(|e| e.to_string())?;
     let mut body = String::new();
     encode(&mut body, &registry).map_err(|e| e.to_string())?;
     Ok(body)
 }
 
-// --- Reconcile SLO (controller_name, status) ---
+// ---------------------------------------------------------------------------
+// Convenience functions (thin wrappers for backward compat from reconcile.rs)
+// ---------------------------------------------------------------------------
 
 pub fn record_reconcile_run(controller_name: &str, success: bool) {
+    let m = get();
     let status = if success { "success" } else { "error" };
-    counter!(
-        "ugwc_reconcile_runs_total",
-        "controller_name" => controller_name.to_string(),
-        "status" => status.to_string()
-    )
-    .increment(1);
+    m.reconcile
+        .reconcile_runs
+        .get_or_create(&ControllerStatusLabels {
+            controller_name: controller_name.to_string(),
+            status: status.to_string(),
+        })
+        .inc();
 }
 
-/// Reconcile latency histogram with trace_id exemplar (when OTel is active).
 pub fn observe_reconcile_duration_seconds(controller_name: &str, seconds: f64) {
-    let Some(state) = STATE.get() else { return };
+    let m = get();
     let label = ControllerLabel {
         controller_name: controller_name.to_string(),
     };
     let exemplar = current_trace_id_exemplar();
-    state
+    m.reconcile
         .reconcile_duration
         .get_or_create(&label)
         .observe(seconds, exemplar);
 }
 
-/// Extract the active OTel trace_id (if any) for histogram exemplars.
 fn current_trace_id_exemplar() -> Option<TraceIdLabel> {
     #[cfg(feature = "otlp-traces")]
     {
@@ -122,59 +552,69 @@ fn current_trace_id_exemplar() -> Option<TraceIdLabel> {
     None
 }
 
-// --- Domain counters / histograms ---
-
 pub fn record_compile_error() {
-    counter!("ugwc_compile_errors_total").increment(1);
+    get().reconcile.compile_errors.inc();
 }
 
 pub fn record_publish_skipped() {
-    counter!("ugwc_publish_skipped_total").increment(1);
+    get().reconcile.publish_skipped.inc();
 }
 
 pub fn record_publish_applied() {
-    counter!("ugwc_publish_applied_total").increment(1);
+    get().reconcile.publish_applied.inc();
 }
 
 pub fn set_leader_active(active: bool) {
-    gauge!("ugwc_leader_active").set(if active { 1.0 } else { 0.0 });
+    let g = &get().reconcile.leader_active;
+    g.set(if active { 1 } else { 0 });
 }
 
 pub fn set_cache_synced(synced: bool) {
-    gauge!("ugwc_cache_synced").set(if synced { 1.0 } else { 0.0 });
+    let g = &get().reconcile.cache_synced;
+    g.set(if synced { 1 } else { 0 });
 }
 
 pub fn observe_compile_seconds(seconds: f64) {
-    histogram!("ugwc_compile_duration_seconds").record(seconds);
+    get()
+        .reconcile
+        .compile_duration
+        .get_or_create(&NoLabels)
+        .observe(seconds);
 }
 
 pub fn observe_snapshot_load_seconds(seconds: f64) {
-    histogram!("ugwc_snapshot_load_duration_seconds").record(seconds);
+    get()
+        .reconcile
+        .snapshot_load_duration
+        .get_or_create(&NoLabels)
+        .observe(seconds);
 }
 
 pub fn set_compile_output_size(listeners: usize, routes: usize, backends: usize) {
-    gauge!("ugwc_compile_ir_listeners").set(listeners as f64);
-    gauge!("ugwc_compile_ir_routes").set(routes as f64);
-    gauge!("ugwc_compile_ir_backends").set(backends as f64);
+    let m = get();
+    m.reconcile.ir_listeners.set(listeners as i64);
+    m.reconcile.ir_routes.set(routes as i64);
+    m.reconcile.ir_backends.set(backends as i64);
 }
 
 pub fn record_dataplane_apply() {
-    counter!("ugwc_dataplane_apply_total").increment(1);
+    get().reconcile.dataplane_apply.inc();
 }
 
 pub fn record_dataplane_error() {
-    counter!("ugwc_dataplane_error_total").increment(1);
+    get().reconcile.dataplane_error.inc();
 }
 
-/// Increment per cross-namespace `RefNotPermitted` finding from a compile pass.
 pub fn record_ungranted_references(report: &ugwc_core::CompileReport) {
+    let m = get();
     for err in &report.errors {
         if err.reason == "RefNotPermitted" {
-            counter!(
-                "ugwc_ungranted_reference_total",
-                "route_kind" => err.kind.clone()
-            )
-            .increment(1);
+            m.reconcile
+                .ungranted_references
+                .get_or_create(&RouteKindLabels {
+                    route_kind: err.kind.clone(),
+                })
+                .inc();
         }
     }
 }
@@ -184,48 +624,23 @@ mod tests {
     use super::*;
 
     #[test]
-    fn render_exports_facade_counters() {
-        install().expect("metrics install");
-        counter!(
-            "ugwc_reconcile_runs_total",
-            "controller_name" => "test",
-            "status" => "success"
-        )
-        .increment(1);
-        gauge!(
-            "gatewayapi_gateway_status",
-            "namespace" => "ns",
-            "name" => "gw",
-            "status" => "Programmed",
-            "source" => "ugwc"
-        )
-        .set(1.0);
+    fn render_exports_registered_metrics() {
+        let _handles = install().expect("metrics install");
+        record_reconcile_run("test", true);
+        record_compile_error();
+        set_leader_active(true);
         let body = render().expect("render");
         assert!(
-            body.contains("ugwc_reconcile_runs_total"),
+            body.contains("ugwc_reconcile_runs"),
             "missing reconcile counter in:\n{body}"
         );
         assert!(
-            !body.contains("ugwc_reconcile_runs_total_total"),
-            "double _total suffix in:\n{body}"
+            body.contains("ugwc_compile_errors"),
+            "missing compile errors in:\n{body}"
         );
         assert!(
-            body.contains("gatewayapi_gateway_status"),
-            "missing gateway status gauge in:\n{body}"
+            body.contains("ugwc_leader_active"),
+            "missing leader active in:\n{body}"
         );
-        // metrics 0.24 re-registers on every macro call; must not panic on repeat.
-        counter!(
-            "ugwc_reconcile_runs_total",
-            "controller_name" => "test",
-            "status" => "success"
-        )
-        .increment(1);
-        counter!(
-            "ugwc_compile_errors_total",
-        )
-        .increment(1);
-        counter!("ugwc_compile_errors_total").increment(1);
-        let body = render().expect("render after repeat");
-        assert!(body.contains("ugwc_compile_errors_total"));
     }
 }
