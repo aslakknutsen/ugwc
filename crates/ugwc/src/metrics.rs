@@ -262,6 +262,13 @@ pub fn install() -> Result<Metrics, String> {
     let wq_retries = Family::<QueueNameLabels, Counter>::default();
     registry.register("ugwc_workqueue_retries", "Workqueue retries total", wq_retries.clone());
 
+    let wq_dedup = Family::<QueueNameLabels, Counter>::default();
+    registry.register(
+        "ugwc_workqueue_dedup",
+        "Workqueue enqueue calls deduplicated (key already pending)",
+        wq_dedup.clone(),
+    );
+
     let wq_depth = Family::<QueueNameLabels, Gauge>::default();
     registry.register("ugwc_workqueue_depth", "Workqueue depth", wq_depth.clone());
 
@@ -451,6 +458,7 @@ pub fn install() -> Result<Metrics, String> {
         workqueue: WorkqueueMetrics {
             adds: wq_adds,
             retries: wq_retries,
+            dedup: wq_dedup,
             depth: wq_depth,
             longest_running_processor_seconds: wq_longest,
             unfinished_work_seconds: wq_unfinished,

@@ -1,7 +1,9 @@
 //! Gateway reconcile queue with workqueue-style Prometheus metrics.
 //!
-//! Metrics are prometheus-client Family types passed in at construction.
+//! Keys are deduplicated: pending duplicates are dropped, in-flight re-enqueues
+//! are coalesced via a dirty bit (client-go workqueue semantics).
 
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
@@ -11,7 +13,7 @@ use prometheus_client::metrics::counter::Counter;
 use prometheus_client::metrics::family::Family;
 use prometheus_client::metrics::gauge::Gauge;
 use prometheus_client::metrics::histogram::Histogram;
-use tokio::sync::mpsc;
+use tokio::sync::Notify;
 
 /// Queue name label for `ugwc_workqueue_*` metrics.
 pub const GATEWAY_RECONCILE_QUEUE: &str = "gateway_reconcile";
@@ -26,6 +28,7 @@ pub struct QueueNameLabels {
 pub struct WorkqueueMetrics {
     pub adds: Family<QueueNameLabels, Counter>,
     pub retries: Family<QueueNameLabels, Counter>,
+    pub dedup: Family<QueueNameLabels, Counter>,
     pub depth: Family<QueueNameLabels, Gauge>,
     pub longest_running_processor_seconds: Family<QueueNameLabels, Gauge>,
     pub unfinished_work_seconds: Family<QueueNameLabels, Gauge>,
@@ -39,6 +42,7 @@ impl WorkqueueMetrics {
         Self {
             adds: Family::default(),
             retries: Family::default(),
+            dedup: Family::default(),
             depth: Family::default(),
             longest_running_processor_seconds: Family::default(),
             unfinished_work_seconds: Family::default(),
@@ -49,10 +53,194 @@ impl WorkqueueMetrics {
     }
 }
 
-struct QueueItem {
+#[derive(Clone, Debug, Hash, PartialEq, Eq)]
+struct QueueKey {
     ns: String,
     name: String,
-    enqueued_at: Instant,
+}
+
+impl QueueKey {
+    fn new(ns: String, name: String) -> Self {
+        Self { ns, name }
+    }
+}
+
+#[derive(Debug)]
+struct DedupInner {
+    pending: VecDeque<QueueKey>,
+    pending_set: HashSet<QueueKey>,
+    in_flight: HashSet<QueueKey>,
+    dirty: HashSet<QueueKey>,
+    enqueued_at: HashMap<QueueKey, Instant>,
+    closed: bool,
+}
+
+impl DedupInner {
+    fn new() -> Self {
+        Self {
+            pending: VecDeque::new(),
+            pending_set: HashSet::new(),
+            in_flight: HashSet::new(),
+            dirty: HashSet::new(),
+            enqueued_at: HashMap::new(),
+            closed: false,
+        }
+    }
+}
+
+#[derive(Debug)]
+struct DedupQueue {
+    inner: Mutex<DedupInner>,
+    notify: Notify,
+    capacity: usize,
+}
+
+enum EnqueueOutcome {
+    Added,
+    Deduped,
+    MarkedDirty,
+    Closed,
+    Full,
+}
+
+impl DedupQueue {
+    fn new(capacity: usize) -> Self {
+        Self {
+            inner: Mutex::new(DedupInner::new()),
+            notify: Notify::new(),
+            capacity,
+        }
+    }
+
+    fn try_enqueue(&self, key: QueueKey) -> EnqueueOutcome {
+        let mut inner = self.inner.lock().expect("dedup queue lock");
+        if inner.closed {
+            return EnqueueOutcome::Closed;
+        }
+        if inner.pending_set.contains(&key) {
+            return EnqueueOutcome::Deduped;
+        }
+        if inner.in_flight.contains(&key) {
+            inner.dirty.insert(key);
+            return EnqueueOutcome::MarkedDirty;
+        }
+        if inner.pending.len() >= self.capacity {
+            return EnqueueOutcome::Full;
+        }
+        let now = Instant::now();
+        inner.pending.push_back(key.clone());
+        inner.pending_set.insert(key.clone());
+        inner.enqueued_at.insert(key, now);
+        EnqueueOutcome::Added
+    }
+
+    async fn enqueue(
+        &self,
+        key: QueueKey,
+        wq_metrics: &WorkqueueMetrics,
+        stats: &QueueStats,
+    ) -> Result<(), ()> {
+        let labels = QueueNameLabels {
+            queue_name: GATEWAY_RECONCILE_QUEUE.to_string(),
+        };
+        loop {
+            match self.try_enqueue(key.clone()) {
+                EnqueueOutcome::Added => {
+                    wq_metrics.adds.get_or_create(&labels).inc();
+                    sync_depth(stats, &self.inner.lock().expect("dedup queue lock"));
+                    stats.publish_gauges(wq_metrics, GATEWAY_RECONCILE_QUEUE);
+                    self.notify.notify_waiters();
+                    return Ok(());
+                }
+                EnqueueOutcome::Deduped => {
+                    wq_metrics.dedup.get_or_create(&labels).inc();
+                    return Ok(());
+                }
+                EnqueueOutcome::MarkedDirty => return Ok(()),
+                EnqueueOutcome::Closed => return Err(()),
+                EnqueueOutcome::Full => {
+                    self.notify.notified().await;
+                }
+            }
+        }
+    }
+
+    async fn dequeue(&self, stats: &QueueStats, wq_metrics: &WorkqueueMetrics) -> Option<(String, String, Instant)> {
+        loop {
+            let item = {
+                let mut inner = self.inner.lock().expect("dedup queue lock");
+                if let Some(key) = inner.pending.pop_front() {
+                    inner.pending_set.remove(&key);
+                    let enqueued_at = inner
+                        .enqueued_at
+                        .remove(&key)
+                        .unwrap_or_else(Instant::now);
+                    inner.in_flight.insert(key.clone());
+                    inner.dirty.remove(&key);
+                    Some((key.ns, key.name, enqueued_at))
+                } else if inner.closed {
+                    return None;
+                } else {
+                    None
+                }
+            };
+            if let Some((ns, name, enqueued_at)) = item {
+                sync_depth(stats, &self.inner.lock().expect("dedup queue lock"));
+                stats.publish_gauges(wq_metrics, GATEWAY_RECONCILE_QUEUE);
+                self.notify.notify_waiters();
+                return Some((ns, name, enqueued_at));
+            }
+            self.notify.notified().await;
+        }
+    }
+
+    fn done(
+        &self,
+        ns: &str,
+        name: &str,
+        wq_metrics: &WorkqueueMetrics,
+        stats: &QueueStats,
+        draining: bool,
+    ) {
+        let key = QueueKey::new(ns.to_string(), name.to_string());
+        let mut inner = self.inner.lock().expect("dedup queue lock");
+        if !inner.in_flight.remove(&key) {
+            debug_assert!(
+                false,
+                "done called for key not in flight: {}/{}",
+                ns, name
+            );
+            return;
+        }
+        let was_dirty = inner.dirty.remove(&key);
+        if was_dirty && !inner.closed && !draining {
+            let labels = QueueNameLabels {
+                queue_name: GATEWAY_RECONCILE_QUEUE.to_string(),
+            };
+            wq_metrics.retries.get_or_create(&labels).inc();
+            let now = Instant::now();
+            inner.pending.push_back(key.clone());
+            inner.pending_set.insert(key.clone());
+            inner.enqueued_at.insert(key, now);
+            sync_depth(stats, &inner);
+            stats.publish_gauges(wq_metrics, GATEWAY_RECONCILE_QUEUE);
+            drop(inner);
+            self.notify.notify_waiters();
+        }
+    }
+
+    fn close(&self) {
+        let mut inner = self.inner.lock().expect("dedup queue lock");
+        inner.closed = true;
+        drop(inner);
+        self.notify.notify_waiters();
+    }
+}
+
+fn sync_depth(stats: &QueueStats, inner: &DedupInner) {
+    stats
+        .depth
+        .store(inner.pending.len(), Ordering::Relaxed);
 }
 
 #[derive(Debug)]
@@ -105,7 +293,7 @@ impl QueueStats {
 /// Cloneable handle for enqueueing gateway reconcile keys.
 #[derive(Clone)]
 pub struct ReconcileSender {
-    tx: mpsc::Sender<QueueItem>,
+    queue: Arc<DedupQueue>,
     stats: Arc<QueueStats>,
     draining: Arc<AtomicBool>,
     wq_metrics: WorkqueueMetrics,
@@ -116,25 +304,19 @@ impl ReconcileSender {
         if self.draining.load(Ordering::Relaxed) {
             return Err(());
         }
-        let labels = QueueNameLabels {
-            queue_name: GATEWAY_RECONCILE_QUEUE.to_string(),
-        };
-        self.wq_metrics.adds.get_or_create(&labels).inc();
-        self.stats.depth.fetch_add(1, Ordering::Relaxed);
-        self.stats.publish_gauges(&self.wq_metrics, GATEWAY_RECONCILE_QUEUE);
-        self.tx
-            .send(QueueItem {
-                ns,
-                name,
-                enqueued_at: Instant::now(),
-            })
+        self.queue
+            .enqueue(
+                QueueKey::new(ns, name),
+                &self.wq_metrics,
+                &self.stats,
+            )
             .await
-            .map_err(|_| ())
     }
 
     /// Stop accepting new reconcile keys (graceful shutdown).
     pub fn close(&self) {
         self.draining.store(true, Ordering::Relaxed);
+        self.queue.close();
     }
 
     #[must_use]
@@ -202,8 +384,9 @@ impl ReconcileQueueMetrics {
 
 /// Consumes reconcile keys from the workqueue.
 pub struct ReconcileQueue {
-    rx: mpsc::Receiver<QueueItem>,
+    queue: Arc<DedupQueue>,
     metrics: ReconcileQueueMetrics,
+    draining: Arc<AtomicBool>,
 }
 
 /// Create a queue and return `(sender, consumer, metrics)`.
@@ -212,29 +395,34 @@ pub fn new_reconcile_queue(
     capacity: usize,
     wq_metrics: WorkqueueMetrics,
 ) -> (ReconcileSender, ReconcileQueue, ReconcileQueueMetrics) {
-    let (tx, rx) = mpsc::channel(capacity);
+    let queue = Arc::new(DedupQueue::new(capacity));
     let stats = Arc::new(QueueStats::new());
+    let draining = Arc::new(AtomicBool::new(false));
     let sender = ReconcileSender {
-        tx,
+        queue: queue.clone(),
         stats: stats.clone(),
-        draining: Arc::new(AtomicBool::new(false)),
+        draining: draining.clone(),
         wq_metrics: wq_metrics.clone(),
     };
     let queue_metrics = ReconcileQueueMetrics {
         stats: stats.clone(),
         wq_metrics: wq_metrics.clone(),
     };
-    let queue = ReconcileQueue {
-        rx,
+    let consumer = ReconcileQueue {
+        queue,
         metrics: queue_metrics.clone(),
+        draining,
     };
-    (sender, queue, queue_metrics)
+    (sender, consumer, queue_metrics)
 }
 
 impl ReconcileQueue {
     pub async fn recv(&mut self) -> Option<(String, String)> {
-        let item = self.rx.recv().await?;
-        let wait = item.enqueued_at.elapsed().as_secs_f64();
+        let (ns, name, enqueued_at) =
+            self.queue
+                .dequeue(&self.metrics.stats, &self.metrics.wq_metrics)
+                .await?;
+        let wait = enqueued_at.elapsed().as_secs_f64();
         let labels = QueueNameLabels {
             queue_name: GATEWAY_RECONCILE_QUEUE.to_string(),
         };
@@ -243,14 +431,19 @@ impl ReconcileQueue {
             .queue_duration_seconds
             .get_or_create(&labels)
             .observe(wait);
-        self.metrics
-            .stats
-            .depth
-            .fetch_sub(1, Ordering::Relaxed);
-        self.metrics
-            .stats
-            .publish_gauges(&self.metrics.wq_metrics, GATEWAY_RECONCILE_QUEUE);
-        Some((item.ns, item.name))
+        Some((ns, name))
+    }
+
+    /// Mark a reconcile key complete; re-enqueues if it was marked dirty while in-flight.
+    pub fn done(&self, ns: &str, name: &str) {
+        let draining = self.draining.load(Ordering::Relaxed);
+        self.queue.done(
+            ns,
+            name,
+            &self.metrics.wq_metrics,
+            &self.metrics.stats,
+            draining,
+        );
     }
 
     #[must_use]
@@ -284,6 +477,12 @@ impl ReconcileQueue {
 mod tests {
     use super::*;
 
+    fn queue_labels() -> QueueNameLabels {
+        QueueNameLabels {
+            queue_name: GATEWAY_RECONCILE_QUEUE.to_string(),
+        }
+    }
+
     #[tokio::test]
     async fn depth_tracks_send_and_recv() {
         let wq = WorkqueueMetrics::noop();
@@ -296,10 +495,162 @@ mod tests {
         );
         let pair = queue.recv().await;
         assert_eq!(pair, Some(("ns".into(), "gw".into())));
+        queue.done("ns", "gw");
         assert_eq!(
             queue.metrics.stats.depth.load(Ordering::Relaxed),
             0
         );
+    }
+
+    #[tokio::test]
+    async fn pending_dedup_collapses_duplicate_sends() {
+        let wq = WorkqueueMetrics::noop();
+        let (tx, mut queue, _metrics) = new_reconcile_queue(8, wq.clone());
+        tx.send("ns".into(), "gw".into()).await.unwrap();
+        tx.send("ns".into(), "gw".into()).await.unwrap();
+        tx.send("ns".into(), "gw".into()).await.unwrap();
+        assert_eq!(
+            queue.metrics.stats.depth.load(Ordering::Relaxed),
+            1,
+            "pending should hold one key"
+        );
+        assert_eq!(
+            wq.dedup.get_or_create(&queue_labels()).get(),
+            2,
+            "two sends should be deduplicated"
+        );
+        assert!(queue.recv().await.is_some());
+        queue.done("ns", "gw");
+        tx.close();
+        assert!(queue.recv().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn dirty_while_in_flight_requeues_once() {
+        let wq = WorkqueueMetrics::noop();
+        let (tx, mut queue, _metrics) = new_reconcile_queue(8, wq);
+        tx.send("ns".into(), "gw".into()).await.unwrap();
+        assert_eq!(queue.recv().await, Some(("ns".into(), "gw".into())));
+        tx.send("ns".into(), "gw".into()).await.unwrap();
+        queue.done("ns", "gw");
+        assert_eq!(
+            queue.recv().await,
+            Some(("ns".into(), "gw".into())),
+            "dirty key should be re-enqueued"
+        );
+        queue.done("ns", "gw");
+        tx.close();
+        assert!(queue.recv().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn dirty_coalesces_multiple_sends_while_in_flight() {
+        let wq = WorkqueueMetrics::noop();
+        let (tx, mut queue, _metrics) = new_reconcile_queue(8, wq);
+        tx.send("a".into(), "1".into()).await.unwrap();
+        assert_eq!(queue.recv().await, Some(("a".into(), "1".into())));
+        for _ in 0..5 {
+            tx.send("a".into(), "1".into()).await.unwrap();
+        }
+        queue.done("a", "1");
+        assert_eq!(queue.recv().await, Some(("a".into(), "1".into())));
+        queue.done("a", "1");
+        tx.close();
+        assert!(queue.recv().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn fifo_ordering_across_keys() {
+        let wq = WorkqueueMetrics::noop();
+        let (tx, mut queue, _metrics) = new_reconcile_queue(8, wq);
+        tx.send("ns".into(), "a".into()).await.unwrap();
+        tx.send("ns".into(), "b".into()).await.unwrap();
+        tx.send("ns".into(), "a".into()).await.unwrap();
+        assert_eq!(queue.recv().await, Some(("ns".into(), "a".into())));
+        queue.done("ns", "a");
+        assert_eq!(queue.recv().await, Some(("ns".into(), "b".into())));
+        queue.done("ns", "b");
+    }
+
+    #[tokio::test]
+    async fn in_flight_key_does_not_increment_depth() {
+        let wq = WorkqueueMetrics::noop();
+        let (tx, mut queue, _metrics) = new_reconcile_queue(8, wq);
+        tx.send("ns".into(), "gw".into()).await.unwrap();
+        assert_eq!(queue.recv().await, Some(("ns".into(), "gw".into())));
+        assert_eq!(
+            queue.metrics.stats.depth.load(Ordering::Relaxed),
+            0,
+            "in-flight key must not count toward depth"
+        );
+        tx.send("ns".into(), "gw".into()).await.unwrap();
+        assert_eq!(
+            queue.metrics.stats.depth.load(Ordering::Relaxed),
+            0,
+            "dirty-only key must not count toward depth until done"
+        );
+        queue.done("ns", "gw");
+        assert_eq!(
+            queue.metrics.stats.depth.load(Ordering::Relaxed),
+            1,
+            "dirty re-enqueue increases pending depth"
+        );
+        assert_eq!(queue.recv().await, Some(("ns".into(), "gw".into())));
+        queue.done("ns", "gw");
+        assert_eq!(
+            queue.metrics.stats.depth.load(Ordering::Relaxed),
+            0
+        );
+    }
+
+    #[tokio::test]
+    async fn close_drains_pending_then_returns_none() {
+        let wq = WorkqueueMetrics::noop();
+        let (tx, mut queue, _metrics) = new_reconcile_queue(8, wq);
+        tx.send("ns".into(), "gw".into()).await.unwrap();
+        tx.close();
+        assert!(tx.send("ns".into(), "other".into()).await.is_err());
+        assert_eq!(queue.recv().await, Some(("ns".into(), "gw".into())));
+        queue.done("ns", "gw");
+        assert!(queue.recv().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn close_drops_dirty_reenqueue() {
+        let wq = WorkqueueMetrics::noop();
+        let (tx, mut queue, _metrics) = new_reconcile_queue(8, wq);
+        tx.send("ns".into(), "gw".into()).await.unwrap();
+        assert_eq!(queue.recv().await, Some(("ns".into(), "gw".into())));
+        tx.send("ns".into(), "gw".into()).await.unwrap();
+        tx.close();
+        queue.done("ns", "gw");
+        assert!(queue.recv().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn capacity_backpressure_unblocks_after_dequeue_and_done() {
+        let wq = WorkqueueMetrics::noop();
+        let (tx, mut queue, _metrics) = new_reconcile_queue(2, wq);
+        tx.send("ns".into(), "a".into()).await.unwrap();
+        tx.send("ns".into(), "b".into()).await.unwrap();
+        let tx_bg = tx.clone();
+        let blocked = tokio::spawn(async move {
+            tx_bg.send("ns".into(), "c".into()).await
+        });
+        tokio::task::yield_now().await;
+        assert!(
+            !blocked.is_finished(),
+            "third send should block at capacity"
+        );
+        assert_eq!(queue.recv().await, Some(("ns".into(), "a".into())));
+        queue.done("ns", "a");
+        assert_eq!(blocked.await.unwrap(), Ok(()));
+        assert_eq!(queue.recv().await, Some(("ns".into(), "b".into())));
+        queue.done("ns", "b");
+        assert_eq!(queue.recv().await, Some(("ns".into(), "c".into())));
+        queue.done("ns", "c");
+        tx.close();
+        assert!(queue.recv().await.is_none());
     }
 
     #[tokio::test]

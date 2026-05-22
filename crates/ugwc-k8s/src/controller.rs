@@ -275,8 +275,9 @@ pub async fn run_gateway_controller(
             pair = work_queue.recv() => {
                 let Some((ns, name)) = pair else { break };
                 let proc_started = work_queue.begin_reconcile();
-                let result = reconcile(ns, name).await;
+                let result = reconcile(ns.clone(), name.clone()).await;
                 work_queue.end_reconcile(proc_started);
+                work_queue.done(&ns, &name);
                 if let Err(e) = result {
                     work_queue.record_retry();
                     warn!(error = %e, "reconcile");
