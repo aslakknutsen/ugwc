@@ -10,6 +10,7 @@ pub mod kube_metrics;
 pub mod reconcile_queue;
 mod watch_enqueue;
 mod watch_helpers;
+pub mod stores;
 
 pub mod controller;
 pub mod loader;
@@ -18,7 +19,7 @@ pub mod provision;
 pub mod resources;
 pub mod status;
 
-pub use controller::{run_gateway_controller, ReconcileFn};
+pub use controller::{build_shared_stores, run_gateway_controller, AlwaysOnWriters, ReconcileFn};
 pub use reconcile_queue::{
     new_reconcile_queue, record_workqueue_retry, ReconcileQueue, ReconcileQueueMetrics,
     ReconcileSender, WorkqueueMetrics, GATEWAY_RECONCILE_QUEUE,
@@ -32,6 +33,7 @@ pub use initial_sync::InitialSyncGate;
 pub use spawn::spawn_with_trace_context;
 pub use kube_metrics::{instrumented_client, try_default_instrumented, KubeClientMetrics};
 pub use loader::{load_cluster_snapshot, parent_reference_to_snap, LoaderError};
+pub use stores::SharedStores;
 pub use mappers::{mapped_gateway_key, GatewayKey, WatchEventCause};
 pub use provision::{
     collect_effective_listener_ports, per_gateway_dataplane_name, praxis_istiod_dial_url,

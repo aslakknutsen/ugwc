@@ -12,12 +12,8 @@ pub use parent_refs::parent_reference_to_snap;
 
 use std::collections::{BTreeMap, HashSet};
 
-use k8s_openapi::api::core::v1::{Namespace, Service};
-use k8s_openapi::api::discovery::v1::EndpointSlice;
 use k8s_openapi::apimachinery::pkg::util::intstr::IntOrString;
-use kube::api::ListParams;
-use kube::{Api, Client, ResourceExt};
-use thiserror::Error;
+use kube::ResourceExt;
 use tracing::warn;
 use ugwc_core::listener_merge::merge_effective_listeners;
 use ugwc_core::snapshot::{
@@ -34,14 +30,11 @@ use ugwc_core::snapshot::{
 
 use crate::crd_supervisor::{ActiveCrds, ManagedCrd};
 use crate::resources::{
-    Gateway, GatewayAllowedListenersNamespacesFrom, GatewayClass,
-    GRPCRoute,
-    HTTPRoute,
+    Gateway, GatewayAllowedListenersNamespacesFrom,
     InferencePool, ListenerSet,
-    ReferenceGrant, ReferenceGrantFrom, ReferenceGrantTo, TCPRoute,
-    TLSRoute,
-    UDPRoute,
+    ReferenceGrant, ReferenceGrantFrom, ReferenceGrantTo,
 };
+use crate::stores::SharedStores;
 
 use gateway_snap::{gateway_listener_to_snap, listenerset_listener_to_snap};
 use parent_refs::listenerset_parent_ref_to_snap;
@@ -55,10 +48,10 @@ use route_snaps::{
 };
 use tls_resolve::resolve_gateway_listener_tls;
 
-#[derive(Debug, Error)]
+#[derive(Debug, thiserror::Error)]
 pub enum LoaderError {
-    #[error("kubernetes: {0}")]
-    Kube(#[from] kube::Error),
+    #[error("gateway not found: {0}/{1}")]
+    GatewayNotFound(String, String),
 }
 
 fn snap_u16_port(port: Option<i32>) -> Option<u16> {
@@ -72,19 +65,19 @@ fn snap_nonnegative_weight(w: Option<i32>) -> Option<u32> {
     }
 }
 
-fn inference_pool_to_snap(ip: InferencePool) -> InferencePoolSnap {
+fn inference_pool_to_snap(ip: &InferencePool) -> InferencePoolSnap {
     let namespace = ip.namespace().unwrap_or_default();
     let name = ip.name_any();
-    let spec = ip.spec;
+    let spec = &ip.spec;
     InferencePoolSnap {
         namespace,
         name,
         selector: InferencePoolSelectorSnap {
-            match_labels: spec.selector.match_labels,
+            match_labels: spec.selector.match_labels.clone(),
         },
         target_ports: spec
             .target_ports
-            .into_iter()
+            .iter()
             .filter_map(|p| {
                 let n = p.number;
                 if (1..=65535).contains(&n) {
@@ -94,12 +87,12 @@ fn inference_pool_to_snap(ip: InferencePool) -> InferencePoolSnap {
                 }
             })
             .collect(),
-        app_protocol: spec.app_protocol,
+        app_protocol: spec.app_protocol.clone(),
         endpoint_picker_ref: EndpointPickerRefSnap {
-            group: spec.endpoint_picker_ref.group,
-            kind: spec.endpoint_picker_ref.kind,
-            name: spec.endpoint_picker_ref.name,
-            port: spec.endpoint_picker_ref.port.and_then(|x| {
+            group: spec.endpoint_picker_ref.group.clone(),
+            kind: spec.endpoint_picker_ref.kind.clone(),
+            name: spec.endpoint_picker_ref.name.clone(),
+            port: spec.endpoint_picker_ref.port.as_ref().and_then(|x| {
                 let n = x.number;
                 if (1..=65535).contains(&n) {
                     Some(InferencePoolPortSnap { number: n as u16 })
@@ -107,12 +100,11 @@ fn inference_pool_to_snap(ip: InferencePool) -> InferencePoolSnap {
                     None
                 }
             }),
-            failure_mode: spec.endpoint_picker_ref.failure_mode,
+            failure_mode: spec.endpoint_picker_ref.failure_mode.clone(),
         },
     }
 }
 
-/// When `allowedListeners` is unset or defaults to no attachment, ListenerSets are ignored.
 fn allowed_snap_for_merge(gw: &Gateway) -> Option<AllowedListenersSnap> {
     let al = gw.spec.allowed_listeners.as_ref()?;
     let ns = al.namespaces.as_ref()?;
@@ -148,40 +140,41 @@ fn listenerset_parents_gateway(ls: &ListenerSet, gw_ns: &str, gw_name: &str) -> 
     pns == gw_ns && p.name == gw_name
 }
 
-async fn namespace_labels(
-    client: &Client,
+fn namespace_labels(
+    stores: &SharedStores,
     ns: &str,
-) -> Result<BTreeMap<String, String>, kube::Error> {
-    let api: Api<Namespace> = Api::all(client.clone());
-    let n = api.get(ns).await?;
-    Ok(n.metadata.labels.unwrap_or_default())
+) -> BTreeMap<String, String> {
+    stores
+        .get_namespace(ns)
+        .map(|n| n.metadata.labels.clone().unwrap_or_default())
+        .unwrap_or_default()
 }
 
-async fn listener_set_namespace_allowed(
-    client: &Client,
+fn listener_set_namespace_allowed(
+    stores: &SharedStores,
     gateway_ns: &str,
     ls_ns: &str,
     allowed: &AllowedListenersSnap,
-) -> Result<bool, kube::Error> {
+) -> bool {
     let Some(ref nses) = allowed.namespaces else {
-        return Ok(false);
+        return false;
     };
     let from = nses.from.as_deref().unwrap_or("None");
-    Ok(match from {
+    match from {
         "All" => true,
         "Same" => ls_ns == gateway_ns,
         "Selector" => {
             if nses.selector_match_labels.is_empty() {
                 false
             } else {
-                let labels = namespace_labels(client, ls_ns).await.unwrap_or_default();
+                let labels = namespace_labels(stores, ls_ns);
                 nses.selector_match_labels
                     .iter()
                     .all(|(k, v)| labels.get(k).map(|x| x == v).unwrap_or(false))
             }
         }
         _ => false,
-    })
+    }
 }
 
 fn reference_grant_from_to_snap(f: ReferenceGrantFrom) -> ReferenceGrantFromSnap {
@@ -208,30 +201,32 @@ fn reference_grant_to_snap_one(t: ReferenceGrantTo) -> ReferenceGrantToSnap {
     }
 }
 
-fn reference_grant_to_snap(rg: ReferenceGrant) -> ReferenceGrantSnap {
+fn reference_grant_to_snap(rg: &ReferenceGrant) -> ReferenceGrantSnap {
     ReferenceGrantSnap {
-        namespace: rg.metadata.namespace.unwrap_or_default(),
-        name: rg.metadata.name.unwrap_or_default(),
+        namespace: rg.metadata.namespace.clone().unwrap_or_default(),
+        name: rg.metadata.name.clone().unwrap_or_default(),
         from: rg
             .spec
             .from
-            .into_iter()
+            .iter()
+            .cloned()
             .map(reference_grant_from_to_snap)
             .collect(),
         to: rg
             .spec
             .to
-            .into_iter()
+            .iter()
+            .cloned()
             .map(reference_grant_to_snap_one)
             .collect(),
     }
 }
 
-fn listenerset_to_snap(ls: ListenerSet) -> ListenerSetSnap {
-    let ns = ls.metadata.namespace.unwrap_or_default();
-    let name = ls.metadata.name.unwrap_or_default();
-    let uid = ls.metadata.uid.unwrap_or_default();
-    let creation_timestamp_rfc3339 = ls.metadata.creation_timestamp.map(|t| t.0.to_string());
+fn listenerset_to_snap(ls: &ListenerSet) -> ListenerSetSnap {
+    let ns = ls.metadata.namespace.clone().unwrap_or_default();
+    let name = ls.metadata.name.clone().unwrap_or_default();
+    let uid = ls.metadata.uid.clone().unwrap_or_default();
+    let creation_timestamp_rfc3339 = ls.metadata.creation_timestamp.as_ref().map(|t| t.0.to_string());
     let parent_refs = vec![listenerset_parent_ref_to_snap(&ls.spec.parent_ref)];
     let mut seen_names = HashSet::new();
     let listeners = ls
@@ -255,14 +250,15 @@ fn crd_active(active: &ActiveCrds, m: ManagedCrd) -> bool {
     active.read().map_or(false, |set| set.contains(&m))
 }
 
-pub async fn load_cluster_snapshot(
-    client: &Client,
+pub fn load_cluster_snapshot(
+    stores: &SharedStores,
     gateway_ns: &str,
     gateway_name: &str,
     active_crds: &ActiveCrds,
 ) -> Result<ClusterSnapshot, LoaderError> {
-    let gw_api: Api<Gateway> = Api::namespaced(client.clone(), gateway_ns);
-    let gw = gw_api.get(gateway_name).await?;
+    let gw = stores
+        .get_gateway(gateway_ns, gateway_name)
+        .ok_or_else(|| LoaderError::GatewayNotFound(gateway_ns.into(), gateway_name.into()))?;
 
     let listeners: Vec<GatewayListenerSnap> = gw
         .spec
@@ -276,41 +272,28 @@ pub async fn load_cluster_snapshot(
     let mut listener_sets = Vec::new();
     let mut rejected_listener_sets: Vec<RejectedListenerSetSnap> = Vec::new();
     if crd_active(active_crds, ManagedCrd::ListenerSet) {
-        let ls_api: Api<ListenerSet> = Api::all(client.clone());
-        match ls_api.list(&ListParams::default()).await {
-            Ok(ls_list) => {
-                for ls in ls_list.items {
-                    if !listenerset_parents_gateway(&ls, gateway_ns, gateway_name) {
-                        continue;
-                    }
-                    let ls_ns = ls.metadata.namespace.clone().unwrap_or_default();
-                    let ls_name = ls.metadata.name.clone().unwrap_or_default();
-                    if let Some(ref allowed) = allowed_listeners {
-                        if !listener_set_namespace_allowed(client, gateway_ns, &ls_ns, allowed)
-                            .await?
-                        {
-                            rejected_listener_sets.push(RejectedListenerSetSnap {
-                                namespace: ls_ns,
-                                name: ls_name,
-                                reason: "NotAllowed".into(),
-                            });
-                            continue;
-                        }
-                        listener_sets.push(listenerset_to_snap(ls));
-                    } else {
-                        rejected_listener_sets.push(RejectedListenerSetSnap {
-                            namespace: ls_ns,
-                            name: ls_name,
-                            reason: "NotAllowed".into(),
-                        });
-                    }
-                }
+        for ls in stores.list_listener_sets() {
+            if !listenerset_parents_gateway(&ls, gateway_ns, gateway_name) {
+                continue;
             }
-            Err(e) => {
-                warn!(
-                    error = %e,
-                    "ListenerSet list failed — clusters without ListenerSet CRD skip merge"
-                );
+            let ls_ns = ls.metadata.namespace.clone().unwrap_or_default();
+            let ls_name = ls.metadata.name.clone().unwrap_or_default();
+            if let Some(ref allowed) = allowed_listeners {
+                if !listener_set_namespace_allowed(stores, gateway_ns, &ls_ns, allowed) {
+                    rejected_listener_sets.push(RejectedListenerSetSnap {
+                        namespace: ls_ns,
+                        name: ls_name,
+                        reason: "NotAllowed".into(),
+                    });
+                    continue;
+                }
+                listener_sets.push(listenerset_to_snap(&ls));
+            } else {
+                rejected_listener_sets.push(RejectedListenerSetSnap {
+                    namespace: ls_ns,
+                    name: ls_name,
+                    reason: "NotAllowed".into(),
+                });
             }
         }
     }
@@ -322,8 +305,7 @@ pub async fn load_cluster_snapshot(
 
     let mut effective_listeners = merge_effective_listeners(&listeners, &listener_sets);
 
-    let route_api: Api<HTTPRoute> = Api::all(client.clone());
-    let routes_list = route_api.list(&ListParams::default()).await?;
+    let all_http_routes = stores.list_http_routes();
     let mut http_routes = Vec::new();
     let mut grpc_routes = Vec::new();
     let mut tls_routes = Vec::new();
@@ -334,14 +316,14 @@ pub async fn load_cluster_snapshot(
     let mut ns_for_labels: HashSet<String> = HashSet::new();
     ns_for_labels.insert(gateway_ns.to_string());
 
-    for item in routes_list.items {
-        if !route_relevant_to_gateway(&item, gateway_ns, gateway_name, &attached_ls_keys) {
+    for item in &all_http_routes {
+        if !route_relevant_to_gateway(item, gateway_ns, gateway_name, &attached_ls_keys) {
             continue;
         }
         let rns = item.metadata.namespace.clone().unwrap_or_default();
         ns_for_labels.insert(rns.clone());
 
-        let snap = http_route_to_snap(&item);
+        let snap = http_route_to_snap(item);
         for rule in item.spec.rules.as_deref().unwrap_or_default() {
             for (sns, sname) in crate::resources::collect_http_route_rule_service_refs(&rns, rule) {
                 ns_for_labels.insert(sns.clone());
@@ -358,180 +340,130 @@ pub async fn load_cluster_snapshot(
     }
 
     if crd_active(active_crds, ManagedCrd::GrpcRoute) {
-        let grpc_api: Api<GRPCRoute> = Api::all(client.clone());
-        match grpc_api.list(&ListParams::default()).await {
-            Ok(grpc_list) => {
-                for item in grpc_list.items {
-                    if !grpc_route_relevant_to_gateway(
-                        &item,
-                        gateway_ns,
-                        gateway_name,
-                        &attached_ls_keys,
-                    ) {
-                        continue;
-                    }
-                    let rns = item.metadata.namespace.clone().unwrap_or_default();
-                    ns_for_labels.insert(rns.clone());
+        for item in stores.list_grpc_routes() {
+            if !grpc_route_relevant_to_gateway(
+                &item,
+                gateway_ns,
+                gateway_name,
+                &attached_ls_keys,
+            ) {
+                continue;
+            }
+            let rns = item.metadata.namespace.clone().unwrap_or_default();
+            ns_for_labels.insert(rns.clone());
 
-                    let snap = grpc_route_to_snap(&item);
-                    for rule in item.spec.rules.as_deref().unwrap_or_default() {
-                        for (sns, sname) in
-                            crate::resources::collect_grpc_route_rule_service_refs(&rns, rule)
-                        {
-                            ns_for_labels.insert(sns.clone());
-                            needed_services.push((sns, sname));
-                        }
-                        for (pns, pname) in
-                            crate::resources::collect_grpc_route_rule_inference_pool_refs(&rns, rule)
-                        {
-                            ns_for_labels.insert(pns.clone());
-                            needed_pools.push((pns, pname));
-                        }
-                    }
-                    grpc_routes.push(snap);
+            let snap = grpc_route_to_snap(&item);
+            for rule in item.spec.rules.as_deref().unwrap_or_default() {
+                for (sns, sname) in
+                    crate::resources::collect_grpc_route_rule_service_refs(&rns, rule)
+                {
+                    ns_for_labels.insert(sns.clone());
+                    needed_services.push((sns, sname));
+                }
+                for (pns, pname) in
+                    crate::resources::collect_grpc_route_rule_inference_pool_refs(&rns, rule)
+                {
+                    ns_for_labels.insert(pns.clone());
+                    needed_pools.push((pns, pname));
                 }
             }
-            Err(e) => {
-                warn!(
-                    error = %e,
-                    "GRPCRoute list failed — clusters without GRPCRoute CRD skip gRPC routes"
-                );
-            }
+            grpc_routes.push(snap);
         }
     }
 
     if crd_active(active_crds, ManagedCrd::TlsRoute) {
-        let tls_api: Api<TLSRoute> = Api::all(client.clone());
-        match tls_api.list(&ListParams::default()).await {
-            Ok(tls_list) => {
-                for item in tls_list.items {
-                    if !tls_route_relevant_to_gateway(
-                        &item,
-                        gateway_ns,
-                        gateway_name,
-                        &attached_ls_keys,
-                    ) {
-                        continue;
-                    }
-                    let rns = item.metadata.namespace.clone().unwrap_or_default();
-                    ns_for_labels.insert(rns.clone());
+        for item in stores.list_tls_routes() {
+            if !tls_route_relevant_to_gateway(
+                &item,
+                gateway_ns,
+                gateway_name,
+                &attached_ls_keys,
+            ) {
+                continue;
+            }
+            let rns = item.metadata.namespace.clone().unwrap_or_default();
+            ns_for_labels.insert(rns.clone());
 
-                    let snap = tls_route_to_snap(&item);
-                    for rule in &item.spec.rules {
-                        for (sns, sname) in
-                            crate::resources::collect_tls_route_rule_service_refs(&rns, rule)
-                        {
-                            ns_for_labels.insert(sns.clone());
-                            needed_services.push((sns, sname));
-                        }
-                        for (pns, pname) in
-                            crate::resources::collect_tls_route_rule_inference_pool_refs(
-                                &rns, rule,
-                            )
-                        {
-                            ns_for_labels.insert(pns.clone());
-                            needed_pools.push((pns, pname));
-                        }
-                    }
-                    tls_routes.push(snap);
+            let snap = tls_route_to_snap(&item);
+            for rule in &item.spec.rules {
+                for (sns, sname) in
+                    crate::resources::collect_tls_route_rule_service_refs(&rns, rule)
+                {
+                    ns_for_labels.insert(sns.clone());
+                    needed_services.push((sns, sname));
+                }
+                for (pns, pname) in
+                    crate::resources::collect_tls_route_rule_inference_pool_refs(&rns, rule)
+                {
+                    ns_for_labels.insert(pns.clone());
+                    needed_pools.push((pns, pname));
                 }
             }
-            Err(e) => {
-                warn!(
-                    error = %e,
-                    "TLSRoute list failed — clusters without TLSRoute CRD skip TLS routes"
-                );
-            }
+            tls_routes.push(snap);
         }
     }
 
     if crd_active(active_crds, ManagedCrd::TcpRoute) {
-        let tcp_api: Api<TCPRoute> = Api::all(client.clone());
-        match tcp_api.list(&ListParams::default()).await {
-            Ok(tcp_list) => {
-                for item in tcp_list.items {
-                    if !tcp_route_relevant_to_gateway(
-                        &item,
-                        gateway_ns,
-                        gateway_name,
-                        &attached_ls_keys,
-                    ) {
-                        continue;
-                    }
-                    let rns = item.metadata.namespace.clone().unwrap_or_default();
-                    ns_for_labels.insert(rns.clone());
+        for item in stores.list_tcp_routes() {
+            if !tcp_route_relevant_to_gateway(
+                &item,
+                gateway_ns,
+                gateway_name,
+                &attached_ls_keys,
+            ) {
+                continue;
+            }
+            let rns = item.metadata.namespace.clone().unwrap_or_default();
+            ns_for_labels.insert(rns.clone());
 
-                    let snap = tcp_route_to_snap(&item);
-                    for rule in &item.spec.rules {
-                        for (sns, sname) in
-                            crate::resources::collect_tcp_route_rule_service_refs(&rns, rule)
-                        {
-                            ns_for_labels.insert(sns.clone());
-                            needed_services.push((sns, sname));
-                        }
-                        for (pns, pname) in
-                            crate::resources::collect_tcp_route_rule_inference_pool_refs(
-                                &rns, rule,
-                            )
-                        {
-                            ns_for_labels.insert(pns.clone());
-                            needed_pools.push((pns, pname));
-                        }
-                    }
-                    tcp_routes.push(snap);
+            let snap = tcp_route_to_snap(&item);
+            for rule in &item.spec.rules {
+                for (sns, sname) in
+                    crate::resources::collect_tcp_route_rule_service_refs(&rns, rule)
+                {
+                    ns_for_labels.insert(sns.clone());
+                    needed_services.push((sns, sname));
+                }
+                for (pns, pname) in
+                    crate::resources::collect_tcp_route_rule_inference_pool_refs(&rns, rule)
+                {
+                    ns_for_labels.insert(pns.clone());
+                    needed_pools.push((pns, pname));
                 }
             }
-            Err(e) => {
-                warn!(
-                    error = %e,
-                    "TCPRoute list failed — clusters without TCPRoute CRD skip TCP routes"
-                );
-            }
+            tcp_routes.push(snap);
         }
     }
 
     if crd_active(active_crds, ManagedCrd::UdpRoute) {
-        let udp_api: Api<UDPRoute> = Api::all(client.clone());
-        match udp_api.list(&ListParams::default()).await {
-            Ok(udp_list) => {
-                for item in udp_list.items {
-                    if !udp_route_relevant_to_gateway(
-                        &item,
-                        gateway_ns,
-                        gateway_name,
-                        &attached_ls_keys,
-                    ) {
-                        continue;
-                    }
-                    let rns = item.metadata.namespace.clone().unwrap_or_default();
-                    ns_for_labels.insert(rns.clone());
+        for item in stores.list_udp_routes() {
+            if !udp_route_relevant_to_gateway(
+                &item,
+                gateway_ns,
+                gateway_name,
+                &attached_ls_keys,
+            ) {
+                continue;
+            }
+            let rns = item.metadata.namespace.clone().unwrap_or_default();
+            ns_for_labels.insert(rns.clone());
 
-                    let snap = udp_route_to_snap(&item);
-                    for rule in &item.spec.rules {
-                        for (sns, sname) in
-                            crate::resources::collect_udp_route_rule_service_refs(&rns, rule)
-                        {
-                            ns_for_labels.insert(sns.clone());
-                            needed_services.push((sns, sname));
-                        }
-                        for (pns, pname) in
-                            crate::resources::collect_udp_route_rule_inference_pool_refs(
-                                &rns, rule,
-                            )
-                        {
-                            ns_for_labels.insert(pns.clone());
-                            needed_pools.push((pns, pname));
-                        }
-                    }
-                    udp_routes.push(snap);
+            let snap = udp_route_to_snap(&item);
+            for rule in &item.spec.rules {
+                for (sns, sname) in
+                    crate::resources::collect_udp_route_rule_service_refs(&rns, rule)
+                {
+                    ns_for_labels.insert(sns.clone());
+                    needed_services.push((sns, sname));
+                }
+                for (pns, pname) in
+                    crate::resources::collect_udp_route_rule_inference_pool_refs(&rns, rule)
+                {
+                    ns_for_labels.insert(pns.clone());
+                    needed_pools.push((pns, pname));
                 }
             }
-            Err(e) => {
-                warn!(
-                    error = %e,
-                    "UDPRoute list failed — clusters without UDPRoute CRD skip UDP routes"
-                );
-            }
+            udp_routes.push(snap);
         }
     }
 
@@ -540,23 +472,21 @@ pub async fn load_cluster_snapshot(
 
     let mut inference_pools: Vec<InferencePoolSnap> = Vec::new();
     for (pns, pname) in &needed_pools {
-        let api = Api::<InferencePool>::namespaced(client.clone(), pns);
-        match api.get(pname).await {
-            Ok(ip) => {
+        match stores.get_inference_pool(pns, pname) {
+            Some(ip) => {
                 let picker = &ip.spec.endpoint_picker_ref;
                 let pk = picker.kind.as_deref().unwrap_or("Service");
                 if pk == "Service" && !picker.name.is_empty() {
                     needed_services.push((pns.clone(), picker.name.clone()));
                     ns_for_labels.insert(pns.clone());
                 }
-                inference_pools.push(inference_pool_to_snap(ip));
+                inference_pools.push(inference_pool_to_snap(&ip));
             }
-            Err(e) => {
+            None => {
                 warn!(
-                    error = %e,
                     pool_ns = %pns,
                     pool_name = %pname,
-                    "InferencePool get failed — missing pool or CRD not installed"
+                    "InferencePool not found in store — missing pool or CRD not installed"
                 );
             }
         }
@@ -567,10 +497,7 @@ pub async fn load_cluster_snapshot(
 
     let mut services = Vec::new();
     for (sns, sname) in &needed_services {
-        if let Ok(svc) = Api::<Service>::namespaced(client.clone(), sns)
-            .get(sname)
-            .await
-        {
+        if let Some(svc) = stores.get_service(sns, sname) {
             let ports: Vec<ServicePortSnap> = svc
                 .spec
                 .as_ref()
@@ -591,8 +518,8 @@ pub async fn load_cluster_snapshot(
                 })
                 .unwrap_or_default();
             services.push(ServiceSnap {
-                namespace: svc.metadata.namespace.unwrap_or_default(),
-                name: svc.metadata.name.unwrap_or_default(),
+                namespace: svc.metadata.namespace.clone().unwrap_or_default(),
+                name: svc.metadata.name.clone().unwrap_or_default(),
                 ports,
                 cluster_ip: svc.spec.as_ref().and_then(|s| s.cluster_ip.clone()),
             });
@@ -600,9 +527,7 @@ pub async fn load_cluster_snapshot(
     }
 
     let mut endpoint_slices = Vec::new();
-    let es_api: Api<EndpointSlice> = Api::all(client.clone());
-    let all_slices = es_api.list(&ListParams::default()).await?;
-    for sl in all_slices.items {
+    for sl in stores.list_endpoint_slices() {
         let slice_ns = sl.metadata.namespace.clone().unwrap_or_default();
         let svc_name = sl
             .metadata
@@ -619,11 +544,11 @@ pub async fn load_cluster_snapshot(
             continue;
         }
         let mut endpoints = Vec::new();
-        for ep in sl.endpoints {
+        for ep in &sl.endpoints {
             let mut addrs = Vec::new();
-            addrs.extend(ep.addresses);
+            addrs.extend(ep.addresses.iter().cloned());
             let mut ports = Vec::new();
-            if let Some(ports_slice) = sl.ports.clone() {
+            if let Some(ref ports_slice) = sl.ports {
                 for p in ports_slice {
                     if let Some(port) = p.port {
                         ports.push(EndpointPortSnap {
@@ -641,8 +566,8 @@ pub async fn load_cluster_snapshot(
             }
         }
         endpoint_slices.push(EndpointSliceSnap {
-            namespace: sl.metadata.namespace.unwrap_or_default(),
-            name: sl.metadata.name.unwrap_or_default(),
+            namespace: sl.metadata.namespace.clone().unwrap_or_default(),
+            name: sl.metadata.name.clone().unwrap_or_default(),
             service_name: svc_name,
             endpoints,
         });
@@ -650,68 +575,48 @@ pub async fn load_cluster_snapshot(
 
     let mut ns_label_map: BTreeMap<String, BTreeMap<String, String>> = BTreeMap::new();
     for ns in &ns_for_labels {
-        match namespace_labels(client, ns).await {
-            Ok(lbl) => {
-                ns_label_map.insert(ns.clone(), lbl);
-            }
-            Err(e) => {
-                warn!(error = %e, namespace = %ns, "failed to fetch namespace labels; selector-based allowedRoutes may not match");
-            }
+        let lbl = namespace_labels(stores, ns);
+        if !lbl.is_empty() {
+            ns_label_map.insert(ns.clone(), lbl);
         }
     }
 
     let mut reference_grants: Vec<ReferenceGrantSnap> = Vec::new();
     if crd_active(active_crds, ManagedCrd::ReferenceGrant) {
-        let rg_api: Api<ReferenceGrant> = Api::all(client.clone());
-        match rg_api.list(&ListParams::default()).await {
-            Ok(list) => {
-                reference_grants = list
-                    .items
-                    .into_iter()
-                    .map(reference_grant_to_snap)
-                    .collect();
-            }
-            Err(e) => {
-                warn!(
-                    error = %e,
-                    "ReferenceGrant list failed — clusters without CRD skip cross-namespace grants"
-                );
-            }
-        }
+        reference_grants = stores
+            .list_reference_grants()
+            .iter()
+            .map(|rg| reference_grant_to_snap(rg))
+            .collect();
     }
 
     resolve_gateway_listener_tls(
-        client,
+        stores,
         gateway_ns,
         &reference_grants,
         &mut effective_listeners,
-    )
-    .await?;
+    );
 
     let gateway_class = if gw.spec.gateway_class_name.is_empty() {
         None
     } else {
-        let gc_api: Api<GatewayClass> = Api::all(client.clone());
-        gc_api
-            .get(&gw.spec.gateway_class_name)
-            .await
-            .ok()
+        stores
+            .get_gateway_class(&gw.spec.gateway_class_name)
             .map(|gc| GatewayClassSnap {
-                name: gc.metadata.name.unwrap_or_default(),
+                name: gc.metadata.name.clone().unwrap_or_default(),
                 controller_name: gc.spec.controller_name.clone(),
             })
     };
 
     let (backend_tls_effective, backend_tls_policy_outcomes) =
         backend_tls::load_backend_tls_for_gateway(
-            client,
+            stores,
             &needed_services,
             &services,
             &needed_pools,
             &inference_pools,
             &reference_grants,
-        )
-        .await?;
+        );
 
     Ok(ClusterSnapshot {
         gateway_namespace: gateway_ns.to_string(),

@@ -7,9 +7,10 @@ use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
 
 use futures::{Stream, TryStreamExt};
-use kube::api::{Api, PartialObjectMeta};
+use kube::api::Api;
+use kube::runtime::reflector::{self, Store};
 use kube::runtime::watcher::{self, Config as WatcherConfig, Event};
-use kube::runtime::{metadata_watcher, predicates, WatchStreamExt};
+use kube::runtime::{predicates, WatchStreamExt};
 use kube::Resource;
 use serde::de::DeserializeOwned;
 use tokio_util::sync::CancellationToken;
@@ -27,10 +28,6 @@ pub fn strip_managed_fields<K: Resource>(obj: &mut K) {
     obj.meta_mut().managed_fields = None;
 }
 
-fn strip_meta_managed_fields<K>(obj: &mut PartialObjectMeta<K>) {
-    obj.metadata.managed_fields = None;
-}
-
 /// Apply or delete notification from a Kubernetes watch.
 #[derive(Clone, Debug)]
 pub enum WatchItem<K> {
@@ -46,16 +43,6 @@ where
     (
         obj.meta().namespace.clone().unwrap_or_default(),
         obj.meta().name.clone().unwrap_or_default(),
-    )
-}
-
-fn meta_cache_key<K: Resource>(meta: &PartialObjectMeta<K>) -> (String, String) {
-    (
-        meta.metadata
-            .namespace
-            .clone()
-            .unwrap_or_default(),
-        meta.metadata.name.clone().unwrap_or_default(),
     )
 }
 
@@ -80,35 +67,6 @@ where
                 .expect("watch generation cache")
                 .remove(&object_cache_key(&obj));
             Some(WatchItem::Deleted(obj))
-        }
-        Event::Init | Event::InitDone => None,
-    }
-}
-
-fn map_meta_event<K>(
-    last_gen: &Arc<Mutex<HashMap<(String, String), u64>>>,
-    ev: Event<PartialObjectMeta<K>>,
-) -> Option<WatchItem<PartialObjectMeta<K>>>
-where
-    K: Resource<DynamicType: Default>,
-{
-    match ev {
-        Event::Apply(meta) | Event::InitApply(meta) => {
-            let key = meta_cache_key(&meta);
-            let hash = predicates::generation(&meta).unwrap_or(0);
-            let mut last = last_gen.lock().expect("watch generation cache");
-            if last.get(&key) == Some(&hash) {
-                return None;
-            }
-            last.insert(key, hash);
-            Some(WatchItem::Applied(meta))
-        }
-        Event::Delete(meta) => {
-            last_gen
-                .lock()
-                .expect("watch generation cache")
-                .remove(&meta_cache_key(&meta));
-            Some(WatchItem::Deleted(meta))
         }
         Event::Init | Event::InitDone => None,
     }
@@ -161,35 +119,20 @@ where
     }
 }
 
-struct MetaWatchDemuxStream<K> {
-    inner: Pin<Box<dyn Stream<Item = Result<Event<PartialObjectMeta<K>>, watcher::Error>> + Send>>,
-    last_gen: Arc<Mutex<HashMap<(String, String), u64>>>,
-}
-
-impl<K> Stream for MetaWatchDemuxStream<K>
-where
-    K: Resource<DynamicType: Default> + Send + 'static,
-{
-    type Item = Result<WatchItem<PartialObjectMeta<K>>, watcher::Error>;
-
-    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        let this = self.as_mut().get_mut();
-        demux_poll(
-            this.inner.as_mut(),
-            &this.last_gen,
-            cx,
-            map_meta_event::<K>,
-        )
-    }
-}
-
-/// Full-resource watch: prune → backoff → apply/delete with generation filter on apply only.
-pub fn full_watch_stream<K>(
+/// Full-resource watch with reflector: prune → reflector(store) → backoff → generation dedup.
+///
+/// The reflector populates the store with every event; the generation dedup downstream
+/// controls whether the handler fires, not whether the store updates.
+pub fn reflector_full_watch_stream<K>(
     api: Api<K>,
     cfg: WatcherConfig,
-) -> Pin<Box<dyn Stream<Item = Result<WatchItem<K>, watcher::Error>> + Send>>
+    writer: reflector::store::Writer<K>,
+) -> (
+    Store<K>,
+    Pin<Box<dyn Stream<Item = Result<WatchItem<K>, watcher::Error>> + Send>>,
+)
 where
-    K: Resource<DynamicType: Default + Eq + Hash>
+    K: Resource<DynamicType: Default + Eq + Hash + Clone>
         + Clone
         + DeserializeOwned
         + std::fmt::Debug
@@ -197,44 +140,17 @@ where
         + Sync
         + 'static,
 {
+    let store = writer.as_reader();
     let last_gen = Arc::new(Mutex::new(HashMap::new()));
     let inner: Pin<Box<dyn Stream<Item = Result<Event<K>, watcher::Error>> + Send>> = Box::pin(
-        watcher::watcher(api, cfg)
-            .modify(strip_managed_fields)
-            .default_backoff(),
+        reflector::reflector(
+            writer,
+            watcher::watcher(api, cfg).modify(strip_managed_fields),
+        )
+        .default_backoff(),
     );
-    Box::pin(WatchDemuxStream {
-        inner,
-        last_gen,
-    })
-}
-
-/// Metadata-only watch for resources where delete only needs name/namespace (e.g. Gateway).
-pub fn meta_watch_stream<K>(
-    api: Api<K>,
-    cfg: WatcherConfig,
-) -> Pin<Box<dyn Stream<Item = Result<WatchItem<PartialObjectMeta<K>>, watcher::Error>> + Send>>
-where
-    K: Resource<DynamicType: Default + Eq + Hash>
-        + Clone
-        + DeserializeOwned
-        + std::fmt::Debug
-        + Send
-        + Sync
-        + 'static,
-{
-    let last_gen = Arc::new(Mutex::new(HashMap::new()));
-    let inner: Pin<
-        Box<dyn Stream<Item = Result<Event<PartialObjectMeta<K>>, watcher::Error>> + Send>,
-    > = Box::pin(
-        metadata_watcher(api, cfg)
-            .modify(strip_meta_managed_fields)
-            .default_backoff(),
-    );
-    Box::pin(MetaWatchDemuxStream {
-        inner,
-        last_gen,
-    })
+    let stream = Box::pin(WatchDemuxStream { inner, last_gen });
+    (store, stream)
 }
 
 /// Drive a delete-aware watch stream until `token` is cancelled or the handler returns false.

@@ -158,8 +158,10 @@ pub async fn run(cfg: Config) -> Result<(), Box<dyn std::error::Error + Send + S
         let sync_gate = Arc::new(ugwc_k8s::InitialSyncGate::new(Some(
             Readiness::on_cache_synced_callback(readiness.clone()),
         )));
+        let (shared_stores, always_on_writers) = ugwc_k8s::build_shared_stores();
         let reconcile_tx_shutdown = reconcile_tx.clone();
         let kube_task = ugwc_k8s::spawn_with_trace_context(async move {
+            let stores_rfn = shared_stores.clone();
             let rfn: ugwc_k8s::ReconcileFn = Arc::new(move |ns: String, name: String| {
                 let fp_k = fp_k.clone();
                 let cache_k = cache_k.clone();
@@ -176,6 +178,7 @@ pub async fn run(cfg: Config) -> Result<(), Box<dyn std::error::Error + Send + S
                 let controller_name = primary_controller.clone();
                 let gateway_events = gateway_events.clone();
                 let gateway_state_metrics = gateway_state_metrics.clone();
+                let stores = stores_rfn.clone();
                 Box::pin(async move {
                     let reconcile_started = Instant::now();
                     let outcome = crate::reconcile::reconcile_gateway(
@@ -194,6 +197,7 @@ pub async fn run(cfg: Config) -> Result<(), Box<dyn std::error::Error + Send + S
                             active_crds,
                             events: Some(gateway_events.clone()),
                             gateway_state_metrics,
+                            stores,
                         },
                         ns,
                         name,
@@ -217,6 +221,8 @@ pub async fn run(cfg: Config) -> Result<(), Box<dyn std::error::Error + Send + S
                 controller_names.clone(),
                 active_crds,
                 Some(sync_gate),
+                shared_stores,
+                always_on_writers,
             )
             .await;
         });

@@ -15,6 +15,7 @@ use ugwc_core::{
     FailurePolicy, IrSnapshot, PublishAction, PublishPlan,
 };
 use ugwc_k8s::resources::{Gateway, ListenerSet};
+use ugwc_k8s::SharedStores;
 use ugwc_xds::{MultiScopeSnapshot, XdsSnapshotSource};
 
 use crate::gateway_state_metrics::GatewayStateMetrics;
@@ -38,6 +39,7 @@ pub struct ReconcileCtx {
     pub active_crds: ugwc_k8s::ActiveCrds,
     pub events: Option<ugwc_k8s::GatewayEvents>,
     pub gateway_state_metrics: GatewayStateMetrics,
+    pub stores: Arc<SharedStores>,
 }
 
 #[instrument(
@@ -50,19 +52,18 @@ pub struct ReconcileCtx {
     )
 )]
 pub async fn reconcile_gateway(ctx: ReconcileCtx, ns: String, name: String) -> Result<(), String> {
-    let api: Api<Gateway> = Api::namespaced(ctx.client.clone(), &ns);
-    let latest = match api.get(&name).await {
-        Ok(gw) => gw,
-        Err(kube::Error::Api(a)) if a.code == 404 => {
+    let latest = match ctx.stores.get_gateway(&ns, &name) {
+        Some(gw) => gw,
+        None => {
             return reconcile_gateway_gone(&ctx, &ns, &name).await;
         }
-        Err(e) => return Err(e.to_string()),
     };
+    let api: Api<Gateway> = Api::namespaced(ctx.client.clone(), &ns);
     Span::current().record("k8s.resource.generation", latest.metadata.generation);
 
                     let t_load = Instant::now();
                     let cluster =
-                        match ugwc_k8s::load_cluster_snapshot(&ctx.client, &ns, &name, &ctx.active_crds).await {
+                        match ugwc_k8s::load_cluster_snapshot(&ctx.stores, &ns, &name, &ctx.active_crds) {
                             Ok(c) => Some(c),
                             Err(e) => {
                                 warn!(error = %e, %ns, %name, "cluster snapshot load");

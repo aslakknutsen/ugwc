@@ -2,6 +2,7 @@
 
 use std::collections::HashSet;
 
+use kube::runtime::reflector::{self, Store};
 use kube::{Api, Client, ResourceExt};
 use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
@@ -22,36 +23,45 @@ pub(crate) fn spawn_gateway_watcher(
     client: Client,
     tx: crate::reconcile_queue::ReconcileSender,
     token: CancellationToken,
-) {
+    writer: reflector::store::Writer<Gateway>,
+) -> Store<Gateway> {
+    let (store, stream) = watch_stream::reflector_full_watch_stream(
+        Api::<Gateway>::all(client),
+        watcher_config(),
+        writer,
+    );
     crate::spawn::spawn_with_trace_context(async move {
-        let api: Api<Gateway> = Api::all(client);
-        let stream = watch_stream::meta_watch_stream(api, watcher_config());
         run_watch_loop(token.clone(), stream, "gateway", move |item| {
             let tx = tx.clone();
             async move {
-                let meta = match item {
-                    WatchItem::Applied(m) | WatchItem::Deleted(m) => m,
+                let gw = match item {
+                    WatchItem::Applied(g) | WatchItem::Deleted(g) => g,
                 };
-                let ns = meta.namespace().unwrap_or_default();
-                let name = meta.name_any();
+                let ns = gw.namespace().unwrap_or_default();
+                let name = gw.name_any();
                 tx.send(ns, name).await.is_ok()
             }
         })
         .await;
         info!("gateway watcher shutdown");
     });
+    store
 }
 
-macro_rules! spawn_full_route_watcher {
+macro_rules! spawn_reflector_route_watcher {
     ($spawn_fn:ident, $type:ty, $log_label:literal, $keys_fn:ident) => {
         pub(crate) fn $spawn_fn(
             client: Client,
             tx: crate::reconcile_queue::ReconcileSender,
             token: CancellationToken,
-        ) {
+            writer: reflector::store::Writer<$type>,
+        ) -> Store<$type> {
+            let (store, stream) = watch_stream::reflector_full_watch_stream(
+                Api::<$type>::all(client.clone()),
+                watcher_config(),
+                writer,
+            );
             crate::spawn::spawn_with_trace_context(async move {
-                let api: Api<$type> = Api::all(client.clone());
-                let stream = watch_stream::full_watch_stream(api, watcher_config());
                 run_watch_loop(token.clone(), stream, $log_label, move |item| {
                     let client = client.clone();
                     let tx = tx.clone();
@@ -66,35 +76,36 @@ macro_rules! spawn_full_route_watcher {
                 .await;
                 info!(stream = $log_label, "route watcher shutdown");
             });
+            store
         }
     };
 }
 
-spawn_full_route_watcher!(
+spawn_reflector_route_watcher!(
     spawn_http_route_watcher,
     HTTPRoute,
     "httproute",
     gateway_keys_for_http_route
 );
-spawn_full_route_watcher!(
+spawn_reflector_route_watcher!(
     spawn_grpc_route_watcher,
     GRPCRoute,
     "grpcroute",
     gateway_keys_for_grpc_route
 );
-spawn_full_route_watcher!(
+spawn_reflector_route_watcher!(
     spawn_tls_route_watcher,
     TLSRoute,
     "tlsroute",
     gateway_keys_for_tls_route
 );
-spawn_full_route_watcher!(
+spawn_reflector_route_watcher!(
     spawn_tcp_route_watcher,
     TCPRoute,
     "tcproute",
     gateway_keys_for_tcp_route
 );
-spawn_full_route_watcher!(
+spawn_reflector_route_watcher!(
     spawn_udp_route_watcher,
     UDPRoute,
     "udproute",
@@ -105,19 +116,23 @@ pub(crate) fn spawn_inference_pool_watcher(
     client: Client,
     tx: crate::reconcile_queue::ReconcileSender,
     token: CancellationToken,
-) {
+    writer: reflector::store::Writer<InferencePool>,
+) -> Store<InferencePool> {
+    let (store, stream) = watch_stream::reflector_full_watch_stream(
+        Api::<InferencePool>::all(client.clone()),
+        watcher_config(),
+        writer,
+    );
     crate::spawn::spawn_with_trace_context(async move {
-        let api: Api<InferencePool> = Api::all(client.clone());
-        let stream = watch_stream::meta_watch_stream(api, watcher_config());
         run_watch_loop(token.clone(), stream, "inferencepool", move |item| {
             let client = client.clone();
             let tx = tx.clone();
             async move {
-                let meta = match item {
-                    WatchItem::Applied(m) | WatchItem::Deleted(m) => m,
+                let ip = match item {
+                    WatchItem::Applied(p) | WatchItem::Deleted(p) => p,
                 };
-                let pns = meta.namespace().unwrap_or_default();
-                let pname = meta.name_any();
+                let pns = ip.namespace().unwrap_or_default();
+                let pname = ip.name_any();
                 if pns.is_empty() || pname.is_empty() {
                     return true;
                 }
@@ -128,16 +143,21 @@ pub(crate) fn spawn_inference_pool_watcher(
         .await;
         info!("inferencepool watcher shutdown");
     });
+    store
 }
 
 pub(crate) fn spawn_reference_grant_watcher(
     client: Client,
     tx: crate::reconcile_queue::ReconcileSender,
     token: CancellationToken,
-) {
+    writer: reflector::store::Writer<ReferenceGrant>,
+) -> Store<ReferenceGrant> {
+    let (store, stream) = watch_stream::reflector_full_watch_stream(
+        Api::<ReferenceGrant>::all(client.clone()),
+        watcher_config(),
+        writer,
+    );
     crate::spawn::spawn_with_trace_context(async move {
-        let api: Api<ReferenceGrant> = Api::all(client.clone());
-        let stream = watch_stream::full_watch_stream(api, watcher_config());
         run_watch_loop(token.clone(), stream, "referencegrant", move |item| {
             let client = client.clone();
             let tx = tx.clone();
@@ -152,16 +172,21 @@ pub(crate) fn spawn_reference_grant_watcher(
         .await;
         info!("referencegrant watcher shutdown");
     });
+    store
 }
 
 pub(crate) fn spawn_listener_set_watcher(
     client: Client,
     tx: crate::reconcile_queue::ReconcileSender,
     token: CancellationToken,
-) {
+    writer: reflector::store::Writer<ListenerSet>,
+) -> Store<ListenerSet> {
+    let (store, stream) = watch_stream::reflector_full_watch_stream(
+        Api::<ListenerSet>::all(client),
+        watcher_config(),
+        writer,
+    );
     crate::spawn::spawn_with_trace_context(async move {
-        let api: Api<ListenerSet> = Api::all(client.clone());
-        let stream = watch_stream::full_watch_stream(api, watcher_config());
         run_watch_loop(token.clone(), stream, "listenerset", move |item| {
             let tx = tx.clone();
             async move {
@@ -177,6 +202,7 @@ pub(crate) fn spawn_listener_set_watcher(
         .await;
         info!("listenerset watcher shutdown");
     });
+    store
 }
 
 pub(crate) fn spawn_gateway_class_watcher(
@@ -184,31 +210,32 @@ pub(crate) fn spawn_gateway_class_watcher(
     tx: crate::reconcile_queue::ReconcileSender,
     token: CancellationToken,
     owned_controller_names: Vec<String>,
-) {
+    writer: reflector::store::Writer<GatewayClass>,
+) -> Store<GatewayClass> {
     let owned: HashSet<String> = owned_controller_names.iter().cloned().collect();
+    let (store, stream) = watch_stream::reflector_full_watch_stream(
+        Api::<GatewayClass>::all(client.clone()),
+        watcher_config(),
+        writer,
+    );
     crate::spawn::spawn_with_trace_context(async move {
-        let api: Api<GatewayClass> = Api::all(client.clone());
-        let stream = watch_stream::meta_watch_stream(api, watcher_config());
         run_watch_loop(token.clone(), stream, "gatewayclass", move |item| {
             let client = client.clone();
             let tx = tx.clone();
             let owned = owned.clone();
             async move {
                 let class_name = match &item {
-                    WatchItem::Applied(meta) | WatchItem::Deleted(meta) => meta.name_any(),
+                    WatchItem::Applied(gc) | WatchItem::Deleted(gc) => gc.name_any(),
                 };
                 if class_name.is_empty() {
                     return true;
                 }
-                if let WatchItem::Applied(_) = item {
-                    let gc_api: Api<GatewayClass> = Api::all(client.clone());
-                    if let Ok(gc) = gc_api.get(&class_name).await {
-                        if owned.contains(&gc.spec.controller_name) {
-                            if let Err(e) =
-                                crate::status::apply_gateway_class_accepted_stub(&client, &gc).await
-                            {
-                                warn!(error = %e, "gatewayclass status patch");
-                            }
+                if let WatchItem::Applied(ref gc) = item {
+                    if owned.contains(&gc.spec.controller_name) {
+                        if let Err(e) =
+                            crate::status::apply_gateway_class_accepted_stub(&client, gc).await
+                        {
+                            warn!(error = %e, "gatewayclass status patch");
                         }
                     }
                 }
@@ -219,16 +246,21 @@ pub(crate) fn spawn_gateway_class_watcher(
         .await;
         info!("gatewayclass watcher shutdown");
     });
+    store
 }
 
 pub(crate) fn spawn_backend_tls_policy_watcher(
     client: Client,
     tx: crate::reconcile_queue::ReconcileSender,
     token: CancellationToken,
-) {
+    writer: reflector::store::Writer<BackendTLSPolicy>,
+) -> Store<BackendTLSPolicy> {
+    let (store, stream) = watch_stream::reflector_full_watch_stream(
+        Api::<BackendTLSPolicy>::all(client.clone()),
+        watcher_config(),
+        writer,
+    );
     crate::spawn::spawn_with_trace_context(async move {
-        let api: Api<BackendTLSPolicy> = Api::all(client.clone());
-        let stream = watch_stream::full_watch_stream(api, watcher_config());
         run_watch_loop(token.clone(), stream, "backendtlspolicy", move |item| {
             let client = client.clone();
             let tx = tx.clone();
@@ -243,4 +275,5 @@ pub(crate) fn spawn_backend_tls_policy_watcher(
         .await;
         info!("backendtlspolicy watcher shutdown");
     });
+    store
 }

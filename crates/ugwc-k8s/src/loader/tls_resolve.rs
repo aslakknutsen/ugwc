@@ -1,10 +1,9 @@
 use k8s_openapi::api::core::v1::Secret;
-use kube::{Api, Client};
 use tracing::warn;
 
 use ugwc_core::snapshot::{EffectiveListenerSnap, ListenerParentSnap, ReferenceGrantSnap};
 
-use super::LoaderError;
+use crate::stores::SharedStores;
 
 pub(super) fn extract_tls_pem_from_secret(sec: &Secret) -> Result<(Vec<u8>, Vec<u8>), String> {
     let data = sec
@@ -37,12 +36,12 @@ pub(super) fn tls_k8s_secret_pem_looks_valid(cert_pem: &[u8], key_pem: &[u8]) ->
 }
 
 /// Resolve `certificateRefs` into PEM material on HTTPS listeners (same-namespace or via ReferenceGrant).
-pub(super) async fn resolve_gateway_listener_tls(
-    client: &Client,
+pub(super) fn resolve_gateway_listener_tls(
+    stores: &SharedStores,
     gateway_ns: &str,
     grants: &[ReferenceGrantSnap],
     effective: &mut [EffectiveListenerSnap],
-) -> Result<(), LoaderError> {
+) {
     for e in effective.iter_mut() {
         if e.conflicted {
             continue;
@@ -108,9 +107,8 @@ pub(super) async fn resolve_gateway_listener_tls(
         }
         let r = &refs[0];
         let secret_ns = r.namespace.as_deref().unwrap_or(&from_ns);
-        let api: Api<Secret> = Api::namespaced(client.clone(), secret_ns);
-        match api.get(&r.name).await {
-            Ok(sec) => match extract_tls_pem_from_secret(&sec) {
+        match stores.get_secret(secret_ns, &r.name) {
+            Some(sec) => match extract_tls_pem_from_secret(&sec) {
                 Ok((crt, key)) => {
                     if !tls_k8s_secret_pem_looks_valid(&crt, &key) {
                         e.tls_resolve_error = Some(
@@ -126,13 +124,12 @@ pub(super) async fn resolve_gateway_listener_tls(
                     e.tls_resolve_error = Some(format!("InvalidCertificateRef: {msg}"));
                 }
             },
-            Err(err) => {
-                warn!(error = %ugwc_core::redact::redact_field(&err.to_string()), secret_ns = %secret_ns, secret_name = %r.name, "tls certificate secret fetch failed");
+            None => {
+                warn!(secret_ns = %secret_ns, secret_name = %r.name, "tls certificate secret not found in store");
                 e.tls_resolve_error = Some("InvalidCertificateRef: Secret not found".into());
             }
         }
     }
-    Ok(())
 }
 
 /// Check if a ReferenceGrant allows a listener (Gateway or ListenerSet) to
