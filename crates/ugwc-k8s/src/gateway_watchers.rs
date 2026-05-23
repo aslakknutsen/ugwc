@@ -182,18 +182,25 @@ pub(crate) fn spawn_listener_set_watcher(
     writer: reflector::store::Writer<ListenerSet>,
 ) -> Store<ListenerSet> {
     let (store, stream) = watch_stream::reflector_full_watch_stream(
-        Api::<ListenerSet>::all(client),
+        Api::<ListenerSet>::all(client.clone()),
         watcher_config(),
         writer,
     );
     crate::spawn::spawn_with_trace_context(async move {
         run_watch_loop(token.clone(), stream, "listenerset", move |item| {
+            let client = client.clone();
             let tx = tx.clone();
             async move {
-                let ls = match item {
+                let ls = match &item {
                     WatchItem::Applied(l) | WatchItem::Deleted(l) => l,
                 };
-                match gateway_key_for_listener_set(&ls) {
+                if matches!(item, WatchItem::Applied(_)) {
+                    if let Err(e) = crate::status::apply_listenerset_spec_only_status(&client, ls).await
+                    {
+                        warn!(error = %e, "listenerset spec-only status patch");
+                    }
+                }
+                match gateway_key_for_listener_set(ls) {
                     Some((gwns, gwname)) => tx.send(gwns, gwname).await.is_ok(),
                     None => true,
                 }

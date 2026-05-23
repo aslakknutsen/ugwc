@@ -2,7 +2,7 @@
 
 | Document | Contents |
 |----------|----------|
-| [architecture.md](architecture.md) | Workspace layout, runtime components, data flow, crate dependencies, **Mermaid diagrams** (components, watch fan-in, reconcile sequence, startup). |
+| [architecture.md](architecture.md) | Workspace layout, runtime components, data flow, crate dependencies, **Mermaid diagrams** (components, reconcile pipeline, startup). |
 | [operations.md](operations.md) | CRD install order, controller prerequisites, essential **`UGWC_*`** environment variables. |
 | [design.md](design.md) | Design principles, IR and publish model, failure handling, relation to repo `design/` notes. |
 

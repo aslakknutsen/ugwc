@@ -64,7 +64,7 @@ Emitted per reconcile for the gateway snapshot (owned `controllerName` fan-out):
 
 ## Readiness and shutdown
 
-- `/readyz` returns 200 only after `InitialSyncGate` completes: CRD list, Gateway list, EndpointSlice list. CRD-gated route watchers may start later by design.
+- `/readyz` returns 200 only after `InitialSyncGate` completes: CRD supervisor initial list and EndpointSlice reflector store ready (`wait_until_ready`). There is no standalone Gateway list gate; Gateway and route stores populate as CRD-gated watchers start. See [Startup readiness](architecture.md#startup-readiness) in architecture.md.
 - On SIGTERM: readiness fails → reconcile enqueue stops → in-flight drain (30s) → leader lease release → task cancel. See `SHUTDOWN_DRAIN_SECS` / `SHUTDOWN_JOIN_SECS` in `crates/ugwc/src/run.rs`.
 
 ## Tokio runtime metrics (optional)
@@ -113,7 +113,7 @@ The Helm `PrometheusRule` includes recording rules for SLO burn-rate queries:
 
 ## Known limitations
 
-- **Exemplars on reconcile histograms:** The `metrics` crate facade does not support Prometheus exemplars. Linking `ugwc_reconcile_duration_seconds` histogram samples to their active `trace_id` requires switching to native `prometheus-client` histograms directly, bypassing the facade. Until then, use JSON log `trace_id` fields and the `reconcile_gateway` span for trace correlation.
+- **Exemplars on reconcile histograms:** `ugwc_reconcile_duration_seconds` carries `trace_id` exemplars when built with `otlp-traces` and an active trace context on the reconcile span. Without OTel traces enabled, use JSON log `trace_id` fields and the `reconcile_gateway` span for correlation.
 - `etcd_request_duration_seconds` — not visible from the controller process.
 - Target Allocator / hybrid scrape — not bundled in-chart.
 

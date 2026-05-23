@@ -49,12 +49,23 @@ The control plane must merge **many Kubernetes objects** (Gateway API core, poli
 API Server (multi-CRD watches)
         │
         ▼
- Reflector stores (kube-rs)
+ Reflector stores (kube-rs) ──► SharedStores
+        │
+        ▼
+ Watcher events ──► gateway key resolution
+        │              (GatewayIndex for EndpointSlice/Secret/ConfigMap;
+        │               direct parent refs for routes/policies)
+        ▼
+ DedupWorkQueue (pending / in-flight / dirty)
+        │
+        ▼
+ N concurrent reconcile workers (UGWC_RECONCILE_CONCURRENCY)
         │
         ▼
  Idempotent reconcile: read stores → build DAG → IR snapshot
+        │              (GatewayIndex updated after each reconcile)
         │
-        ├──► Status patches (Gateway, Route, Policy, …)
+        ├──► Status patches (Gateway serial; routes/policies parallel)
         │
         ├──► Optional dataplane provisioner (profile-gated): Deployment/Service
         │    per Gateway or external/shared strategies — see dataplane-provisioning.md
@@ -66,6 +77,8 @@ API Server (multi-CRD watches)
         ├──► K8s writer      ──► ConfigMaps / CRDs / …
         └──► … other backends (pull API, object store, bus, …)
 ```
+
+**Diagrams:** See [Reconcile pipeline](../docs/architecture.md#reconcile-pipeline) for mermaid flow charts (stores, queue, workers, index, readiness).
 
 **Mapper rule:** Secondary resources (e.g. HTTPRoute) enqueue **parent** `ObjectRef`s so reconcile stays idempotent — re-read full relevant state each pass.
 

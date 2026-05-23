@@ -290,19 +290,20 @@ pub fn route_parent_attachment_ref_not_permitted(
     false
 }
 
-/// Cross-namespace `Secret` certificate ref from a `Gateway` requires a [`ReferenceGrant`] in the Secret namespace.
+/// Cross-namespace `Secret` certificate ref from a `Gateway` or `ListenerSet` listener
+/// requires a [`ReferenceGrant`] in the Secret namespace.
 #[must_use]
-pub fn reference_grant_permits_gateway_secret_ref(
+pub fn reference_grant_permits_listener_secret_ref(
     grants: &[ReferenceGrantSnap],
-    gateway_namespace: &str,
+    from_namespace: &str,
+    from_kind: &str,
     secret_namespace: &str,
     secret_name: &str,
 ) -> bool {
-    if gateway_namespace == secret_namespace {
+    if from_namespace == secret_namespace {
         return true;
     }
     const G_FROM: &str = "gateway.networking.k8s.io";
-    const K_FROM: &str = "Gateway";
 
     for g in grants {
         if g.namespace != secret_namespace {
@@ -311,7 +312,7 @@ pub fn reference_grant_permits_gateway_secret_ref(
         let mut from_ok = false;
         for fr in &g.from {
             let fg = fr.group.as_deref().unwrap_or(G_FROM);
-            if fg == G_FROM && fr.kind == K_FROM && fr.namespace == gateway_namespace {
+            if fg == G_FROM && fr.kind == from_kind && fr.namespace == from_namespace {
                 from_ok = true;
                 break;
             }
@@ -341,6 +342,23 @@ pub fn reference_grant_permits_gateway_secret_ref(
         }
     }
     false
+}
+
+/// Cross-namespace `Secret` certificate ref from a `Gateway` requires a [`ReferenceGrant`] in the Secret namespace.
+#[must_use]
+pub fn reference_grant_permits_gateway_secret_ref(
+    grants: &[ReferenceGrantSnap],
+    gateway_namespace: &str,
+    secret_namespace: &str,
+    secret_name: &str,
+) -> bool {
+    reference_grant_permits_listener_secret_ref(
+        grants,
+        gateway_namespace,
+        "Gateway",
+        secret_namespace,
+        secret_name,
+    )
 }
 
 /// Cross-namespace `ConfigMap` / `Secret` refs from a `BackendTLSPolicy` require a [`ReferenceGrant`] in the resource namespace.

@@ -219,6 +219,27 @@ mod tests {
     }
 
     #[test]
+    fn tls_listener_with_httproute_only_is_invalid() {
+        let listeners = vec![GatewayListenerSnap {
+            name: "tls".into(),
+            port: 8443,
+            protocol: "TLS".into(),
+            hostname: None,
+            allowed_routes: Some(AllowedRoutesSnap {
+                namespaces: None,
+                kinds: vec![RouteGroupKindSnap {
+                    group: Some("gateway.networking.k8s.io".into()),
+                    kind: "HTTPRoute".into(),
+                }],
+            }),
+            tls: None,
+        }];
+        let eff = &merge_effective_listeners(&listeners, &[])[0];
+        assert!(effective_listener_has_invalid_allowed_route_kinds(eff));
+        assert!(effective_listener_supported_route_kinds_for_status(eff).is_empty());
+    }
+
+    #[test]
     fn valid_http_listener_returns_spec_kinds() {
         let listeners = vec![GatewayListenerSnap {
             name: "http".into(),

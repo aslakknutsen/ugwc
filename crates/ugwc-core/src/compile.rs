@@ -1150,6 +1150,30 @@ pub struct CompileOutcome {
     pub report: CompileReport,
 }
 
+impl CompileOutcome {
+    /// Minimal compile outcome for status-only patches (no routes attached, empty IR).
+    #[must_use]
+    pub fn status_only_placeholder(ns: impl AsRef<str>, name: impl AsRef<str>) -> Self {
+        Self {
+            snapshot: IrSnapshot {
+                ir_version: IR_VERSION,
+                revision: IrRevision::Sequence(0),
+                scope: crate::ir::IrScopeId::new(ns.as_ref(), name.as_ref()),
+                listeners: vec![],
+                routes: vec![],
+                backends: BTreeMap::new(),
+                meta: SnapshotMeta {
+                    correlation_id: Uuid::nil(),
+                    has_errors: false,
+                },
+                policy: PolicyOverlayIr::default(),
+                inference: InferenceIr::default(),
+            },
+            report: CompileReport::default(),
+        }
+    }
+}
+
 /// Deterministic v0 compile — hermetic (no kube client).
 ///
 /// Error model: returns `Err` for programmer/contract mistakes; user-facing

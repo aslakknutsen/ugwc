@@ -20,6 +20,7 @@ pub use route_status::{
 };
 pub use listenerset_status::{
     apply_listenerset_reconciled_status, apply_listenerset_rejected_status,
+    apply_listenerset_spec_only_status,
 };
 pub use backend_tls_status::apply_backend_tls_policies_for_gateway;
 pub use inference_status::apply_inference_pools_for_gateway;

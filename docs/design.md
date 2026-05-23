@@ -16,6 +16,7 @@ Data planes differ: Envoy-style proxies want **xDS**; others may want Kubernetes
 ## Kubernetes integration
 
 - **GatewayClass** and controller configuration define which gateways this instance owns (see implementation plan for v1 defaults: controller name, env-based profile).
+- **Reconcile pipeline** — Watcher events populate reflector stores; gateway keys enter a deduplicating workqueue consumed by concurrent workers. Snapshot load reads stores synchronously (no API lists per reconcile). A reverse index targets EndpointSlice/Secret/ConfigMap fan-out; status patches run in parallel per gateway. Diagrams: [Reconcile pipeline](architecture.md#reconcile-pipeline).
 - **Status** — Reconciler contributes conditions that reflect compile and distribution health where supported (`ugwc-k8s`): **Gateway** and **ListenerSet** listeners; merged parent status on **HTTPRoute**, **GRPCRoute**, **TLSRoute**, **TCPRoute**, **UDPRoute**; **BackendTLSPolicy** ancestors; **InferencePool** parents toward attached gateways.
 - **Compiled surface** — Snapshot load and IR compilation cover **ListenerSet** merge (when `Gateway.spec.allowedListeners` permits), **ReferenceGrant** enforcement on cross-namespace refs, **BackendTLSPolicy** material for **Service** and **InferencePool** backends, and **InferencePool** topology plus endpoint-picker refs for the dataplane. Details and limitations: [architecture.md](architecture.md).
 

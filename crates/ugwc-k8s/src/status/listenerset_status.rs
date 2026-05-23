@@ -7,7 +7,10 @@ use kube::{Api, Client};
 use crate::resources::ListenerSet;
 
 use super::supported_kinds_json;
-use super::gateway_helpers::listener_route_kinds_broken_for_status;
+use super::gateway_helpers::{
+    listener_route_kinds_broken_for_status, listenerset_generation_for_status,
+    listenerset_listener_cert_ref_not_permitted,
+};
 
 /// Update `ListenerSet` status for listeners merged onto a reconciled Gateway.
 pub async fn apply_listenerset_reconciled_status(
@@ -23,11 +26,8 @@ pub async fn apply_listenerset_reconciled_status(
     if name.is_empty() || ns.is_empty() {
         return Ok(());
     }
-    let gen = ls
-        .metadata
-        .generation
-        .filter(|&g| g > 0)
-        .unwrap_or(1);
+    let api: Api<ListenerSet> = Api::namespaced(client.clone(), ns);
+    let gen = listenerset_generation_for_status(&api, name, ns).await?;
     let ls_ns_name = (ns.to_string(), name.to_string());
 
     let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
@@ -107,7 +107,8 @@ pub async fn apply_listenerset_reconciled_status(
             let ref_not_permitted_ls = eff
                 .and_then(|e| e.tls_resolve_error.as_deref())
                 .map(|e| e.contains("RefNotPermitted"))
-                .unwrap_or(false);
+                .unwrap_or(false)
+                || listenerset_listener_cert_ref_not_permitted(Some(l), ns, Some(snapshot));
             let (res_s, res_r, res_m) = if cert_broken && ref_not_permitted_ls {
                 (
                     "False",
@@ -233,7 +234,6 @@ pub async fn apply_listenerset_reconciled_status(
         },
         "status": status_doc,
     });
-    let api: Api<ListenerSet> = Api::namespaced(client.clone(), ns);
     let patch = Patch::Apply(&apply_doc);
     let params = PatchParams::apply("ugwc").force();
     api.patch_status(name, &params, &patch).await?;
@@ -257,7 +257,8 @@ pub async fn apply_listenerset_rejected_status(
     if name.is_empty() || ns.is_empty() {
         return Ok(());
     }
-    let gen = ls.metadata.generation.filter(|&g| g > 0).unwrap_or(1);
+    let api: Api<ListenerSet> = Api::namespaced(client.clone(), ns);
+    let gen = listenerset_generation_for_status(&api, name, ns).await?;
     let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
 
     let listeners_json: Vec<serde_json::Value> = ls
@@ -334,7 +335,6 @@ pub async fn apply_listenerset_rejected_status(
         },
         "status": status_doc,
     });
-    let api: Api<ListenerSet> = Api::namespaced(client.clone(), ns);
     let patch = Patch::Apply(&apply_doc);
     let params = PatchParams::apply("ugwc").force();
     api.patch_status(name, &params, &patch).await?;
@@ -343,4 +343,23 @@ pub async fn apply_listenerset_rejected_status(
         cache.lock().unwrap().insert(key, serialized);
     }
     Ok(())
+}
+
+/// Spec-only ListenerSet status patch to clear CRD Pending defaults before full reconcile.
+pub async fn apply_listenerset_spec_only_status(
+    client: &Client,
+    ls: &ListenerSet,
+) -> Result<(), kube::Error> {
+    let ns = ls.metadata.namespace.as_deref().unwrap_or("default");
+    let name = ls.metadata.name.as_deref().unwrap_or("listenerset");
+    let co = ugwc_core::CompileOutcome::status_only_placeholder(ns, name);
+    apply_listenerset_reconciled_status(
+        client,
+        ls,
+        &ugwc_core::ClusterSnapshot::default(),
+        false,
+        &co,
+        None,
+    )
+    .await
 }

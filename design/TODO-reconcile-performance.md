@@ -2,6 +2,7 @@
 
 **Purpose:** Track phased work to replace the serial, API-server-backed reconcile loop with a store-backed, concurrent, deduplicating architecture.  
 **Related:** [`scale-performance.md`](scale-performance.md), [`controller-architecture.md`](controller-architecture.md)  
+**Operator docs:** [Reconcile pipeline](../docs/architecture.md#reconcile-pipeline)  
 **Target:** 1000+ Gateways, 10000+ Routes, multi-tenant shared control plane.
 
 ---
@@ -31,7 +32,7 @@ These numbers scale roughly linearly with gateway count.
 
 ---
 
-## Phase 1 — Reflector stores (eliminate API server reads during reconcile)
+## Phase 1 — Reflector stores (eliminate API server reads during reconcile) ✅
 
 **Goal:** Per-reconcile `load_cluster_snapshot` reads from local memory instead of hitting the API server.
 
@@ -72,7 +73,7 @@ These numbers scale roughly linearly with gateway count.
 
 ---
 
-## Phase 2 — Deduplicating workqueue (eliminate redundant reconciles)
+## Phase 2 — Deduplicating workqueue (eliminate redundant reconciles) ✅
 
 **Goal:** A gateway key queued N times before processing results in 1 reconcile, not N.
 
@@ -101,7 +102,7 @@ These numbers scale roughly linearly with gateway count.
 
 ---
 
-## Phase 3 — Concurrent reconcile workers (eliminate serial bottleneck)
+## Phase 3 — Concurrent reconcile workers (eliminate serial bottleneck) ✅
 
 **Goal:** Multiple gateways reconcile in parallel. No two workers process the same gateway simultaneously.
 
@@ -193,3 +194,33 @@ After all phases, target numbers for 1000 gateways / 10000 routes:
 | Full pass wall-clock | 10+ minutes | < 5s |
 | API server calls per reconcile | ~12 lists | 0 (reads from store) |
 | API server calls per status pass | 11,000 patches | 11,000 patches (unchanged, but concurrent) |
+
+---
+
+## Verification checklist
+
+Manual validation against the targets above. Record results in your runbook or PR — none are automated in CI yet.
+
+### Setup
+
+```bash
+cd hack/perftest && go build -o perftest .
+./perftest -namespaces 50 -gateways 1 -routes 2 -services -trigger-endpoint
+```
+
+Ensure ugwc is running with `UGWC_KUBE_ENABLE=true` and scrape `/metrics`.
+
+### Metrics to check
+
+| Check | PromQL or metric | Expected |
+|-------|------------------|----------|
+| Snapshot load p99 | `histogram_quantile(0.99, sum(rate(ugwc_snapshot_load_duration_seconds_bucket[5m])) by (le))` | Sub-ms to low-ms after warm-up |
+| Dedup at startup | `rate(ugwc_workqueue_dedup_total{queue_name="gateway_reconcile"}[5m])` | Non-zero during initial sync |
+| Concurrent workers | `ugwc_workqueue_in_flight{queue_name="gateway_reconcile"}` | Up to `UGWC_RECONCILE_CONCURRENCY` under load |
+| Endpoint fan-out | `histogram_quantile(0.99, sum(rate(ugwc_index_fanout_size_bucket{event_kind="endpointslice"}[5m])) by (le))` | ~1 after index warm-up (with `-trigger-endpoint`) |
+| Status patch parallelism | `histogram_quantile(0.99, sum(rate(ugwc_status_patch_duration_seconds_bucket[5m])) by (le))` | Lower than pre-parallel baseline at same route count |
+| Reconcile wall-clock | `histogram_quantile(0.99, sum(rate(ugwc_reconcile_duration_seconds_bucket[5m])) by (le, controller_name))` | 50 gateways with 16 workers: well under pre-change baseline |
+
+### API audit (optional)
+
+During steady-state reconcile (no object changes), audit logs should show **no** list/get from ugwc except watch streams and status patches.

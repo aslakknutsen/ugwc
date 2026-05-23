@@ -4,7 +4,7 @@ use kube::Api;
 use tracing::warn;
 
 use crate::provision::per_gateway_dataplane_name;
-use crate::resources::{Gateway, GatewayListeners};
+use crate::resources::{Gateway, GatewayListeners, ListenerSet, ListenerSetListeners};
 use ugwc_core::compile::CompileReport;
 
 use super::ListenerAllowedRouteKinds;
@@ -117,7 +117,49 @@ pub(super) fn gateway_listener_cert_ref_not_permitted(
         if secret_ns == gw_ns {
             return false;
         }
-        !ugwc_core::reference_grant_permits_gateway_secret_ref(grants, gw_ns, secret_ns, &r.name)
+        !ugwc_core::reference_grant_permits_listener_secret_ref(
+            grants, gw_ns, "Gateway", secret_ns, &r.name,
+        )
+    })
+}
+
+/// Check whether a ListenerSet listener's cross-namespace certificateRef is blocked
+/// by a missing or invalid ReferenceGrant.
+pub(super) fn listenerset_listener_cert_ref_not_permitted(
+    spec_row: Option<&ListenerSetListeners>,
+    ls_ns: &str,
+    cluster: Option<&ugwc_core::ClusterSnapshot>,
+) -> bool {
+    let Some(l) = spec_row else {
+        return false;
+    };
+    if !l.protocol.trim().eq_ignore_ascii_case("HTTPS") {
+        return false;
+    }
+    let refs = match l.tls.as_ref() {
+        Some(t) => t.certificate_refs.as_deref().unwrap_or_default(),
+        None => return false,
+    };
+    if refs.is_empty() {
+        return false;
+    }
+    let grants = cluster
+        .map(|c| c.reference_grants.as_slice())
+        .unwrap_or(&[]);
+    refs.iter().any(|r| {
+        let kind = r.kind.as_deref().unwrap_or("Secret");
+        let group = r.group.as_deref().unwrap_or("");
+        let secret_group_ok = group.is_empty() || group.eq_ignore_ascii_case("core");
+        if !kind.eq_ignore_ascii_case("Secret") || !secret_group_ok {
+            return false;
+        }
+        let secret_ns = r.namespace.as_deref().unwrap_or(ls_ns);
+        if secret_ns == ls_ns {
+            return false;
+        }
+        !ugwc_core::reference_grant_permits_listener_secret_ref(
+            grants, ls_ns, "ListenerSet", secret_ns, &r.name,
+        )
     })
 }
 
@@ -240,6 +282,28 @@ pub(super) async fn gateway_generation_for_status(
             gateway = %name,
             namespace = %gateway_ns,
             "Gateway metadata.generation missing or zero after refetch; using {gen} for observedGeneration"
+        );
+    }
+    Ok(gen)
+}
+
+/// Resolve `metadata.generation` for ListenerSet status `observedGeneration`.
+pub(super) async fn listenerset_generation_for_status(
+    api: &kube::Api<ListenerSet>,
+    name: &str,
+    ls_ns: &str,
+) -> Result<i64, kube::Error> {
+    let refreshed = api.get(name).await?;
+    let gen = refreshed
+        .metadata
+        .generation
+        .filter(|&g| g > 0)
+        .unwrap_or(1);
+    if refreshed.metadata.generation.is_none() || refreshed.metadata.generation == Some(0) {
+        warn!(
+            listenerset = %name,
+            namespace = %ls_ns,
+            "ListenerSet metadata.generation missing or zero after refetch; using {gen} for observedGeneration"
         );
     }
     Ok(gen)

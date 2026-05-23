@@ -79,11 +79,15 @@ View events with `kubectl describe gateway <name>` or `kubectl get events --fiel
 | `ugwc_reconcile_runs_total` | Counter | `controller_name`, `status` (`success`/`error`) |
 | `ugwc_reconcile_duration_seconds` | Histogram | `controller_name` (+ `trace_id` exemplar when OTel active) |
 | `ugwc_workqueue_depth` | Gauge | `queue_name` |
+| `ugwc_workqueue_in_flight` | Gauge | `queue_name` |
 | `ugwc_workqueue_adds_total` | Counter | `queue_name` |
+| `ugwc_workqueue_dedup_total` | Counter | `queue_name` |
 | `ugwc_workqueue_queue_duration_seconds` | Histogram | `queue_name` |
 | `ugwc_workqueue_unfinished_work_seconds` | Gauge | `queue_name` |
 | `ugwc_workqueue_longest_running_processor_seconds` | Gauge | `queue_name` |
 | `ugwc_workqueue_retries_total` | Counter | `queue_name` |
+| `ugwc_index_fanout_size` | Histogram | `event_kind` |
+| `ugwc_index_gateways_indexed` | Gauge | — |
 | `ugwc_rest_client_request_duration_seconds` | Histogram | `verb`, `resource`, `code` |
 | `ugwc_admin_request_duration_seconds` | Histogram | `method`, `status` |
 
@@ -127,7 +131,7 @@ View events with `kubectl describe gateway <name>` or `kubectl get events --fiel
 | `ugwc_tokio_total_busy_duration_seconds` | Gauge | `tokio-metrics` |
 | `ugwc_tokio_total_polls_count` | Gauge | `tokio-metrics` |
 | `ugwc_tokio_total_noop_count` | Gauge | `tokio-metrics` |
-| `process_*` | various | always (via `metrics-process`) |
+| `process_*` | various | always (via `kubert-prometheus-process`) |
 
 ## Common PromQL queries
 
@@ -150,6 +154,19 @@ Workqueue wait P99:
 ```promql
 histogram_quantile(0.99,
   sum(rate(ugwc_workqueue_queue_duration_seconds_bucket[5m])) by (le))
+```
+
+Dedup rate (skipped duplicate enqueues):
+
+```promql
+rate(ugwc_workqueue_dedup_total{queue_name="gateway_reconcile"}[5m])
+```
+
+EndpointSlice fan-out P99 (should be ~1 after index warm-up):
+
+```promql
+histogram_quantile(0.99,
+  sum(rate(ugwc_index_fanout_size_bucket{event_kind="endpointslice"}[5m])) by (le))
 ```
 
 K8s API latency by resource:

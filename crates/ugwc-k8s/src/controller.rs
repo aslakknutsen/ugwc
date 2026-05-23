@@ -1,6 +1,7 @@
 //! Multi-watch controller graph: CRD-gated `Gateway`, routes, policies, classes, pools (via
 //! [`crate::crd_supervisor`]); always-on `EndpointSlice`, `Secret`, `ConfigMap` (BackendTLS CA),
-//! Namespace, and managed `Service` (for LoadBalancer IP propagation to `Gateway.status.addresses`).
+//! Namespace, and all `Service` objects (route backend resolution plus managed dataplane
+//! LoadBalancer IP propagation to `Gateway.status.addresses`).
 
 use std::future::Future;
 use std::pin::Pin;
@@ -154,14 +155,14 @@ pub async fn run_gateway_controller(
         info!("endpointslice watcher shutdown");
     });
 
-    // ── Service watcher (reflector-backed, label-filtered) ──────────────
+    // ── Service watcher (reflector-backed, all Services for backend resolution) ─
     let sd_svc = shutdown.clone();
     let tx_svc = tx.clone();
-    let c_svc = client.clone();
-    let svc_cfg = watcher_config().labels("gateway.ugwc.io/managed=ugwc-per-gateway");
+    let stores_svc = stores.clone();
+    let index_svc = gateway_index.clone();
     let (_, mut svc_stream) = watch_stream::reflector_full_watch_stream(
-        Api::<Service>::all(c_svc),
-        svc_cfg,
+        Api::<Service>::all(client.clone()),
+        watcher_config(),
         writers.services,
     );
     crate::spawn::spawn_with_trace_context(async move {
@@ -173,6 +174,12 @@ pub async fn run_gateway_controller(
                         None => break,
                         Some(Err(e)) => warn!(error = %e, "service watch stream"),
                         Some(Ok(WatchItem::Applied(svc) | WatchItem::Deleted(svc))) => {
+                            let svc_ns = svc.namespace().unwrap_or_default();
+                            let svc_name = svc.name_any();
+                            let keys = index_svc.resolve_service_fanout(&stores_svc, &svc_ns, &svc_name);
+                            if !drain_gateway_keys(keys, &tx_svc).await {
+                                return;
+                            }
                             if let Some((gw_ns, gw_name)) = gateway_key_for_managed_service(&svc) {
                                 if tx_svc.send(gw_ns, gw_name).await.is_err() {
                                     return;

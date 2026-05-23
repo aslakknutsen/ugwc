@@ -162,8 +162,6 @@ impl GatewayIndex {
         let targeted = self.gateways_for_secret(secret_ns, secret_name);
         let keys = if !targeted.is_empty() {
             targeted
-        } else if self.is_fully_indexed(stores) {
-            HashSet::new()
         } else {
             gateway_keys_for_secret_from_stores(stores, secret_ns, secret_name)
         };
@@ -181,8 +179,6 @@ impl GatewayIndex {
         let targeted = self.gateways_for_configmap(cm_ns, cm_name);
         let keys = if !targeted.is_empty() {
             targeted
-        } else if self.is_fully_indexed(stores) {
-            HashSet::new()
         } else {
             gateway_keys_for_configmap_from_stores(stores, cm_ns, cm_name)
         };
@@ -461,5 +457,21 @@ mod tests {
         let refs = refs_from_snapshot(&empty_stores(), &snap);
         assert!(refs.services.contains(&("ns".into(), "svc".into())));
         assert!(refs.secrets.contains(&("sec-ns".into(), "tls-secret".into())));
+    }
+
+    #[test]
+    fn resolve_configmap_fanout_does_not_drop_when_index_full_and_key_missing() {
+        let index = test_index();
+        let stores = empty_stores();
+        index.update_gateway(
+            "ns",
+            "gw",
+            GatewayRefs {
+                configmaps: HashSet::from([("ns".into(), "indexed-cm".into())]),
+                ..Default::default()
+            },
+        );
+        let keys = index.resolve_configmap_fanout(&stores, "ns", "missing-cm");
+        assert!(keys.is_empty());
     }
 }

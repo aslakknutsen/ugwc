@@ -94,7 +94,7 @@ pub(super) fn resolve_gateway_listener_tls(
         let mut grant_blocked = false;
         for r in refs.iter() {
             let secret_ns = r.namespace.as_deref().unwrap_or(&from_ns);
-            if !reference_grant_permits_listener_secret_ref(
+            if !ugwc_core::reference_grant_permits_listener_secret_ref(
                 grants, &from_ns, from_kind, secret_ns, &r.name,
             ) {
                 grant_blocked = true;
@@ -130,64 +130,4 @@ pub(super) fn resolve_gateway_listener_tls(
             }
         }
     }
-}
-
-/// Check if a ReferenceGrant allows a listener (Gateway or ListenerSet) to
-/// reference a Secret in another namespace.
-pub(super) fn reference_grant_permits_listener_secret_ref(
-    grants: &[ReferenceGrantSnap],
-    from_namespace: &str,
-    from_kind: &str,
-    secret_namespace: &str,
-    secret_name: &str,
-) -> bool {
-    if from_namespace == secret_namespace {
-        return true;
-    }
-    const G_FROM: &str = "gateway.networking.k8s.io";
-
-    for g in grants {
-        if g.namespace != secret_namespace {
-            continue;
-        }
-        let mut from_ok = false;
-        for fr in &g.from {
-            let fg = fr.group.as_deref().unwrap_or(G_FROM);
-            if fg == G_FROM && fr.kind == from_kind && fr.namespace == from_namespace {
-                from_ok = true;
-                break;
-            }
-        }
-        if !from_ok {
-            continue;
-        }
-        for to in &g.to {
-            if to.kind != "Secret" {
-                continue;
-            }
-            let tg = to.group.as_deref().unwrap_or("");
-            if !tg.is_empty() {
-                continue;
-            }
-            match &to.name {
-                None => {
-                    warn!(
-                        grant_ns = %g.namespace, grant_name = %g.name,
-                        "ReferenceGrant with wildcard to.name permits all Secrets in namespace"
-                    );
-                    return true;
-                }
-                Some(n) if n.is_empty() => {
-                    warn!(
-                        grant_ns = %g.namespace, grant_name = %g.name,
-                        "ReferenceGrant with empty to.name permits all Secrets in namespace"
-                    );
-                    return true;
-                }
-                Some(n) if n == secret_name => return true,
-                _ => {}
-            }
-        }
-    }
-    false
 }

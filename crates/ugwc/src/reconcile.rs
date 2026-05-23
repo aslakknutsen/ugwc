@@ -315,6 +315,29 @@ async fn apply_attached_resource_statuses(
         std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + '_>>,
     > = Vec::new();
 
+    for ls_snap in &snap.listener_sets {
+        patch_listenerset_reconciled(
+            ctx,
+            snap,
+            co,
+            programmed_ok,
+            ls_snap.namespace.clone(),
+            ls_snap.name.clone(),
+            status_cache.clone(),
+        )
+        .await;
+    }
+    for rej in &snap.rejected_listener_sets {
+        patch_listenerset_rejected(
+            ctx,
+            rej.namespace.clone(),
+            rej.name.clone(),
+            rej.reason.clone(),
+            status_cache.clone(),
+        )
+        .await;
+    }
+
     futs.extend(snap.http_routes.iter().map(|r| {
         let (rs, rr, rm) = http_route_resolved_refs_row(&co.report, r);
         Box::pin(async {
@@ -458,35 +481,6 @@ async fn apply_attached_resource_statuses(
                 warn!(error = %e, route = %route_name, "udproute status patch");
             }
         }) as std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + '_>>
-    }));
-
-    futs.extend(snap.listener_sets.iter().map(|ls_snap| {
-        let ls_ns = ls_snap.namespace.clone();
-        let ls_name = ls_snap.name.clone();
-        let cache = status_cache.clone();
-        Box::pin(patch_listenerset_reconciled(
-            ctx,
-            snap,
-            co,
-            programmed_ok,
-            ls_ns,
-            ls_name,
-            cache,
-        )) as std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + '_>>
-    }));
-
-    futs.extend(snap.rejected_listener_sets.iter().map(|rej| {
-        let ls_ns = rej.namespace.clone();
-        let ls_name = rej.name.clone();
-        let reason = rej.reason.clone();
-        let cache = status_cache.clone();
-        Box::pin(patch_listenerset_rejected(
-            ctx,
-            ls_ns,
-            ls_name,
-            reason,
-            cache,
-        )) as std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + '_>>
     }));
 
     ugwc_k8s::status::run_bounded(concurrency, futs).await;
