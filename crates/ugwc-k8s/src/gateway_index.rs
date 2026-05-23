@@ -460,9 +460,83 @@ mod tests {
     }
 
     #[test]
-    fn resolve_configmap_fanout_does_not_drop_when_index_full_and_key_missing() {
+    fn resolve_configmap_fanout_falls_back_to_store_scan_when_key_not_indexed() {
+        use crate::resources::{
+            BackendTlsPolicySpec, BackendTlsPolicyTargetRefs, BackendTlsPolicyValidation,
+            BackendTlsPolicyValidationCaCertificateRefs, HTTPRoute, HttpRouteParentRefs,
+            HttpRouteRules, HttpRouteRulesBackendRefs, HttpRouteSpec,
+        };
+        use kube::runtime::watcher::Event;
+
         let index = test_index();
         let stores = empty_stores();
+
+        let mut hr_writer = kube::runtime::reflector::store::Writer::<HTTPRoute>::default();
+        let hr_store = hr_writer.as_reader();
+        hr_writer.apply_watcher_event(&Event::Apply(HTTPRoute {
+            metadata: kube::api::ObjectMeta {
+                name: Some("route".into()),
+                namespace: Some("ns".into()),
+                ..Default::default()
+            },
+            spec: HttpRouteSpec {
+                parent_refs: Some(vec![HttpRouteParentRefs {
+                    group: Some("gateway.networking.k8s.io".into()),
+                    kind: Some("Gateway".into()),
+                    name: "gw".into(),
+                    namespace: Some("ns".into()),
+                    ..Default::default()
+                }]),
+                rules: Some(vec![HttpRouteRules {
+                    backend_refs: Some(vec![HttpRouteRulesBackendRefs {
+                        name: "svc".into(),
+                        port: Some(443),
+                        ..Default::default()
+                    }]),
+                    ..Default::default()
+                }]),
+                ..Default::default()
+            },
+            ..Default::default()
+        }));
+
+        let mut btp_writer =
+            kube::runtime::reflector::store::Writer::<crate::resources::BackendTLSPolicy>::default();
+        let btp_store = btp_writer.as_reader();
+        btp_writer.apply_watcher_event(&Event::Apply(
+            crate::resources::BackendTLSPolicy {
+                metadata: kube::api::ObjectMeta {
+                    name: Some("pol".into()),
+                    namespace: Some("ns".into()),
+                    ..Default::default()
+                },
+                spec: BackendTlsPolicySpec {
+                    target_refs: vec![BackendTlsPolicyTargetRefs {
+                        group: String::new(),
+                        kind: "Service".into(),
+                        name: "svc".into(),
+                        section_name: None,
+                    }],
+                    validation: BackendTlsPolicyValidation {
+                        hostname: "host".into(),
+                        ca_certificate_refs: Some(vec![
+                            BackendTlsPolicyValidationCaCertificateRefs {
+                                group: String::new(),
+                                kind: "ConfigMap".into(),
+                                name: "test-cm".into(),
+                            },
+                        ]),
+                        ..Default::default()
+                    },
+                    options: None,
+                },
+                ..Default::default()
+            },
+        ));
+
+        stores.set_http_route_store(hr_store);
+        stores.set_backend_tls_policy_store(btp_store);
+
         index.update_gateway(
             "ns",
             "gw",
@@ -471,7 +545,8 @@ mod tests {
                 ..Default::default()
             },
         );
-        let keys = index.resolve_configmap_fanout(&stores, "ns", "missing-cm");
-        assert!(keys.is_empty());
+
+        let keys = index.resolve_configmap_fanout(&stores, "ns", "test-cm");
+        assert_eq!(keys, HashSet::from([("ns".into(), "gw".into())]));
     }
 }

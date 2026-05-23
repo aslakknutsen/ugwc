@@ -100,6 +100,7 @@ where
 struct WatchDemuxStream<T> {
     inner: Pin<Box<dyn Stream<Item = Result<Event<T>, watcher::Error>> + Send>>,
     last_gen: Arc<Mutex<HashMap<(String, String), u64>>>,
+    map_fn: fn(&Arc<Mutex<HashMap<(String, String), u64>>>, Event<T>) -> Option<WatchItem<T>>,
 }
 
 impl<K> Stream for WatchDemuxStream<K>
@@ -110,13 +111,43 @@ where
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         let this = self.as_mut().get_mut();
-        demux_poll(
-            this.inner.as_mut(),
-            &this.last_gen,
-            cx,
-            map_event::<K>,
-        )
+        demux_poll(this.inner.as_mut(), &this.last_gen, cx, this.map_fn)
     }
+}
+
+fn reflector_watch_stream_with_map<K>(
+    api: Api<K>,
+    cfg: WatcherConfig,
+    writer: reflector::store::Writer<K>,
+    map_fn: fn(&Arc<Mutex<HashMap<(String, String), u64>>>, Event<K>) -> Option<WatchItem<K>>,
+) -> (
+    Store<K>,
+    Pin<Box<dyn Stream<Item = Result<WatchItem<K>, watcher::Error>> + Send>>,
+)
+where
+    K: Resource<DynamicType: Default + Eq + Hash + Clone>
+        + Clone
+        + DeserializeOwned
+        + std::fmt::Debug
+        + Send
+        + Sync
+        + 'static,
+{
+    let store = writer.as_reader();
+    let last_gen = Arc::new(Mutex::new(HashMap::new()));
+    let inner: Pin<Box<dyn Stream<Item = Result<Event<K>, watcher::Error>> + Send>> = Box::pin(
+        reflector::reflector(
+            writer,
+            watcher::watcher(api, cfg).modify(strip_managed_fields),
+        )
+        .default_backoff(),
+    );
+    let stream = Box::pin(WatchDemuxStream {
+        inner,
+        last_gen,
+        map_fn,
+    });
+    (store, stream)
 }
 
 /// Full-resource watch with reflector: prune → reflector(store) → backoff → generation dedup.
@@ -149,8 +180,117 @@ where
         )
         .default_backoff(),
     );
-    let stream = Box::pin(WatchDemuxStream { inner, last_gen });
+    let stream = Box::pin(WatchDemuxStream {
+        inner,
+        last_gen,
+        map_fn: map_event::<K>,
+    });
     (store, stream)
+}
+
+fn hash_data_map(data: &std::collections::BTreeMap<String, String>) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    let mut keys: Vec<_> = data.keys().collect();
+    keys.sort();
+    for k in keys {
+        k.hash(&mut hasher);
+        data[k].hash(&mut hasher);
+    }
+    hasher.finish()
+}
+
+fn configmap_data_fingerprint(cm: &k8s_openapi::api::core::v1::ConfigMap) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    cm.metadata.generation.unwrap_or(0).hash(&mut hasher);
+    if let Some(data) = &cm.data {
+        hash_data_map(data).hash(&mut hasher);
+    }
+    hasher.finish()
+}
+
+fn secret_data_fingerprint(sec: &k8s_openapi::api::core::v1::Secret) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    sec.metadata.generation.unwrap_or(0).hash(&mut hasher);
+    if let Some(data) = &sec.data {
+        let mut keys: Vec<_> = data.keys().collect();
+        keys.sort();
+        for k in keys {
+            k.hash(&mut hasher);
+            data[k].0.hash(&mut hasher);
+        }
+    }
+    hasher.finish()
+}
+
+fn map_event_with_hash<K>(
+    last_gen: &Arc<Mutex<HashMap<(String, String), u64>>>,
+    ev: Event<K>,
+    hash_fn: fn(&K) -> u64,
+) -> Option<WatchItem<K>>
+where
+    K: Resource<DynamicType: Default>,
+{
+    match ev {
+        Event::Apply(obj) | Event::InitApply(obj) => {
+            let key = object_cache_key(&obj);
+            let hash = hash_fn(&obj);
+            let mut last = last_gen.lock().expect("watch generation cache");
+            if last.get(&key) == Some(&hash) {
+                return None;
+            }
+            last.insert(key, hash);
+            Some(WatchItem::Applied(obj))
+        }
+        Event::Delete(obj) => {
+            last_gen
+                .lock()
+                .expect("watch generation cache")
+                .remove(&object_cache_key(&obj));
+            Some(WatchItem::Deleted(obj))
+        }
+        Event::Init | Event::InitDone => None,
+    }
+}
+
+fn map_configmap_event(
+    last_gen: &Arc<Mutex<HashMap<(String, String), u64>>>,
+    ev: Event<k8s_openapi::api::core::v1::ConfigMap>,
+) -> Option<WatchItem<k8s_openapi::api::core::v1::ConfigMap>> {
+    map_event_with_hash(last_gen, ev, configmap_data_fingerprint)
+}
+
+fn map_secret_event(
+    last_gen: &Arc<Mutex<HashMap<(String, String), u64>>>,
+    ev: Event<k8s_openapi::api::core::v1::Secret>,
+) -> Option<WatchItem<k8s_openapi::api::core::v1::Secret>> {
+    map_event_with_hash(last_gen, ev, secret_data_fingerprint)
+}
+
+/// ConfigMap watch with data-content fingerprint dedup (CA hot-reload).
+pub fn reflector_configmap_watch_stream(
+    api: Api<k8s_openapi::api::core::v1::ConfigMap>,
+    cfg: WatcherConfig,
+    writer: reflector::store::Writer<k8s_openapi::api::core::v1::ConfigMap>,
+) -> (
+    Store<k8s_openapi::api::core::v1::ConfigMap>,
+    Pin<Box<dyn Stream<Item = Result<WatchItem<k8s_openapi::api::core::v1::ConfigMap>, watcher::Error>> + Send>>,
+) {
+    reflector_watch_stream_with_map(api, cfg, writer, map_configmap_event)
+}
+
+/// Secret watch with data-content fingerprint dedup (BackendTLS CA material).
+pub fn reflector_secret_watch_stream(
+    api: Api<k8s_openapi::api::core::v1::Secret>,
+    cfg: WatcherConfig,
+    writer: reflector::store::Writer<k8s_openapi::api::core::v1::Secret>,
+) -> (
+    Store<k8s_openapi::api::core::v1::Secret>,
+    Pin<Box<dyn Stream<Item = Result<WatchItem<k8s_openapi::api::core::v1::Secret>, watcher::Error>> + Send>>,
+) {
+    reflector_watch_stream_with_map(api, cfg, writer, map_secret_event)
 }
 
 /// Drive a delete-aware watch stream until `token` is cancelled or the handler returns false.
@@ -239,5 +379,36 @@ mod tests {
         assert_eq!(predicates::generation(&pod), h1);
         pod.metadata.generation = Some(2);
         assert_ne!(predicates::generation(&pod), h1);
+    }
+
+    #[test]
+    fn configmap_data_fingerprint_changes_when_ca_crt_changes() {
+        use k8s_openapi::api::core::v1::ConfigMap;
+        use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
+
+        let mut cm = ConfigMap {
+            metadata: ObjectMeta {
+                name: Some("ca".into()),
+                namespace: Some("ns".into()),
+                generation: Some(1),
+                ..Default::default()
+            },
+            data: Some(std::collections::BTreeMap::from([(
+                "ca.crt".into(),
+                "valid".into(),
+            )])),
+            ..Default::default()
+        };
+        let h1 = configmap_data_fingerprint(&cm);
+        cm.data.as_mut().unwrap().insert("ca.crt".into(), String::new());
+        let h2 = configmap_data_fingerprint(&cm);
+        assert_ne!(h1, h2);
+
+        let last = Arc::new(Mutex::new(HashMap::new()));
+        let mut valid_cm = cm.clone();
+        valid_cm.data.as_mut().unwrap().insert("ca.crt".into(), "valid".into());
+        assert!(map_configmap_event(&last, Event::Apply(valid_cm)).is_some());
+        assert!(map_configmap_event(&last, Event::Apply(cm.clone())).is_some());
+        assert!(map_configmap_event(&last, Event::Apply(cm)).is_none());
     }
 }

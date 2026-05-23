@@ -3,9 +3,14 @@ use std::sync::{Arc, Mutex};
 
 use kube::api::{Patch, PatchParams};
 use kube::{Api, Client};
-use tracing::warn;
 
-use crate::resources::BackendTLSPolicy;
+use crate::loader::{backend_tls, reference_grant_snaps_from_stores};
+use crate::resources::{
+    backend_tls_policy_spec_references_configmap, backend_tls_policy_spec_references_secret,
+    BackendTLSPolicy,
+};
+use crate::stores::SharedStores;
+use crate::watch_helpers_store::gateway_targets_for_backend_tls_policy_from_stores;
 
 use super::{run_bounded, status_rows_to_json};
 
@@ -21,7 +26,7 @@ async fn apply_one_backend_tls_policy(
     let pol = match api.get(&outcome.name).await {
         Ok(p) => p,
         Err(e) => {
-            warn!(
+            tracing::warn!(
                 error = %e,
                 policy_ns = %outcome.namespace,
                 policy_name = %outcome.name,
@@ -155,7 +160,7 @@ async fn apply_one_backend_tls_policy(
         )
         .await
     {
-        warn!(
+        tracing::warn!(
             error = %e,
             policy_ns = %outcome.namespace,
             policy_name = %outcome.name,
@@ -169,6 +174,52 @@ async fn apply_one_backend_tls_policy(
     }
 }
 
+/// Fast-path BackendTLSPolicy status when a CA ConfigMap or Secret changes.
+pub async fn apply_backend_tls_status_for_ca_ref_change(
+    client: &Client,
+    stores: &SharedStores,
+    controller_name: &str,
+    resource_ns: &str,
+    resource_name: &str,
+    is_configmap: bool,
+) {
+    let grants = reference_grant_snaps_from_stores(stores);
+    for pol in stores.list_backend_tls_policies() {
+        let pol_ns = pol.metadata.namespace.as_deref().unwrap_or("");
+        let references = if is_configmap {
+            backend_tls_policy_spec_references_configmap(
+                &pol.spec,
+                pol_ns,
+                resource_ns,
+                resource_name,
+            )
+        } else {
+            backend_tls_policy_spec_references_secret(
+                &pol.spec,
+                pol_ns,
+                resource_ns,
+                resource_name,
+            )
+        };
+        if !references {
+            continue;
+        }
+        let outcome = backend_tls::policy_outcome_from_policy_stores(stores, &pol, &grants, false);
+        let gateways = gateway_targets_for_backend_tls_policy_from_stores(stores, &pol);
+        for (gw_ns, gw_name) in gateways {
+            apply_one_backend_tls_policy(
+                client,
+                &gw_ns,
+                &gw_name,
+                controller_name,
+                outcome.clone(),
+                None,
+            )
+            .await;
+        }
+    }
+}
+
 /// Merge `BackendTLSPolicy` `status.ancestors` for the reconciled Gateway (policy attachment status).
 pub async fn apply_backend_tls_policies_for_gateway(
     client: &Client,
@@ -176,20 +227,24 @@ pub async fn apply_backend_tls_policies_for_gateway(
     gateway_name: &str,
     controller_name: &str,
     snapshot: &ugwc_core::ClusterSnapshot,
+    stores: &SharedStores,
     status_cache: Option<Arc<Mutex<HashMap<String, String>>>>,
     status_patch_concurrency: usize,
 ) -> Result<(), kube::Error> {
+    let grants = reference_grant_snaps_from_stores(stores);
     let futs: Vec<_> = snapshot
         .backend_tls_policy_outcomes
         .iter()
         .cloned()
         .map(|outcome| {
+            let refreshed = backend_tls::refresh_outcome_from_stores(stores, &outcome, &grants)
+                .unwrap_or(outcome);
             apply_one_backend_tls_policy(
                 client,
                 gateway_ns,
                 gateway_name,
                 controller_name,
-                outcome,
+                refreshed,
                 status_cache.clone(),
             )
         })
@@ -197,4 +252,104 @@ pub async fn apply_backend_tls_policies_for_gateway(
 
     run_bounded(status_patch_concurrency, futs).await;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use ugwc_core::snapshot::BackendTlsPolicyOutcomeSnap;
+
+    use super::*;
+
+    #[test]
+    fn refresh_outcome_prefers_invalid_ca_over_stale_accepted() {
+        use k8s_openapi::api::core::v1::ConfigMap;
+
+        let mut cm_writer = kube::runtime::reflector::store::Writer::<ConfigMap>::default();
+        let cm_store = cm_writer.as_reader();
+        cm_writer.apply_watcher_event(&kube::runtime::watcher::Event::Apply(ConfigMap {
+            metadata: kube::api::ObjectMeta {
+                name: Some("ca".into()),
+                namespace: Some("ns".into()),
+                ..Default::default()
+            },
+            data: Some(std::collections::BTreeMap::from([(
+                "ca.crt".into(),
+                String::new(),
+            )])),
+            ..Default::default()
+        }));
+
+        let mut btp_writer =
+            kube::runtime::reflector::store::Writer::<crate::resources::BackendTLSPolicy>::default();
+        let btp_store = btp_writer.as_reader();
+        btp_writer.apply_watcher_event(&kube::runtime::watcher::Event::Apply(
+            crate::resources::BackendTLSPolicy {
+                metadata: kube::api::ObjectMeta {
+                    name: Some("pol".into()),
+                    namespace: Some("ns".into()),
+                    ..Default::default()
+                },
+                spec: crate::resources::BackendTlsPolicySpec {
+                    target_refs: vec![crate::resources::BackendTlsPolicyTargetRefs {
+                        group: String::new(),
+                        kind: "Service".into(),
+                        name: "svc".into(),
+                        section_name: None,
+                    }],
+                    validation: crate::resources::BackendTlsPolicyValidation {
+                        hostname: "host".into(),
+                        ca_certificate_refs: Some(vec![
+                            crate::resources::BackendTlsPolicyValidationCaCertificateRefs {
+                                group: String::new(),
+                                kind: "ConfigMap".into(),
+                                name: "ca".into(),
+                            },
+                        ]),
+                        ..Default::default()
+                    },
+                    options: None,
+                },
+                ..Default::default()
+            },
+        ));
+
+        let ep = kube::runtime::reflector::store::Writer::<
+            k8s_openapi::api::discovery::v1::EndpointSlice,
+        >::default();
+        let svc = kube::runtime::reflector::store::Writer::<
+            k8s_openapi::api::core::v1::Service,
+        >::default();
+        let sec = kube::runtime::reflector::store::Writer::<
+            k8s_openapi::api::core::v1::Secret,
+        >::default();
+        let ns = kube::runtime::reflector::store::Writer::<
+            k8s_openapi::api::core::v1::Namespace,
+        >::default();
+        let stores = SharedStores::new(
+            ep.as_reader(),
+            svc.as_reader(),
+            sec.as_reader(),
+            cm_store,
+            ns.as_reader(),
+        );
+        stores.set_backend_tls_policy_store(btp_store);
+
+        let stale = BackendTlsPolicyOutcomeSnap {
+            namespace: "ns".into(),
+            name: "pol".into(),
+            conflicted: false,
+            resolved_refs_ok: true,
+            accepted: true,
+            message: None,
+            accepted_condition_reason: Some("Accepted".into()),
+            resolved_refs_condition_reason: Some("ResolvedRefs".into()),
+        };
+        let refreshed = backend_tls::refresh_outcome_from_stores(&stores, &stale, &[]).unwrap();
+        assert!(!refreshed.accepted);
+        assert!(!refreshed.resolved_refs_ok);
+        assert_eq!(
+            refreshed.accepted_condition_reason.as_deref(),
+            Some("NoValidCACertificate")
+        );
+    }
 }

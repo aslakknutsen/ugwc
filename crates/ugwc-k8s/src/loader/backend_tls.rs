@@ -451,40 +451,87 @@ pub fn load_backend_tls_for_gateway(
     for lp in loaded {
         let k = (lp.policy_ns.clone(), lp.policy_name.clone());
         let is_conflicted = conflicted.contains(&k);
-        let resolved_ok = !lp.tls_ir.invalid;
-        let rr_reason = if resolved_ok {
-            "ResolvedRefs".to_string()
-        } else {
-            lp.tls_resolve_reason
-                .clone()
-                .unwrap_or_else(|| "InvalidCACertificateRef".into())
-        };
-        let acc_reason = if is_conflicted {
-            "Conflicted".to_string()
-        } else if !resolved_ok {
-            "NoValidCACertificate".to_string()
-        } else {
-            "Accepted".to_string()
-        };
-        outcomes.push(BackendTlsPolicyOutcomeSnap {
-            namespace: lp.policy_ns,
-            name: lp.policy_name,
-            conflicted: is_conflicted,
-            resolved_refs_ok: resolved_ok,
-            accepted: resolved_ok && !is_conflicted,
-            message: if is_conflicted {
-                Some("Conflicted".into())
-            } else if !resolved_ok {
-                Some(rr_reason.clone())
-            } else {
-                None
-            },
-            accepted_condition_reason: Some(acc_reason),
-            resolved_refs_condition_reason: Some(rr_reason),
-        });
+        outcomes.push(build_policy_outcome_snap(
+            lp.policy_ns,
+            lp.policy_name,
+            lp.tls_ir,
+            lp.tls_resolve_reason,
+            is_conflicted,
+        ));
     }
 
     outcomes.sort_by(|a, b| (&a.namespace, &a.name).cmp(&(&b.namespace, &b.name)));
 
     (effective, outcomes)
+}
+
+fn build_policy_outcome_snap(
+    policy_ns: String,
+    policy_name: String,
+    tls_ir: BackendTlsIr,
+    tls_resolve_reason: Option<String>,
+    conflicted: bool,
+) -> BackendTlsPolicyOutcomeSnap {
+    let resolved_ok = !tls_ir.invalid;
+    let rr_reason = if resolved_ok {
+        "ResolvedRefs".to_string()
+    } else {
+        tls_resolve_reason
+            .clone()
+            .unwrap_or_else(|| "InvalidCACertificateRef".into())
+    };
+    let acc_reason = if conflicted {
+        "Conflicted".to_string()
+    } else if !resolved_ok {
+        "NoValidCACertificate".to_string()
+    } else {
+        "Accepted".to_string()
+    };
+    BackendTlsPolicyOutcomeSnap {
+        namespace: policy_ns,
+        name: policy_name,
+        conflicted,
+        resolved_refs_ok: resolved_ok,
+        accepted: resolved_ok && !conflicted,
+        message: if conflicted {
+            Some("Conflicted".into())
+        } else if !resolved_ok {
+            Some(rr_reason.clone())
+        } else {
+            None
+        },
+        accepted_condition_reason: Some(acc_reason),
+        resolved_refs_condition_reason: Some(rr_reason),
+    }
+}
+
+/// Re-evaluate BackendTLSPolicy CA validation from the current store (status fast-path / refresh).
+#[must_use]
+pub(crate) fn policy_outcome_from_policy_stores(
+    stores: &SharedStores,
+    pol: &crate::resources::BackendTLSPolicy,
+    grants: &[ReferenceGrantSnap],
+    conflicted: bool,
+) -> BackendTlsPolicyOutcomeSnap {
+    let policy_ns = pol.metadata.namespace.as_deref().unwrap_or("default").to_string();
+    let policy_name = pol.metadata.name.as_deref().unwrap_or("").to_string();
+    let (tls_ir, tls_resolve_reason) =
+        backend_tls_ir_from_validation(stores, &policy_ns, &pol.spec.validation, grants);
+    build_policy_outcome_snap(policy_ns, policy_name, tls_ir, tls_resolve_reason, conflicted)
+}
+
+/// Refresh a snapshot outcome using live store CA material (preserves conflict flag).
+#[must_use]
+pub(crate) fn refresh_outcome_from_stores(
+    stores: &SharedStores,
+    outcome: &BackendTlsPolicyOutcomeSnap,
+    grants: &[ReferenceGrantSnap],
+) -> Option<BackendTlsPolicyOutcomeSnap> {
+    let pol = stores.get_backend_tls_policy(&outcome.namespace, &outcome.name)?;
+    Some(policy_outcome_from_policy_stores(
+        stores,
+        &pol,
+        grants,
+        outcome.conflicted,
+    ))
 }

@@ -201,6 +201,16 @@ fn reference_grant_to_snap_one(t: ReferenceGrantTo) -> ReferenceGrantToSnap {
     }
 }
 
+/// ReferenceGrant rows from the reflector store (for status refresh outside full snapshot load).
+#[must_use]
+pub(crate) fn reference_grant_snaps_from_stores(stores: &SharedStores) -> Vec<ReferenceGrantSnap> {
+    stores
+        .list_reference_grants()
+        .into_iter()
+        .map(|rg| reference_grant_to_snap(&rg))
+        .collect()
+}
+
 fn reference_grant_to_snap(rg: &ReferenceGrant) -> ReferenceGrantSnap {
     ReferenceGrantSnap {
         namespace: rg.metadata.namespace.clone().unwrap_or_default(),

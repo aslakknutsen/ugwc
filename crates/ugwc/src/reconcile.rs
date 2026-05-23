@@ -491,6 +491,7 @@ async fn apply_attached_resource_statuses(
         gateway_name,
         &ctx.primary_controller,
         snap,
+        &ctx.stores,
         status_cache.clone(),
         concurrency,
     )

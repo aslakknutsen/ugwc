@@ -47,7 +47,8 @@ pub use provision::{
     PraxisProvisionArgs, ProvisionError,
 };
 pub use status::{
-    apply_backend_tls_policies_for_gateway, apply_gateway_class_accepted_stub,
+    apply_backend_tls_policies_for_gateway, apply_backend_tls_status_for_ca_ref_change,
+    apply_gateway_class_accepted_stub,
     apply_gateway_reconciled_status, apply_grpc_route_merged_parent_status,
     apply_http_route_merged_parent_status, apply_inference_pools_for_gateway,
     apply_listenerset_reconciled_status, apply_listenerset_rejected_status,

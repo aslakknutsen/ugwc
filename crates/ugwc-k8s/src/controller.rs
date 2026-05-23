@@ -198,8 +198,13 @@ pub async fn run_gateway_controller(
     let tx_sec = tx.clone();
     let stores_sec = stores.clone();
     let index_sec = gateway_index.clone();
+    let client_sec = client.clone();
+    let controller_name_sec = owned_controller_names
+        .first()
+        .cloned()
+        .unwrap_or_else(|| "ugwc.io/default-controller".into());
     let secret_debounce = endpoint_debounce;
-    let (_, mut sec_stream) = watch_stream::reflector_full_watch_stream(
+    let (_, mut sec_stream) = watch_stream::reflector_secret_watch_stream(
         Api::<Secret>::all(client.clone()),
         watcher_config(),
         writers.secrets,
@@ -217,6 +222,15 @@ pub async fn run_gateway_controller(
                             if sd_sec.is_cancelled() {
                                 break;
                             }
+                            crate::status::apply_backend_tls_status_for_ca_ref_change(
+                                &client_sec,
+                                &stores_sec,
+                                &controller_name_sec,
+                                &sns,
+                                &sn,
+                                false,
+                            )
+                            .await;
                             let keys = index_sec.resolve_secret_fanout(&stores_sec, &sns, &sn);
                             if !drain_gateway_keys(keys, &tx_sec).await {
                                 return;
@@ -236,7 +250,12 @@ pub async fn run_gateway_controller(
     let tx_cm = tx.clone();
     let stores_cm = stores.clone();
     let index_cm = gateway_index.clone();
-    let (_, mut cm_stream) = watch_stream::reflector_full_watch_stream(
+    let client_cm = client.clone();
+    let controller_name_cm = owned_controller_names
+        .first()
+        .cloned()
+        .unwrap_or_else(|| "ugwc.io/default-controller".into());
+    let (_, mut cm_stream) = watch_stream::reflector_configmap_watch_stream(
         Api::<ConfigMap>::all(client.clone()),
         watcher_config(),
         writers.config_maps,
@@ -250,6 +269,15 @@ pub async fn run_gateway_controller(
                         Some(Ok(WatchItem::Applied(cm) | WatchItem::Deleted(cm))) => {
                             let cm_ns = cm.namespace().unwrap_or_default();
                             let cm_name = cm.name_any();
+                            crate::status::apply_backend_tls_status_for_ca_ref_change(
+                                &client_cm,
+                                &stores_cm,
+                                &controller_name_cm,
+                                &cm_ns,
+                                &cm_name,
+                                true,
+                            )
+                            .await;
                             let keys = index_cm.resolve_configmap_fanout(&stores_cm, &cm_ns, &cm_name);
                             if !drain_gateway_keys(keys, &tx_cm).await {
                                 return;
