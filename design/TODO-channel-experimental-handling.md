@@ -10,24 +10,28 @@
 
 ## 1. Terminology
 
-| Term | Meaning |
-|------|---------|
-| **Standard / experimental channel** | Gateway API release artifacts (`standard-install.yaml` vs `experimental-install.yaml`). Determines which CRDs exist and which fields appear in schemas for a given release. |
-| **Core / Extended** | Conformance *support levels* in the spec (MUST vs optional-for-conformance). Not the same as “experimental channel.” |
-| **Experimental CRD** | A resource kind that may exist only in the experimental bundle or as alpha/beta API versions (e.g. historical `TCPRoute`; **`ListenerSet`**, **`TLSRoute`**, **`BackendTLSPolicy`** depending on release—pin rows in §8). |
-| **Extended field** | A field on `Gateway`, `HTTPRoute`, etc. that is Extended (or channel-specific), e.g. `Gateway.spec.addresses`, `infrastructure`, `allowedListeners`. |
+
+| Term                                | Meaning                                                                                                                                                                                                                   |
+| ----------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Standard / experimental channel** | Gateway API release artifacts (`standard-install.yaml` vs `experimental-install.yaml`). Determines which CRDs exist and which fields appear in schemas for a given release.                                               |
+| **Core / Extended**                 | Conformance *support levels* in the spec (MUST vs optional-for-conformance). Not the same as “experimental channel.”                                                                                                      |
+| **Experimental CRD**                | A resource kind that may exist only in the experimental bundle or as alpha/beta API versions (e.g. historical `TCPRoute`; `**ListenerSet`**, `**TLSRoute**`, `**BackendTLSPolicy**` depending on release—pin rows in §8). |
+| **Extended field**                  | A field on `Gateway`, `HTTPRoute`, etc. that is Extended (or channel-specific), e.g. `Gateway.spec.addresses`, `infrastructure`, `allowedListeners`.                                                                      |
+
 
 ---
 
 ## 2. Three layers (all explicit)
 
-Everything downstream should use a single derived structure **`EffectiveGatewayApiCapabilities`** (name TBD).
+Everything downstream should use a single derived structure `**EffectiveGatewayApiCapabilities`** (name TBD).
 
-| Layer | Meaning | Source |
-|-------|---------|--------|
-| **A. Cluster facts** | CRDs installed; optional Gateway API bundle annotation on CRDs; stored API versions | Discovery at startup + optional refresh when CRDs change |
-| **B. Operator intent** | Which families this deployment may implement (“standard-only”, allow ListenerSet merge, etc.) | Env / JSON file / future `GatewayClass` parameters |
-| **C. Implementation** | What this ugwc binary + Praxis/xDS actually implements | Code constants + compile IR coverage |
+
+| Layer                  | Meaning                                                                                       | Source                                                   |
+| ---------------------- | --------------------------------------------------------------------------------------------- | -------------------------------------------------------- |
+| **A. Cluster facts**   | CRDs installed; optional Gateway API bundle annotation on CRDs; stored API versions           | Discovery at startup + optional refresh when CRDs change |
+| **B. Operator intent** | Which families this deployment may implement (“standard-only”, allow ListenerSet merge, etc.) | Env / JSON file / future `GatewayClass` parameters       |
+| **C. Implementation**  | What this ugwc binary + Praxis/xDS actually implements                                        | Code constants + compile IR coverage                     |
+
 
 **Effective capability** = intersection of what the cluster allows, what the operator enables, and what the binary supports. Use this for:
 
@@ -94,19 +98,21 @@ Presets set defaults; per-feature overrides win.
 
 ### 4.3 Status
 
-- Extend **`GatewayClass.status.supportedFeatures`** beyond the current stub: enumerate features that are **effective true** and implemented.
+- Extend `**GatewayClass.status.supportedFeatures`** beyond the current stub: enumerate features that are **effective true** and implemented.
 - Keep resource-level conditions aligned with upstream vocabulary where possible.
 
 ---
 
 ## 5. Discovery vs flags (behavior matrix)
 
-| Situation | Desired behavior |
-|-----------|------------------|
-| Feature **off**, CRD absent | No watch; no surprise. |
+
+| Situation                        | Desired behavior                                               |
+| -------------------------------- | -------------------------------------------------------------- |
+| Feature **off**, CRD absent      | No watch; no surprise.                                         |
 | Feature **off**, CRD **present** | Do not reconcile that kind; log once; optional warning metric. |
-| Feature **on**, CRD absent | Log / condition that CRD missing; do not crash loop. |
-| Feature **on**, CRD present | Watch + compile path as today for implemented subsets. |
+| Feature **on**, CRD absent       | Log / condition that CRD missing; do not crash loop.           |
+| Feature **on**, CRD present      | Watch + compile path as today for implemented subsets.         |
+
 
 Extended **fields** do not depend on a separate CRD; gating is entirely **operator feature + compile**.
 
@@ -128,12 +134,14 @@ This table is the support contract; startup validation warns on mismatch with `e
 
 ## 7. Minimal v1 vs complete v1
 
-| Minimal v1 | Complete v1 |
-|------------|-------------|
+
+| Minimal v1                         | Complete v1                                    |
+| ---------------------------------- | ---------------------------------------------- |
 | Static feature flags from env/JSON | + CRD discovery and dynamic watch registration |
-| Field rejects in compile | + periodic CRD refresh |
-| Documented matrix | + bundle annotation validation |
-| | + full `supportedFeatures` population |
+| Field rejects in compile           | + periodic CRD refresh                         |
+| Documented matrix                  | + bundle annotation validation                 |
+|                                    | + full `supportedFeatures` population          |
+
 
 ---
 
@@ -141,16 +149,16 @@ This table is the support contract; startup validation warns on mismatch with `e
 
 Track each item: **CRD?** **API version?** **Flag name?** **Loader?** **Compile?** **Status?**
 
-- [ ] `ListenerSet`
-- [ ] `GRPCRoute`
-- [ ] `TLSRoute`
-- [ ] `TCPRoute` / `UDPRoute` (if in scope for pinned bundle)
-- [ ] `BackendTLSPolicy`
-- [ ] `ReferenceGrant` (core to cross-namespace; not “experimental” but gate if desired)
-- [ ] `Gateway.spec.addresses`
-- [ ] `Gateway.spec.infrastructure`
-- [ ] `Gateway.spec.allowedListeners`
-- [ ] Extended `HTTPRoute` filters / timeouts / mirror / etc. (enumerate per `from_cluster` branches)
+- `ListenerSet`
+- `GRPCRoute`
+- `TLSRoute`
+- `TCPRoute` / `UDPRoute` (if in scope for pinned bundle)
+- `BackendTLSPolicy`
+- `ReferenceGrant` (core to cross-namespace; not “experimental” but gate if desired)
+- `Gateway.spec.addresses`
+- `Gateway.spec.infrastructure`
+- `Gateway.spec.allowedListeners`
+- Extended `HTTPRoute` filters / timeouts / mirror / etc. (enumerate per `from_cluster` branches)
 
 ---
 
@@ -179,6 +187,8 @@ flowchart LR
   Load --> Cmp
 ```
 
+
+
 ---
 
 ## 10. Examples
@@ -205,13 +215,13 @@ spec:
       protocol: HTTP
 ```
 
-Expected: Gateway (or listener) condition **`Accepted=False`**, **`UnsupportedValue`**, message references disabled feature key.
+Expected: Gateway (or listener) condition `**Accepted=False**`, `**UnsupportedValue**`, message references disabled feature key.
 
 ### 10.2 Experimental kind disabled (`TLSRoute`)
 
 Cluster has TLSRoute CRD; operator: `route_tls: false`.
 
-Either TLSRoutes are not loaded into snapshot, **or** each route’s parent status shows **`Accepted=False`** with reason explaining feature disabled—consistent with §4.2. No silent ignore.
+Either TLSRoutes are not loaded into snapshot, **or** each route’s parent status shows `**Accepted=False`** with reason explaining feature disabled—consistent with §4.2. No silent ignore.
 
 ### 10.3 `supportedFeatures` snippet
 
@@ -230,7 +240,7 @@ status:
 ## 11. Dependencies / ordering
 
 1. Pin supported Gateway API **bundle version(s)** in docs and CI (see also `design/todo-gateway-api-inference-parity.md` §6).
-2. Introduce **`EffectiveGatewayApiCapabilities`** type in `ugwc-core`; build it in `ugwc-k8s` from config + discovery.
+2. Introduce `**EffectiveGatewayApiCapabilities`** type in `ugwc-core`; build it in `ugwc-k8s` from config + discovery.
 3. Thread capabilities into compile and loader.
 4. Replace `GatewayClass` **supportedFeatures** stub with derived list.
 5. Inference Extension flags **reuse the same pattern** in a follow-up doc or §8 extension rows.
@@ -243,3 +253,4 @@ status:
 2. Env-only UX: comma-separated feature list vs JSON file path (mirror `implementation_profiles_path`)?
 3. Should **Extended field** usage fail the **whole Gateway** or only affected listeners?
 4. Refresh cadence when CRDs are installed mid-flight?
+
