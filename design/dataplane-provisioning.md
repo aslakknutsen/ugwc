@@ -21,7 +21,7 @@ Each owned `GatewayClass.spec.controllerName` resolves (via static config today;
 |------|--------|
 | **Admission** | Class `controllerName` matches this controller instance (`UGWC_CONTROLLER_NAMES`). |
 | **Data plane strategy** | **External** — no workload mutations. **PerGatewayPraxis** — one `Gateway` ⇒ one Deployment (+ Service) with bootstrap env. **SharedDeployment** — *stub*: multiple gateways → one deployment; **grouping key not decided** (see §7). |
-| **Publish protocol** | **`output`** on the profile: `xds` (default; wire selected by `UGWC_XDS_WIRE`, `gwxds` vs `envoy`) or `praxis_configmap` (render native Praxis YAML into a per-gateway ConfigMap + TLS Secret mounted into the provisioned Deployment). Orthogonal to provisioning but tied to what the proxy binary speaks. |
+| **Publish protocol** | **`output`** on the profile: `praxis_configmap` (built-in default; render native Praxis YAML into a per-gateway ConfigMap + TLS Secret mounted into the provisioned Deployment) or `xds` (wire selected by `UGWC_XDS_WIRE`, `gwxds` vs `envoy`). Orthogonal to provisioning but tied to what the proxy binary speaks. |
 | **Subscription scope (default)** | **All** — client uses global xDS node id (`global` / `*`). **OneGateway** — client node id = `namespace/name` of the `Gateway`; server serves only that scope’s snapshot. **Some** — reserved for pool/shard; not implemented in v1. |
 
 **Pairing rule:** `PerGatewayPraxis` implies **OneGateway** subscription for the provisioned workload unless overridden.
@@ -52,11 +52,30 @@ Reconcile updates **only** the entry for the gateway being compiled when `Publis
 
 ## 5. Praxis bootstrap (v1)
 
-Provisioned pods receive at least:
+Provisioned pods are configured according to the profile's `output`:
 
-- **xDS dial address** — `UGWC_CONTROL_PLANE_XDS_BOOTSTRAP_ADDR` (host:port reachable from the pod; typically a `Service` fronting ugwc).
-- **Scope / node id** — `UGWC_XDS_NODE_ID` = `namespace/name` (must match compile `IrScopeId`).
-- **TLS** — mirror `UGWC_XDS_INSECURE` and related TLS paths where the proxy supports them.
+**`praxis_configmap` (built-in default)**
+
+- **Config** — the controller encodes the gateway's IR to Praxis native YAML and
+  writes it to ConfigMap `ugwc-dp-<gateway>` (key `praxis.yaml`). The Deployment mounts
+  it at `/etc/praxis` and runs with `-c /etc/praxis/praxis.yaml`.
+- **TLS material** — listener certificates and backend mTLS CA/client material are
+  written to Secret `ugwc-dp-<gateway>-tls`, mounted at `/etc/praxis-tls`.
+- **No xDS dial address** — `UGWC_CONTROL_PLANE_XDS_BOOTSTRAP_ADDR` is not required and
+  no xDS bootstrap environment is set.
+- Static config and TLS material changes roll the Deployment through the
+  `gateway.ugwc.io/config-revision` annotation; endpoint-only changes are hot reloaded
+  from the mounted ConfigMap (see
+  [`docs/operations.md`](../docs/operations.md#praxis-native-config-output)).
+
+**`xds`**
+
+- **xDS dial address** — `UGWC_CONTROL_PLANE_XDS_BOOTSTRAP_ADDR` (host:port reachable
+  from the pod; typically a `Service` fronting ugwc).
+- **Scope / node id** — `UGWC_XDS_NODE_ID` = `namespace/name` (must match compile
+  `IrScopeId`).
+- **TLS** — mirror `UGWC_XDS_INSECURE` and related TLS paths where the proxy supports
+  them.
 
 **Proxy image** comes from the profile JSON (`proxy_image`).
 
@@ -64,7 +83,15 @@ Provisioned pods receive at least:
 
 ## 6. Status
 
-Gateway listener conditions remain the primary “programmed” signal. Optional future: dedicated **DataplaneReady** / **DataplaneProgressing** conditions when provisioner state is surfaced.
+Gateway listener conditions remain the primary “programmed” signal. Today
+`programmed_ok` derives from compile results only, and status is patched before the
+publish/provision step. Output-backend failures and unsupported mappings are surfaced
+as **Events** (`PraxisConfigFailed`, `PraxisConfigUnsupported`) and **Prometheus
+metrics** (`ugwc_praxis_config_*`), not yet as Gateway conditions.
+
+Follow-up: return an `OutputOutcome` (delivered / failed / unsupported) from the output
+step and feed it into Gateway status once the generic mechanism exists (tracked in
+[`todo-gateway-api-inference-parity.md`](todo-gateway-api-inference-parity.md)).
 
 ---
 
@@ -94,20 +121,22 @@ Path: `UGWC_IMPLEMENTATION_PROFILES_PATH` (JSON).
       "data_plane": "per_gateway_praxis",
       "output": "xds",
       "subscription_default": "one_gateway",
-      "proxy_image": "ghcr.io/praxis-proxy/praxis:latest"
+      "proxy_image": "ghcr.io/praxis-proxy/praxis:0.7.5"
     },
     "ugwc.io/praxis-config": {
       "data_plane": "per_gateway_praxis",
       "output": "praxis_configmap",
       "subscription_default": "one_gateway",
-      "proxy_image": "ghcr.io/praxis-proxy/praxis:latest"
+      "proxy_image": "ghcr.io/praxis-proxy/praxis:0.7.5"
     }
   }
 }
 ```
 
-`output` defaults to `xds` when omitted. `praxis_configmap` requires
-`per_gateway_praxis` and does not require `UGWC_CONTROL_PLANE_XDS_BOOTSTRAP_ADDR`
-(the proxy reads a mounted config file instead of dialing xDS).
+`output` defaults to `xds` when omitted from a profile entry. The built-in
+`ugwc.io/default-controller` profile uses `praxis_configmap`. `praxis_configmap`
+requires `per_gateway_praxis` and does not require
+`UGWC_CONTROL_PLANE_XDS_BOOTSTRAP_ADDR` (the proxy reads a mounted config file instead
+of dialing xDS). `xds` with `per_gateway_praxis` still requires the bootstrap address.
 
 Controllers listed in `UGWC_CONTROLLER_NAMES` but omitted from this file default to **External** + **All**.

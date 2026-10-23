@@ -90,6 +90,33 @@ Backends must **not** re-parse Kubernetes objects for routing logic; they only c
 
 Not all backends belong in the **leader** process (see §7).
 
+### 5.1 Implemented: Praxis native config (Kubernetes write)
+
+`crates/ugwc-praxis` encodes a per-gateway IR snapshot into Praxis native YAML;
+`crates/ugwc-k8s` delivers it:
+
+- ConfigMap `ugwc-dp-<gateway>` (`data["praxis.yaml"]`) mounted at `/etc/praxis`.
+- Secret `ugwc-dp-<gateway>-tls` for listener certs and backend mTLS material,
+  mounted at `/etc/praxis-tls`.
+- Server-side apply with Gateway owner references, Secret first, then ConfigMap, then
+  the provisioned Deployment.
+- xDS publish is skipped for gateways using this output; the ConfigMap is written only
+  when the compile is programmed, so a failed compile leaves the last good config in
+  place.
+- The Deployment pod template carries a `gateway.ugwc.io/config-revision` annotation
+  derived from the static part of `praxis.yaml` (endpoint lists excluded). Static
+  route/listener/filter changes therefore roll the proxy immediately, while
+  endpoint-only churn and certificate rotation rely on the mounted-file hot reload.
+
+The built-in `ugwc.io/default-controller` profile selects this backend. `xds` remains
+available per controller name for regression and Envoy-style backends.
+
+Mapping gaps are reported as Events/metrics rather than approximated silently; the
+tracked gaps are in
+[`todo-gateway-api-inference-parity.md`](todo-gateway-api-inference-parity.md)
+(query-param/method matching, CORS credentials with wildcards, InferencePool/EPP,
+UDPRoute, weighted backends with mixed TLS policies).
+
 ---
 
 ## 6. IR shape vs backend shape

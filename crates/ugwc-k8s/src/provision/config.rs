@@ -7,13 +7,15 @@
 
 use std::collections::BTreeMap;
 
+use sha2::{Digest, Sha256};
+
+use k8s_openapi::ByteString;
 use k8s_openapi::api::core::v1::{ConfigMap, Secret};
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::OwnerReference;
-use k8s_openapi::ByteString;
-use kube::api::{Api, Patch, PatchParams};
 use kube::Client;
+use kube::api::{Api, Patch, PatchParams};
 
-use super::{per_gateway_dataplane_name, ProvisionError};
+use super::{ProvisionError, per_gateway_dataplane_name};
 use crate::resources::Gateway;
 
 /// ConfigMap name for the per-gateway Praxis document (`ugwc-dp-<gateway>`).
@@ -31,6 +33,49 @@ pub fn praxis_tls_secret_name(gateway_name: &str) -> String {
         .take(59)
         .collect();
     format!("{stem}-tls")
+}
+
+/// Stable revision for the static part of the Praxis document and its TLS files.
+///
+/// The pod template carries this value as an annotation so route/listener or
+/// certificate changes roll the proxy immediately. Endpoints are stripped: they
+/// churn as pods come and go, and a restart per endpoint change would be
+/// unacceptable. Endpoint-only updates reach the running proxy through Praxis
+/// file reload.
+#[must_use]
+pub fn config_revision(output: &ugwc_praxis::EncodeOutput) -> String {
+    let mut value: serde_yaml::Value = match serde_yaml::from_str(&output.yaml) {
+        Ok(value) => value,
+        Err(_) => return String::new(),
+    };
+    strip_endpoints(&mut value);
+    let canonical = serde_yaml::to_string(&value).unwrap_or_default();
+    let mut digest = Sha256::new();
+    digest.update(canonical.as_bytes());
+    let mut files: Vec<_> = output.files.iter().collect();
+    files.sort_by(|a, b| a.key.cmp(&b.key));
+    for file in files {
+        digest.update(file.key.as_bytes());
+        digest.update(&file.contents);
+    }
+    hex::encode(&digest.finalize()[..8])
+}
+
+fn strip_endpoints(value: &mut serde_yaml::Value) {
+    match value {
+        serde_yaml::Value::Mapping(map) => {
+            map.remove(serde_yaml::Value::String("endpoints".into()));
+            for (_, child) in map.iter_mut() {
+                strip_endpoints(child);
+            }
+        }
+        serde_yaml::Value::Sequence(seq) => {
+            for child in seq {
+                strip_endpoints(child);
+            }
+        }
+        _ => {}
+    }
 }
 
 fn owner_reference(gateway: &Gateway) -> Result<OwnerReference, ProvisionError> {
@@ -261,6 +306,53 @@ mod tests {
             secret.data.unwrap().get("listener-gw.crt"),
             Some(&ByteString(b"cert".to_vec()))
         );
+    }
+
+    fn encoded(yaml: &str) -> ugwc_praxis::EncodeOutput {
+        ugwc_praxis::EncodeOutput {
+            config: ugwc_praxis::PraxisConfig {
+                listeners: Vec::new(),
+                filter_chains: Vec::new(),
+                insecure_options: None,
+                admin: None,
+            },
+            yaml: yaml.into(),
+            files: Vec::new(),
+            unsupported: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn config_revision_ignores_endpoint_changes() {
+        let a = encoded(
+            "listeners: []\nfilter_chains:\n- name: x\n  filters:\n  - filter: load_balancer\n    clusters:\n    - name: c\n      endpoints: [\"10.0.0.1:80\"]\n",
+        );
+        let b = encoded(
+            "listeners: []\nfilter_chains:\n- name: x\n  filters:\n  - filter: load_balancer\n    clusters:\n    - name: c\n      endpoints: [\"10.0.0.2:80\", \"10.0.0.3:80\"]\n",
+        );
+        assert_eq!(config_revision(&a), config_revision(&b));
+    }
+
+    #[test]
+    fn config_revision_changes_with_routes() {
+        let a = encoded("listeners: []\n");
+        let b = encoded("listeners:\n- name: x\n  address: 0.0.0.0:80\n  filter_chains: [x]\n");
+        assert_ne!(config_revision(&a), config_revision(&b));
+    }
+
+    #[test]
+    fn config_revision_includes_tls_files() {
+        let mut a = encoded("listeners: []\n");
+        let mut b = encoded("listeners: []\n");
+        a.files.push(ugwc_praxis::ConfigFile {
+            key: "listener-gw.crt".into(),
+            contents: b"cert-a".to_vec(),
+        });
+        b.files.push(ugwc_praxis::ConfigFile {
+            key: "listener-gw.crt".into(),
+            contents: b"cert-b".to_vec(),
+        });
+        assert_ne!(config_revision(&a), config_revision(&b));
     }
 
     #[test]

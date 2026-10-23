@@ -23,8 +23,8 @@ use tracing::{debug, info, warn};
 use crate::resources::Gateway;
 
 pub use config::{
-    apply_praxis_config, build_config_map, build_tls_secret, praxis_config_map_name,
-    praxis_tls_secret_name, valid_secret_key,
+    apply_praxis_config, build_config_map, build_tls_secret, config_revision,
+    praxis_config_map_name, praxis_tls_secret_name, valid_secret_key,
 };
 pub use template::{InfraLabelRow, NamePort};
 
@@ -287,6 +287,7 @@ pub async fn reconcile_per_gateway_praxis(
     };
     let config_map_name = praxis_config_map_name(gw_name);
     let tls_secret_name = praxis_tls_secret_name(gw_name);
+    let revision = output.map(config_revision).unwrap_or_default();
 
     let ctx = template::PerGatewayTemplateContext {
         namespace: ns,
@@ -304,6 +305,7 @@ pub async fn reconcile_per_gateway_praxis(
         config_source,
         config_map_name: config_map_name.as_str(),
         tls_secret_name: tls_secret_name.as_str(),
+        config_revision: revision.as_str(),
         container_ports: &container_ports,
         service_ports: &service_ports,
         infrastructure_labels: &infrastructure_labels,
@@ -450,13 +452,22 @@ mod tests {
     fn sanitize_port_name_strips_trailing_hyphen_after_truncation() {
         use super::sanitize_port_name;
         // "listener-exact-hostname" truncated to 15 chars would be "listener-exact-"
-        assert_eq!(sanitize_port_name("listener-exact-hostname", 443), "listener-exact");
+        assert_eq!(
+            sanitize_port_name("listener-exact-hostname", 443),
+            "listener-exact"
+        );
         // "listener-empty-hostname" similarly
-        assert_eq!(sanitize_port_name("listener-empty-hostname", 443), "listener-empty");
+        assert_eq!(
+            sanitize_port_name("listener-empty-hostname", 443),
+            "listener-empty"
+        );
         // Short names stay unchanged
         assert_eq!(sanitize_port_name("https", 443), "https");
         // Names that fit exactly at 15 chars without trailing hyphen
-        assert_eq!(sanitize_port_name("listener-wildca", 443), "listener-wildca");
+        assert_eq!(
+            sanitize_port_name("listener-wildca", 443),
+            "listener-wildca"
+        );
         // All-hyphen input (after trim) falls back to port-based name
         assert_eq!(sanitize_port_name("---", 8080), "p8080");
     }

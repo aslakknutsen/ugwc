@@ -66,6 +66,12 @@ spec:
         prometheus.io/path: /metrics
         prometheus.io/port: "15021"
         prometheus.io/scrape: "true"
+{% if config_revision %}
+        # Static route/listener revision; endpoint-only changes are excluded so
+        # pod churn does not roll the proxy. Coordinates with the ConfigMap
+        # apply order in `reconcile_per_gateway_praxis`.
+        gateway.ugwc.io/config-revision: {{ config_revision }}
+{% endif %}
     spec:
       serviceAccountName: {{ sa_name }}
       securityContext:
@@ -77,6 +83,10 @@ spec:
           image: {{ proxy_image_json }}
           imagePullPolicy: IfNotPresent
 {% if config_source == "configmap" %}
+          # Override the image entrypoint: the published Praxis image embeds
+          # `-c /etc/praxis/config.yaml`, which would conflict with our path.
+          command:
+            - "/usr/local/bin/praxis"
           args:
             - "-c"
             - "/etc/praxis/praxis.yaml"

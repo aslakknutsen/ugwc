@@ -529,9 +529,55 @@ pub(crate) fn hostname_literal_or_wildcard_matches(pattern: &str, host: &str) ->
 }
 
 /// Symmetric hostname intersection (route vs listener hostnames may each be concrete or `*.`).
+#[cfg(test)]
 #[must_use]
 pub(crate) fn hostnames_intersect(a: &str, b: &str) -> bool {
-    hostname_literal_or_wildcard_matches(a, b) || hostname_literal_or_wildcard_matches(b, a)
+    intersect_hostnames(a, b).is_some()
+}
+
+/// The effective hostname when two hostnames intersect.
+///
+/// Gateway API requires the result to be the most specific hostname. In
+/// particular, when both sides are wildcards the more specific suffix wins:
+/// `*.com` ∩ `*.example.com` = `*.example.com`. Returning the route hostname
+/// unchanged would over-match (for example `non.matching.com` against the
+/// `*.com` route).
+#[must_use]
+pub(crate) fn intersect_hostnames(a: &str, b: &str) -> Option<String> {
+    let a = a.trim();
+    let b = b.trim();
+    if a.is_empty() || b.is_empty() {
+        return None;
+    }
+    let aw = a.strip_prefix("*.");
+    let bw = b.strip_prefix("*.");
+    match (aw, bw) {
+        (None, None) => a.eq_ignore_ascii_case(b).then(|| a.to_string()),
+        (Some(_), None) => hostname_literal_or_wildcard_matches(a, b).then(|| b.to_string()),
+        (None, Some(_)) => hostname_literal_or_wildcard_matches(b, a).then(|| a.to_string()),
+        (Some(asuf), Some(bsuf)) => {
+            let asuf = asuf.trim_end_matches('.');
+            let bsuf = bsuf.trim_end_matches('.');
+            if asuf.eq_ignore_ascii_case(bsuf) {
+                return Some(a.to_ascii_lowercase());
+            }
+            // One wildcard suffix must contain the other; the longer suffix is
+            // the more specific intersection.
+            if asuf
+                .to_ascii_lowercase()
+                .ends_with(&format!(".{}", bsuf.to_ascii_lowercase()))
+            {
+                Some(a.to_ascii_lowercase())
+            } else if bsuf
+                .to_ascii_lowercase()
+                .ends_with(&format!(".{}", asuf.to_ascii_lowercase()))
+            {
+                Some(b.to_ascii_lowercase())
+            } else {
+                None
+            }
+        }
+    }
 }
 
 /// True if any non-conflicted inline Gateway listener admits this route namespace + kind.
@@ -688,21 +734,22 @@ pub(crate) fn intersect_route_listener_hosts(
         return Some(route_hostnames.to_vec());
     };
 
-    let mut out = Vec::new();
+    let mut out: Vec<String> = Vec::new();
     for rh in route_hostnames {
         let r = rh.trim();
         if r.is_empty() {
             continue;
         }
-        if hostnames_intersect(r, lh) {
-            out.push(r.to_string());
+        if let Some(host) = intersect_hostnames(r, lh) {
+            if !out
+                .iter()
+                .any(|existing| existing.eq_ignore_ascii_case(&host))
+            {
+                out.push(host);
+            }
         }
     }
-    if out.is_empty() {
-        None
-    } else {
-        Some(out)
-    }
+    if out.is_empty() { None } else { Some(out) }
 }
 
 #[must_use]
@@ -800,11 +847,7 @@ pub(crate) fn attachment_keys_for_parent_ref_ns(
         }
         if route_ns != ls_ns.as_str()
             && !listener_set_any_listener_accepts_route(
-                snapshot,
-                &ls_ns,
-                &p.name,
-                route_ns,
-                route_kind,
+                snapshot, &ls_ns, &p.name, route_ns, route_kind,
             )
         {
             return keys;
@@ -1429,7 +1472,10 @@ mod tests {
 
     #[test]
     fn hostnames_intersect_rejects_non_overlapping() {
-        assert!(!hostnames_intersect("specific.but.wrong.com", "very.specific.com"));
+        assert!(!hostnames_intersect(
+            "specific.but.wrong.com",
+            "very.specific.com"
+        ));
     }
 
     #[test]
@@ -1447,7 +1493,10 @@ mod tests {
 
     #[test]
     fn exact_hostnames_match() {
-        assert!(hostnames_intersect("very.specific.com", "very.specific.com"));
+        assert!(hostnames_intersect(
+            "very.specific.com",
+            "very.specific.com"
+        ));
     }
 
     #[test]
@@ -1457,6 +1506,53 @@ mod tests {
 
     #[test]
     fn wildcard_route_matches_wildcard_listener() {
-        assert!(hostnames_intersect("*.anotherwildcard.io", "*.anotherwildcard.io"));
+        assert!(hostnames_intersect(
+            "*.anotherwildcard.io",
+            "*.anotherwildcard.io"
+        ));
+    }
+
+    #[test]
+    fn hostname_intersection_prefers_more_specific_wildcard() {
+        assert_eq!(
+            intersect_hostnames("*.com", "*.example.com").as_deref(),
+            Some("*.example.com")
+        );
+        assert_eq!(
+            intersect_hostnames("*.example.com", "*.com").as_deref(),
+            Some("*.example.com")
+        );
+        assert_eq!(
+            intersect_hostnames("*.foo.example.com", "*.example.com").as_deref(),
+            Some("*.foo.example.com")
+        );
+        assert_eq!(intersect_hostnames("*.example.com", "*.example.org"), None);
+    }
+
+    #[test]
+    fn hostname_intersection_with_exact_hostname_is_exact() {
+        assert_eq!(
+            intersect_hostnames("abc.example.com", "*.example.com").as_deref(),
+            Some("abc.example.com")
+        );
+        assert_eq!(
+            intersect_hostnames("*.example.com", "abc.example.com").as_deref(),
+            Some("abc.example.com")
+        );
+        assert_eq!(
+            intersect_hostnames("abc.example.com", "def.example.com"),
+            None
+        );
+    }
+
+    #[test]
+    fn route_listener_intersection_returns_resolved_hostnames() {
+        assert_eq!(
+            intersect_route_listener_hosts(
+                &["*.com".to_string()],
+                &Some("*.example.com".to_string())
+            ),
+            Some(vec!["*.example.com".to_string()])
+        );
     }
 }

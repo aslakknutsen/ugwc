@@ -18,10 +18,11 @@ use ugwc_core::ir::{
 };
 
 use crate::model::{
-    CaConfig, CertKeyPair, Cluster, ClusterHttp, ClusterTls, Condition, ConditionMatch, CorsFilter,
-    Filter, FilterChain, HeaderPair, HeadersFilter, InsecureOptions, Listener, ListenerTls,
-    LoadBalancerFilter, PathRewriteFilter, PraxisConfig, Protocol, RedirectFilter, RegexReplace,
-    RouterFilter, RouterRoute, SniRoute, SniRouterFilter, TimeoutFilter,
+    AdminConfig, CaConfig, CertKeyPair, Cluster, ClusterHttp, ClusterTls, Condition,
+    ConditionMatch, CorsFilter, Endpoint, Filter, FilterChain, HeaderPair, HeadersFilter,
+    InsecureOptions, Listener, ListenerTls, LoadBalancerFilter, PathRewriteFilter, PraxisConfig,
+    Protocol, RedirectFilter, RegexReplace, RouterFilter, RouterRoute, SkipPipelineChecks,
+    SniRoute, SniRouterFilter, StaticResponseFilter, TimeoutFilter,
 };
 
 /// Directory where the distribution layer mounts `praxis.yaml`.
@@ -30,6 +31,12 @@ pub const CONFIG_MOUNT_DIR: &str = "/etc/praxis";
 pub const TLS_MOUNT_DIR: &str = "/etc/praxis-tls";
 /// Name of the config document inside the ConfigMap.
 pub const CONFIG_FILE_NAME: &str = "praxis.yaml";
+/// Port used for the no-op listener emitted when a Gateway has no routable
+/// listener. It is deliberately outside the usual Gateway listener range and
+/// distinct from the admin/metrics port.
+const PLACEHOLDER_LISTENER_PORT: u16 = 15000;
+/// Health/metrics listener address used by the per-gateway Deployment probes.
+pub const ADMIN_METRICS_ADDRESS: &str = "0.0.0.0:15021";
 
 /// One non-YAML file the distribution layer must publish (cert, key, CA).
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -71,30 +78,23 @@ pub fn encode(ir: &IrSnapshot) -> Result<EncodeOutput, serde_yaml::Error> {
     let mut listeners = Vec::new();
     let mut filter_chains = Vec::new();
 
+    // Praxis listeners own a socket, not a Gateway listener. Gateway API
+    // allows several listeners to share a port (distinguished by hostname),
+    // so group them and emit one Praxis listener per address. Effective route
+    // hostnames already include the listener hostname intersection, which
+    // keeps merged routing tables correct.
+    let mut http_groups: BTreeMap<u16, Vec<&ListenerIr>> = BTreeMap::new();
+    let mut tls_groups: BTreeMap<u16, Vec<&ListenerIr>> = BTreeMap::new();
+    let mut tcp_groups: BTreeMap<u16, Vec<&ListenerIr>> = BTreeMap::new();
+
     for ln in &ir.listeners {
         if ln.conflicted {
             continue;
         }
-        let routes: Vec<&RouteRuleIr> = ir.routes.iter().filter(|r| attached(r, ln)).collect();
-        let protocol = effective_protocol(ln);
-        match protocol {
-            "HTTP" | "HTTPS" => {
-                if let Some((listener, chain)) = state.http_listener(ln, &routes) {
-                    listeners.push(listener);
-                    filter_chains.push(chain);
-                }
-            }
-            "TLS" => {
-                if let Some((listener, chain)) = state.tls_listener(ln, &routes) {
-                    listeners.push(listener);
-                    filter_chains.push(chain);
-                }
-            }
-            "TCP" => {
-                if let Some(listener) = state.tcp_listener(ln, &routes) {
-                    listeners.push(listener);
-                }
-            }
+        match effective_protocol(ln) {
+            "HTTP" | "HTTPS" => http_groups.entry(ln.bind_port).or_default().push(ln),
+            "TLS" => tls_groups.entry(ln.bind_port).or_default().push(ln),
+            "TCP" => tcp_groups.entry(ln.bind_port).or_default().push(ln),
             "UDP" => state.unsupported(
                 "UDPRoute",
                 format!(
@@ -112,13 +112,66 @@ pub fn encode(ir: &IrSnapshot) -> Result<EncodeOutput, serde_yaml::Error> {
         }
     }
 
-    let config = PraxisConfig {
+    for group in http_groups.values() {
+        let routes = routes_for_group(ir, group);
+        if let Some((listener, chain)) = state.http_listener(group, &routes) {
+            listeners.push(listener);
+            filter_chains.push(chain);
+        }
+    }
+    for group in tls_groups.values() {
+        let routes = routes_for_group(ir, group);
+        if let Some((listener, chain)) = state.tls_listener(group, &routes) {
+            listeners.push(listener);
+            filter_chains.push(chain);
+        }
+    }
+    for group in tcp_groups.values() {
+        let routes = routes_for_group(ir, group);
+        if let Some((listener, chain)) = state.tcp_listener(group, &routes) {
+            listeners.push(listener);
+            if let Some(chain) = chain {
+                filter_chains.push(chain);
+            }
+        }
+    }
+
+    // Praxis rejects a document with no listeners. A Gateway can legitimately
+    // have no routable listener (for example a TLS-passthrough listener whose
+    // TLSRoutes have not been created yet); emit a bounded no-op listener so
+    // the proxy still starts and becomes Ready. The fallback never receives
+    // Gateway traffic because no Gateway listener is bound to this port.
+    if listeners.is_empty() {
+        let name = state.names.unique("ugwc-placeholder");
+        listeners.push(Listener {
+            name: name.clone(),
+            address: format!("0.0.0.0:{PLACEHOLDER_LISTENER_PORT}"),
+            protocol: Some(Protocol::Http),
+            filter_chains: vec![name.clone()],
+            tls: None,
+            upstream: None,
+        });
+        filter_chains.push(FilterChain {
+            name,
+            filters: Vec::new(),
+        });
+    }
+
+    let mut config = PraxisConfig {
         listeners,
         filter_chains,
         insecure_options: Some(InsecureOptions {
             allow_private_endpoints: true,
+            allow_private_upstreams: true,
+            skip_pipeline_checks: state.scoped_cors.then_some(SkipPipelineChecks {
+                conditional_security: true,
+            }),
+        }),
+        admin: Some(AdminConfig {
+            metrics_address: Some(ADMIN_METRICS_ADDRESS.into()),
         }),
     };
+    pin_shared_tls_pools(&mut config);
     let yaml = serde_yaml::to_string(&config)?;
 
     let mut unsupported = state.unsupported;
@@ -149,6 +202,7 @@ struct State<'a> {
     cluster_name_registry: UniqueNames,
     files: Vec<ConfigFile>,
     unsupported: Vec<Unsupported>,
+    scoped_cors: bool,
 }
 
 impl<'a> State<'a> {
@@ -161,6 +215,7 @@ impl<'a> State<'a> {
             cluster_name_registry: UniqueNames::default(),
             files: Vec::new(),
             unsupported: Vec::new(),
+            scoped_cors: false,
         }
     }
 
@@ -175,13 +230,25 @@ impl<'a> State<'a> {
 
     fn http_listener(
         &mut self,
-        ln: &ListenerIr,
+        group: &[&ListenerIr],
         routes: &[&RouteRuleIr],
     ) -> Option<(Listener, FilterChain)> {
+        let primary = *group.first()?;
         let name = self
             .names
-            .unique(&format!("{}-{}", ln.parent_name, ln.section_name));
-        let tls = if ln.tls == TlsMode::Terminate {
+            .unique(&format!("{}-{}", primary.parent_name, primary.section_name));
+        let label = group
+            .iter()
+            .map(|l| l.section_name.as_str())
+            .collect::<Vec<_>>()
+            .join(",");
+
+        let terminating: Vec<&&ListenerIr> = group
+            .iter()
+            .filter(|l| l.tls == TlsMode::Terminate)
+            .collect();
+        let mut cert_entries: Vec<(CertKeyPair, Option<String>)> = Vec::new();
+        for (index, ln) in terminating.iter().enumerate() {
             if ln.tls_cert_pem.is_empty() || ln.tls_key_pem.is_empty() {
                 self.unsupported(
                     "ListenerTlsMaterialMissing",
@@ -190,10 +257,15 @@ impl<'a> State<'a> {
                         ln.parent_namespace, ln.section_name
                     ),
                 );
-                return None;
+                continue;
             }
-            let cert_key = format!("listener-{name}.crt");
-            let key_key = format!("listener-{name}.key");
+            let suffix = if terminating.len() == 1 {
+                String::new()
+            } else {
+                format!("-{index}")
+            };
+            let cert_key = format!("listener-{name}{suffix}.crt");
+            let key_key = format!("listener-{name}{suffix}.key");
             self.files.push(ConfigFile {
                 key: cert_key.clone(),
                 contents: ln.tls_cert_pem.clone(),
@@ -202,24 +274,55 @@ impl<'a> State<'a> {
                 key: key_key.clone(),
                 contents: ln.tls_key_pem.to_vec(),
             });
-            Some(ListenerTls {
-                certificates: vec![CertKeyPair {
+            cert_entries.push((
+                CertKeyPair {
                     cert_path: tls_path(&cert_key),
+                    default: false,
                     key_path: tls_path(&key_key),
-                }],
+                    server_names: Vec::new(),
+                },
+                ln.hostname.clone(),
+            ));
+        }
+        if !terminating.is_empty() && cert_entries.is_empty() {
+            return None;
+        }
+        if cert_entries.len() > 1 {
+            for (cert, hostname) in &mut cert_entries {
+                match hostname {
+                    Some(hostname) => cert.server_names = vec![hostname.clone()],
+                    None => cert.default = true,
+                }
+            }
+        }
+        let certificates: Vec<CertKeyPair> =
+            cert_entries.into_iter().map(|(cert, _)| cert).collect();
+        if !terminating.is_empty() && terminating.len() != group.len() {
+            self.unsupported(
+                "MixedTlsOnPort",
+                format!(
+                    "port {} mixes TLS-terminating and plaintext listeners; Praxis binds one TLS mode per socket",
+                    primary.bind_port
+                ),
+            );
+        }
+        let tls = if certificates.is_empty() {
+            None
+        } else {
+            Some(ListenerTls {
+                certificates,
                 hot_reload: None,
             })
-        } else {
-            None
         };
 
-        // CORS is a security filter: Praxis rejects request conditions on it
-        // outright (they could be bypassed), so one unconditional filter is
-        // emitted per listener. Scoped or conflicting configurations are
-        // reported instead of being silently misapplied.
+        // CORS is a security filter, so Praxis refuses request conditions on
+        // it unless `conditional_security` is relaxed. Route-scoped CORS needs
+        // exactly that: the filter must apply only to the route's matches.
         let mut cors_filters = Vec::new();
-        let mut emitted_cors: Option<ugwc_core::ir::CorsFilterIr> = None;
+        let mut emitted_cors: Vec<(ugwc_core::ir::CorsFilterIr, Vec<Condition>)> = Vec::new();
         let mut redirect_filters = Vec::new();
+        let mut fail_closed = Vec::new();
+        let mut invalid_catchall = false;
         let mut router_routes = Vec::new();
         let mut post_router = Vec::new();
         let mut referenced: BTreeSet<String> = BTreeSet::new();
@@ -245,7 +348,7 @@ impl<'a> State<'a> {
                     format!(
                         "route {} has host-specific rules; Praxis request conditions cannot match \
                          on host, so its filters may also run for other hosts on listener {}",
-                        route.name, ln.section_name
+                        route.name, label
                     ),
                 );
             }
@@ -262,18 +365,44 @@ impl<'a> State<'a> {
                     );
                 }
                 if redirect.status_code == Some(303) {
+                    // Praxis 0.7.5's redirect filter accepts only
+                    // 301/302/307/308. Emit a static 303 response instead.
+                    // Without a templating engine the Location header cannot
+                    // echo the original path, so report that gap while still
+                    // returning the requested status.
+                    let location = static_303_location(redirect, route, tls.is_some());
                     self.unsupported(
-                        "RedirectStatus303",
+                        "RedirectStatus303Location",
                         format!(
-                            "route {} requests a 303 redirect; Praxis supports 301/302/307/308 and \
-                             this is emitted as 302",
+                            "route {} requests a 303 redirect; the status is served by a static \
+                             response with Location {location:?}, which cannot include a request \
+                             path suffix or echo an unspecified request host",
                             route.name
                         ),
                     );
+                    push_per_condition(&mut redirect_filters, &conditions, |conds| {
+                        Filter::StaticResponse(StaticResponseFilter {
+                            status: 303,
+                            headers: vec![HeaderPair {
+                                name: "Location".into(),
+                                value: location.clone(),
+                            }],
+                            // A body keeps Praxis on its normal response path;
+                            // header-only 3xx rejections currently fail.
+                            body: Some("See Other".into()),
+                            conditions: conds,
+                        })
+                    });
+                } else {
+                    push_per_condition(&mut redirect_filters, &conditions, |conds| {
+                        Filter::Redirect(redirect_filter(
+                            redirect,
+                            &route.hosts,
+                            primary.bind_port,
+                            conds,
+                        ))
+                    });
                 }
-                push_per_condition(&mut redirect_filters, &conditions, |conds| {
-                    Filter::Redirect(redirect_filter(redirect, &route.hosts, ln.bind_port, conds))
-                });
                 continue;
             }
 
@@ -285,6 +414,22 @@ impl<'a> State<'a> {
                 .as_ref()
                 .and_then(|rewrite| rewrite.hostname.as_deref());
             let Some(cluster) = self.route_cluster(route, authority) else {
+                // Gateway API requires a 500 when a rule's backendRefs cannot
+                // be resolved. Praxis rejects clusters with zero endpoints at
+                // config load, so fail closed with a conditional response
+                // before the router instead.
+                if conditions.is_empty() {
+                    invalid_catchall = true;
+                } else {
+                    push_per_condition(&mut fail_closed, &conditions, |conds| {
+                        Filter::StaticResponse(StaticResponseFilter {
+                            status: 500,
+                            headers: Vec::new(),
+                            body: Some("no resolvable backend".into()),
+                            conditions: conds,
+                        })
+                    });
+                }
                 continue;
             };
             referenced.insert(cluster.clone());
@@ -302,41 +447,43 @@ impl<'a> State<'a> {
             }
 
             if let Some(cors) = &route.cors {
-                if !route.matches.is_empty() {
-                    self.unsupported(
-                        "ScopedCors",
-                        format!(
-                            "route {} scopes its CORS filter to a path or method; Praxis rejects \
-                             request conditions on security filters, so CORS applies to the whole \
-                             listener",
-                            route.name
-                        ),
-                    );
-                }
-                match &emitted_cors {
-                    None => {
-                        emitted_cors = Some(cors.clone());
-                        cors_filters.push(Filter::Cors(CorsFilter {
-                            allow_origins: cors.allow_origins.clone(),
-                            allow_methods: cors.allow_methods.clone(),
-                            allow_headers: cors.allow_headers.clone(),
-                            expose_headers: cors.expose_headers.clone(),
-                            max_age: cors.max_age,
-                            allow_credentials: cors.allow_credentials,
-                            conditions: Vec::new(),
-                        }));
+                let cors = self.praxis_cors(cors, &route.name);
+                let condition_sets: Vec<Vec<Condition>> = if conditions.is_empty() {
+                    vec![Vec::new()]
+                } else {
+                    self.scoped_cors = true;
+                    conditions.iter().map(|c| vec![c.clone()]).collect()
+                };
+                for conds in condition_sets {
+                    if emitted_cors.iter().any(|(existing, existing_conds)| {
+                        *existing == cors && *existing_conds == conds
+                    }) {
+                        continue;
                     }
-                    Some(existing) if existing != cors => {
+                    if let Some((_, _)) = emitted_cors
+                        .iter()
+                        .find(|(_, existing_conds)| *existing_conds == conds)
+                    {
                         self.unsupported(
                             "MultipleCorsConfigs",
                             format!(
-                                "route {} defines a CORS policy different from an earlier route on \
-                                 listener {}; Praxis applies a single CORS filter per filter chain",
-                                route.name, ln.section_name
+                                "route {} defines a CORS policy for a path already covered by a \
+                                 different policy on listener {}; keeping the first",
+                                route.name, label
                             ),
                         );
+                        continue;
                     }
-                    Some(_) => {}
+                    emitted_cors.push((cors.clone(), conds.clone()));
+                    cors_filters.push(Filter::Cors(CorsFilter {
+                        allow_origins: cors.allow_origins.clone(),
+                        allow_methods: cors.allow_methods.clone(),
+                        allow_headers: cors.allow_headers.clone(),
+                        expose_headers: cors.expose_headers.clone(),
+                        max_age: cors.max_age,
+                        allow_credentials: cors.allow_credentials,
+                        conditions: conds,
+                    }));
                 }
             }
 
@@ -408,24 +555,23 @@ impl<'a> State<'a> {
                 });
             }
 
-            if let Some(ms) = route.request_timeout_ms {
-                if ms > 0 {
-                    push_per_condition(&mut post_router, &conditions, |conds| {
-                        Filter::Timeout(TimeoutFilter {
-                            timeout_ms: ms,
-                            conditions: conds,
-                        })
-                    });
-                }
-            } else if route.backend_timeout_ms.is_some() {
-                self.unsupported(
-                    "BackendRequestTimeout",
-                    format!(
-                        "route {} sets backendRequest timeout; Praxis timeout applies to the whole \
-                         request",
-                        route.name
-                    ),
-                );
+            // Gateway API has separate request and backendRequest timeouts.
+            // Praxis only exposes a whole-request deadline. `backendRequest`
+            // is always <= `request`, so enforcing the tighter of the two
+            // preserves the local-rule deadline (a disabled `0s` timeout is
+            // ignored rather than disabling the other one).
+            let effective_timeout = [route.request_timeout_ms, route.backend_timeout_ms]
+                .into_iter()
+                .flatten()
+                .filter(|ms| *ms > 0)
+                .min();
+            if let Some(ms) = effective_timeout {
+                push_per_condition(&mut post_router, &conditions, |conds| {
+                    Filter::Timeout(TimeoutFilter {
+                        timeout_ms: ms,
+                        conditions: conds,
+                    })
+                });
             }
         }
 
@@ -434,15 +580,29 @@ impl<'a> State<'a> {
             .filter_map(|name| self.clusters.get(name).cloned())
             .collect();
 
+        // An invalid catch-all rule has no positive condition to attach to.
+        // It can only be served as an unconditional 500 when no other route
+        // makes it through; otherwise unmatched paths fall back to 404.
+        if invalid_catchall && router_routes.is_empty() {
+            fail_closed.push(Filter::StaticResponse(StaticResponseFilter {
+                status: 500,
+                headers: Vec::new(),
+                body: Some("no resolvable backend".into()),
+                conditions: Vec::new(),
+            }));
+        }
+
         let mut filters = Vec::new();
         filters.extend(cors_filters);
         filters.extend(redirect_filters);
+        filters.extend(fail_closed);
         // Praxis rejects an empty router table. A listener with no routable
         // rules (for example before any HTTPRoute attaches) gets a chain
         // without a router instead; unmatched requests fail closed.
         if !router_routes.is_empty() {
             filters.push(Filter::Router(RouterFilter {
                 routes: router_routes,
+                multi_level_subdomain_matching: Some(true),
             }));
         }
         filters.extend(post_router);
@@ -452,7 +612,7 @@ impl<'a> State<'a> {
 
         let listener = Listener {
             name: name.clone(),
-            address: format!("0.0.0.0:{}", ln.bind_port),
+            address: format!("0.0.0.0:{}", primary.bind_port),
             protocol: Some(Protocol::Http),
             filter_chains: vec![name.clone()],
             tls,
@@ -466,14 +626,16 @@ impl<'a> State<'a> {
 
     fn tls_listener(
         &mut self,
-        ln: &ListenerIr,
+        group: &[&ListenerIr],
         routes: &[&RouteRuleIr],
     ) -> Option<(Listener, FilterChain)> {
+        let primary = *group.first()?;
         let name = self
             .names
-            .unique(&format!("{}-{}", ln.parent_name, ln.section_name));
-        let mut sni_routes = Vec::new();
+            .unique(&format!("{}-{}", primary.parent_name, primary.section_name));
+        let mut sni_routes: Vec<SniRoute> = Vec::new();
         let mut default_upstream = None;
+        let mut seen_names: BTreeSet<String> = BTreeSet::new();
 
         for route in routes {
             if !matches!(route.route_family, RouteFamily::Tls) {
@@ -487,10 +649,18 @@ impl<'a> State<'a> {
                     default_upstream = Some(upstream);
                 }
             } else {
-                sni_routes.push(SniRoute {
-                    server_names: route.hosts.clone(),
-                    upstream,
-                });
+                let server_names: Vec<String> = route
+                    .hosts
+                    .iter()
+                    .filter(|host| seen_names.insert((*host).clone()))
+                    .cloned()
+                    .collect();
+                if !server_names.is_empty() {
+                    sni_routes.push(SniRoute {
+                        server_names,
+                        upstream,
+                    });
+                }
             }
         }
 
@@ -499,15 +669,31 @@ impl<'a> State<'a> {
                 "TlsListenerWithoutRoutes",
                 format!(
                     "TLS listener {}/{} has no routable TLSRoute",
-                    ln.parent_namespace, ln.section_name
+                    primary.parent_namespace, primary.section_name
                 ),
             );
-            return None;
+            // Bind the Gateway's port but leave the pipeline empty: the TCP
+            // proxy accepts the connection, resolves no upstream, and closes
+            // it. This is the correct reject behavior for a passthrough
+            // listener whose routes are all invalid or not yet created.
+            let listener = Listener {
+                name: name.clone(),
+                address: format!("0.0.0.0:{}", primary.bind_port),
+                protocol: Some(Protocol::Tcp),
+                filter_chains: vec![name.clone()],
+                tls: None,
+                upstream: None,
+            };
+            let chain = FilterChain {
+                name,
+                filters: Vec::new(),
+            };
+            return Some((listener, chain));
         }
 
         let listener = Listener {
             name: name.clone(),
-            address: format!("0.0.0.0:{}", ln.bind_port),
+            address: format!("0.0.0.0:{}", primary.bind_port),
             protocol: Some(Protocol::Tcp),
             filter_chains: vec![name.clone()],
             tls: None,
@@ -525,31 +711,110 @@ impl<'a> State<'a> {
 
     // -- TCP ----------------------------------------------------------------
 
-    fn tcp_listener(&mut self, ln: &ListenerIr, routes: &[&RouteRuleIr]) -> Option<Listener> {
-        let route = routes
+    fn tcp_listener(
+        &mut self,
+        group: &[&ListenerIr],
+        routes: &[&RouteRuleIr],
+    ) -> Option<(Listener, Option<FilterChain>)> {
+        let primary = *group.first()?;
+        let name = self
+            .names
+            .unique(&format!("{}-{}", primary.parent_name, primary.section_name));
+        let tcp_routes: Vec<&&RouteRuleIr> = routes
             .iter()
-            .find(|r| matches!(r.route_family, RouteFamily::Tcp))?;
+            .filter(|r| matches!(r.route_family, RouteFamily::Tcp))
+            .collect();
+        if group.len() > 1 {
+            self.unsupported(
+                "MultipleTcpListenersSamePort",
+                format!(
+                    "port {} has multiple TCP listeners; without SNI Praxis can expose only one upstream",
+                    primary.bind_port
+                ),
+            );
+        }
+        if tcp_routes.len() > 1 {
+            self.unsupported(
+                "MultipleTcpRoutesSamePort",
+                format!(
+                    "port {} has multiple TCP routes; Praxis TCP listeners support a single upstream",
+                    primary.bind_port
+                ),
+            );
+        }
+        let reject = || {
+            (
+                Listener {
+                    name: name.clone(),
+                    address: format!("0.0.0.0:{}", primary.bind_port),
+                    protocol: Some(Protocol::Tcp),
+                    filter_chains: vec![name.clone()],
+                    tls: None,
+                    upstream: None,
+                },
+                FilterChain {
+                    name: name.clone(),
+                    filters: Vec::new(),
+                },
+            )
+        };
+        let Some(route) = tcp_routes.first().map(|route| **route) else {
+            let (listener, chain) = reject();
+            return Some((listener, Some(chain)));
+        };
         let Some(upstream) = self.first_upstream(route) else {
             self.unsupported(
                 "TcpListenerWithoutUpstream",
                 format!(
                     "TCP listener {}/{} has no resolvable backend",
-                    ln.parent_namespace, ln.section_name
+                    primary.parent_namespace, primary.section_name
                 ),
             );
-            return None;
+            let (listener, chain) = reject();
+            return Some((listener, Some(chain)));
         };
-        let name = self
-            .names
-            .unique(&format!("{}-{}", ln.parent_name, ln.section_name));
-        Some(Listener {
-            name,
-            address: format!("0.0.0.0:{}", ln.bind_port),
-            protocol: Some(Protocol::Tcp),
-            filter_chains: Vec::new(),
-            tls: None,
-            upstream: Some(upstream),
-        })
+        Some((
+            Listener {
+                name,
+                address: format!("0.0.0.0:{}", primary.bind_port),
+                protocol: Some(Protocol::Tcp),
+                filter_chains: Vec::new(),
+                tls: None,
+                upstream: Some(upstream),
+            },
+            None,
+        ))
+    }
+
+    /// Adapt Gateway API CORS to Praxis's stricter validation.
+    ///
+    /// Praxis refuses `allow_credentials` with wildcard origins, methods, or
+    /// headers. Gateway API expects the implementation to echo the origin in
+    /// that case, which this Praxis version cannot express; drop credentials
+    /// and report the approximation instead of emitting a config that fails
+    /// to load.
+    fn praxis_cors(
+        &mut self,
+        cors: &ugwc_core::ir::CorsFilterIr,
+        route_name: &str,
+    ) -> ugwc_core::ir::CorsFilterIr {
+        let mut out = cors.clone();
+        let wildcard = |values: &[String]| values.iter().any(|v| v == "*");
+        if out.allow_credentials
+            && (wildcard(&out.allow_origins)
+                || wildcard(&out.allow_methods)
+                || wildcard(&out.allow_headers))
+        {
+            self.unsupported(
+                "CorsCredentialsWildcard",
+                format!(
+                    "route {route_name} combines allowCredentials with a wildcard origin/method/\
+                     header; Praxis cannot echo the request origin, so credentials are disabled"
+                ),
+            );
+            out.allow_credentials = false;
+        }
+        out
     }
 
     // -- Backends -----------------------------------------------------------
@@ -580,29 +845,132 @@ impl<'a> State<'a> {
             );
             return None;
         }
-        let mut names: Vec<String> = Vec::new();
-        for wb in &active {
-            if let Some(name) = self.cluster_for(&wb.backend, grpc, authority) {
-                if !names.contains(&name) {
-                    names.push(name);
+        if active.len() == 1 {
+            return self.cluster_for(&active[0].backend, grpc, authority);
+        }
+        self.weighted_cluster(route, &active, grpc, authority)
+    }
+
+    /// Merge several weighted backends into one cluster whose endpoints carry
+    /// scaled weights.
+    ///
+    /// Gateway API weights apply per `backendRef`, while Praxis weights apply
+    /// per endpoint. Scaling every backend by the LCM of its endpoint count
+    /// keeps the aggregate proportion exact. Backends with different TLS
+    /// policies cannot share a cluster; those are reported and only the first
+    /// backend is used.
+    fn weighted_cluster(
+        &mut self,
+        route: &RouteRuleIr,
+        active: &[&WeightedBackendIr],
+        grpc: bool,
+        authority: Option<&str>,
+    ) -> Option<String> {
+        let first_tls = active[0].backend.backend_tls.as_ref();
+        if active
+            .iter()
+            .any(|wb| wb.backend.backend_tls.as_ref() != first_tls)
+        {
+            self.unsupported(
+                "WeightedBackendsMixedTls",
+                format!(
+                    "route {} weights backends with different TLS policies; using only the first",
+                    route.name
+                ),
+            );
+            return self.cluster_for(&active[0].backend, grpc, authority);
+        }
+
+        let mut weights: BTreeMap<String, u32> = BTreeMap::new();
+        for wb in active {
+            let Some(name) = self.cluster_for(&wb.backend, grpc, authority) else {
+                continue;
+            };
+            let entry = weights.entry(name).or_insert(0);
+            *entry = entry.saturating_add(wb.weight);
+        }
+        if weights.is_empty() {
+            return None;
+        }
+        if weights.len() == 1 {
+            return weights.into_keys().next();
+        }
+
+        // Scale backend weights by the LCM of endpoint counts so each
+        // backend's total share is exact even when replica counts differ.
+        let mut scale: u64 = 1;
+        for name in weights.keys() {
+            let count = self.clusters.get(name)?.endpoints.len() as u64;
+            scale = lcm(scale, count);
+            if scale > u64::from(u32::MAX) {
+                self.unsupported(
+                    "WeightedBackendsEndpointScale",
+                    format!(
+                        "route {} has endpoint counts that cannot be weighted within u32",
+                        route.name
+                    ),
+                );
+                return self.cluster_for(&active[0].backend, grpc, authority);
+            }
+        }
+
+        let mut endpoints = Vec::new();
+        let mut first_cluster = None;
+        for (name, weight) in &weights {
+            let cluster = self.clusters.get(name)?;
+            if first_cluster.is_none() {
+                first_cluster = Some(cluster.clone());
+            }
+            let count = cluster.endpoints.len() as u64;
+            if count == 0 {
+                continue;
+            }
+            let per_endpoint = (u64::from(*weight).saturating_mul(scale) / count)
+                .clamp(1, u64::from(u32::MAX)) as u32;
+            endpoints.extend(cluster.endpoints.iter().map(|endpoint| Endpoint::Weighted {
+                address: endpoint.address().to_owned(),
+                weight: per_endpoint,
+            }));
+        }
+        if endpoints.is_empty() {
+            return None;
+        }
+
+        // Praxis walks contiguous weight buckets, so a request window that is
+        // not a whole number of cycles is biased toward the first buckets.
+        // Reducing by the GCD keeps the cycle as short as possible while
+        // preserving the requested ratio (e.g. 140/140/60/60 -> 7/7/3/3).
+        let divisor = endpoints
+            .iter()
+            .filter_map(|endpoint| match endpoint {
+                Endpoint::Weighted { weight, .. } => Some(u64::from(*weight)),
+                Endpoint::Plain(_) => None,
+            })
+            .fold(0, gcd);
+        if divisor > 1 {
+            for endpoint in &mut endpoints {
+                if let Endpoint::Weighted { weight, .. } = endpoint {
+                    *weight = u32::try_from(u64::from(*weight) / divisor)
+                        .unwrap_or(1)
+                        .max(1);
                 }
             }
         }
-        if names.is_empty() {
-            return None;
-        }
-        if names.len() > 1 {
-            self.unsupported(
-                "WeightedBackends",
-                format!(
-                    "route {} splits traffic across {} clusters; using only {:?}",
-                    route.name,
-                    names.len(),
-                    names[0]
-                ),
-            );
-        }
-        names.into_iter().next()
+
+        let base = sanitize_name_component(&format!("{}-weighted", route.name));
+        let name = self.cluster_name_registry.unique(&base);
+        let first_cluster = first_cluster?;
+        self.clusters.insert(
+            name.clone(),
+            Cluster {
+                name: name.clone(),
+                endpoints,
+                tls: first_cluster.tls,
+                http: first_cluster.http,
+                idle_timeout_ms: None,
+            },
+        );
+        Some(name)
     }
 
     fn cluster_for(
@@ -701,9 +1069,10 @@ impl<'a> State<'a> {
         };
         let cluster = Cluster {
             name: name.clone(),
-            endpoints,
+            endpoints: endpoints.into_iter().map(Endpoint::Plain).collect(),
             tls,
             http,
+            idle_timeout_ms: None,
         };
         self.cluster_names.insert(cluster_key, name.clone());
         self.clusters.insert(name.clone(), cluster);
@@ -745,7 +1114,9 @@ impl<'a> State<'a> {
             });
             Some(CertKeyPair {
                 cert_path: tls_path(&cert_key),
+                default: false,
                 key_path: tls_path(&key_key),
+                server_names: Vec::new(),
             })
         };
 
@@ -827,6 +1198,20 @@ fn attached(route: &RouteRuleIr, ln: &ListenerIr) -> bool {
         && a.parent_name == ln.parent_name
         && a.section_name == ln.section_name
         && a.port == ln.bind_port
+}
+
+fn routes_for_group<'a>(ir: &'a IrSnapshot, group: &[&ListenerIr]) -> Vec<&'a RouteRuleIr> {
+    let mut seen: BTreeSet<String> = BTreeSet::new();
+    let mut out = Vec::new();
+    for route in &ir.routes {
+        if !group.iter().any(|ln| attached(route, ln)) {
+            continue;
+        }
+        if seen.insert(route.name.clone()) {
+            out.push(route);
+        }
+    }
+    out
 }
 
 fn effective_protocol(ln: &ListenerIr) -> &'static str {
@@ -999,6 +1384,15 @@ fn condition_match(
         methods: m.method.iter().cloned().collect(),
         headers: m.headers_exact.clone(),
     };
+    if let Some(method) = &m.method {
+        unsupported.push(Unsupported {
+            feature: "MethodConditions".into(),
+            detail: format!(
+                "route match restricts method to {method:?}; the native router cannot select a \
+                 cluster by method, so other methods may also reach this backend"
+            ),
+        });
+    }
     if !m.query_params_exact.is_empty() {
         unsupported.push(Unsupported {
             feature: "QueryParamConditions".into(),
@@ -1038,8 +1432,117 @@ fn push_per_condition(
 }
 
 // -----------------------------------------------------------------------------
+// Post-processing
+// -----------------------------------------------------------------------------
+
+/// Praxis 0.7.5 hashes the upstream pool key from address, SNI, client
+/// certificate and verify flags, but not from the trust anchors. Two clusters
+/// that dial the same address with the same SNI but different CAs therefore
+/// share pooled connections, and the second cluster can skip certificate
+/// verification entirely. Give every cluster involved in such a collision a
+/// 1 ms idle timeout so its connections are not kept for reuse.
+fn pin_shared_tls_pools(config: &mut PraxisConfig) {
+    type Key = (String, Option<String>, Option<String>, bool);
+
+    let mut ca_by_key: BTreeMap<Key, BTreeSet<Option<String>>> = BTreeMap::new();
+    for chain in &config.filter_chains {
+        for filter in &chain.filters {
+            let Filter::LoadBalancer(lb) = filter else {
+                continue;
+            };
+            for cluster in &lb.clusters {
+                let Some(tls) = &cluster.tls else {
+                    continue;
+                };
+                let client_cert = tls.client_cert.as_ref().map(|cert| cert.cert_path.clone());
+                for endpoint in &cluster.endpoints {
+                    let key = (
+                        endpoint.address().to_owned(),
+                        tls.sni.clone(),
+                        client_cert.clone(),
+                        tls.verify,
+                    );
+                    ca_by_key
+                        .entry(key)
+                        .or_default()
+                        .insert(tls.ca.as_ref().map(|ca| ca.ca_path.clone()));
+                }
+            }
+        }
+    }
+
+    let conflicting: BTreeSet<Key> = ca_by_key
+        .into_iter()
+        .filter(|(_, cas)| cas.len() > 1)
+        .map(|(key, _)| key)
+        .collect();
+    if conflicting.is_empty() {
+        return;
+    }
+
+    for chain in &mut config.filter_chains {
+        for filter in &mut chain.filters {
+            let Filter::LoadBalancer(lb) = filter else {
+                continue;
+            };
+            for cluster in &mut lb.clusters {
+                let Some(tls) = &cluster.tls else {
+                    continue;
+                };
+                let client_cert = tls.client_cert.as_ref().map(|cert| cert.cert_path.clone());
+                let collides = cluster.endpoints.iter().any(|endpoint| {
+                    conflicting.contains(&(
+                        endpoint.address().to_owned(),
+                        tls.sni.clone(),
+                        client_cert.clone(),
+                        tls.verify,
+                    ))
+                });
+                if collides {
+                    cluster.idle_timeout_ms = Some(1);
+                }
+            }
+        }
+    }
+}
+
+// -----------------------------------------------------------------------------
 // Filter builders
 // -----------------------------------------------------------------------------
+
+/// Build a static `Location` for a 303 response, which cannot use Praxis's
+/// `${...}` redirect templates. A relative path is emitted whenever the
+/// redirect does not change the authority, so the client resolves it against
+/// the original request.
+fn static_303_location(
+    redirect: &RequestRedirectIr,
+    route: &RouteRuleIr,
+    listener_https: bool,
+) -> String {
+    let path = redirect
+        .path_replace_full
+        .clone()
+        .or_else(|| {
+            route
+                .matches
+                .iter()
+                .find_map(|m| m.path_exact.clone().or_else(|| m.path_prefix.clone()))
+        })
+        .unwrap_or_else(|| "/".into());
+    let host = redirect
+        .hostname
+        .clone()
+        .or_else(|| route.hosts.first().cloned());
+    let Some(host) = host else {
+        return path;
+    };
+    let scheme = redirect
+        .scheme
+        .clone()
+        .unwrap_or_else(|| if listener_https { "https" } else { "http" }.into());
+    let port = redirect.port.map(|p| format!(":{p}")).unwrap_or_default();
+    format!("{scheme}://{host}{port}{path}")
+}
 
 fn redirect_filter(
     redirect: &RequestRedirectIr,
@@ -1126,6 +1629,24 @@ fn header_pairs(headers: &[ugwc_core::ir::NamedHeaderIr]) -> Vec<HeaderPair> {
 /// `regex::Regex::replace` expands `$name`/`$1`; escape literal dollars.
 fn escape_replacement(value: &str) -> String {
     value.replace('$', "$$")
+}
+
+fn lcm(a: u64, b: u64) -> u64 {
+    if a == 0 || b == 0 {
+        return 0;
+    }
+    a.checked_div(gcd(a, b))
+        .and_then(|quotient| quotient.checked_mul(b))
+        .unwrap_or(u64::MAX)
+}
+
+fn gcd(mut a: u64, mut b: u64) -> u64 {
+    while b != 0 {
+        let remainder = a % b;
+        a = b;
+        b = remainder;
+    }
+    a
 }
 
 fn sanitize_name_component(value: &str) -> String {
@@ -1282,13 +1803,13 @@ mod tests {
     ) -> IrSnapshot {
         let mut backends = BTreeMap::new();
         for (ns, name, port, address) in endpoints {
-            backends.insert(
-                backend_endpoints_map_key(ns, name, port),
-                vec![BackendEndpointIr {
+            backends
+                .entry(backend_endpoints_map_key(ns, name, port))
+                .or_insert_with(Vec::new)
+                .push(BackendEndpointIr {
                     address: address.into(),
                     port,
-                }],
-            );
+                });
         }
         IrSnapshot {
             ir_version: IR_VERSION,
@@ -1336,6 +1857,10 @@ mod tests {
         assert_eq!(value["listeners"][0]["protocol"].as_str(), Some("http"));
 
         let router = filter(&value, "router");
+        assert_eq!(
+            router["multi_level_subdomain_matching"].as_bool(),
+            Some(true)
+        );
         assert_eq!(router["routes"][0]["path_prefix"].as_str(), Some("/"));
         let cluster_name = router["routes"][0]["cluster"].as_str().unwrap();
 
@@ -1349,7 +1874,76 @@ mod tests {
             value["insecure_options"]["allow_private_endpoints"].as_bool(),
             Some(true)
         );
+        assert_eq!(
+            value["insecure_options"]["allow_private_upstreams"].as_bool(),
+            Some(true)
+        );
+        assert_eq!(
+            value["admin"]["metrics_address"].as_str(),
+            Some(ADMIN_METRICS_ADDRESS)
+        );
         assert!(out.unsupported.is_empty());
+    }
+
+    #[test]
+    fn merges_tls_listeners_sharing_a_port() {
+        let mut a = listener("HTTPS", 443, TlsMode::Terminate);
+        a.section_name = "a".into();
+        a.tls_cert_pem = b"CERT-A".to_vec();
+        a.tls_key_pem = Zeroizing::new(b"KEY-A".to_vec());
+        let mut b = listener("HTTPS", 443, TlsMode::Terminate);
+        b.section_name = "b".into();
+        b.hostname = Some("b.example.com".into());
+        b.tls_cert_pem = b"CERT-B".to_vec();
+        b.tls_key_pem = Zeroizing::new(b"KEY-B".to_vec());
+
+        let mut ra = route("ra", RouteFamily::Http, backend("default", "svc", 8080));
+        ra.hosts = vec!["a.example.com".into()];
+        ra.listener = Some(ListenerAttachmentIr {
+            parent_kind: "Gateway".into(),
+            parent_namespace: "default".into(),
+            parent_name: "gw".into(),
+            section_name: "a".into(),
+            port: 443,
+        });
+        let mut rb = route("rb", RouteFamily::Http, backend("default", "svc", 8080));
+        rb.hosts = vec!["b.example.com".into()];
+        rb.listener = Some(ListenerAttachmentIr {
+            parent_kind: "Gateway".into(),
+            parent_namespace: "default".into(),
+            parent_name: "gw".into(),
+            section_name: "b".into(),
+            port: 443,
+        });
+
+        let out = encode(&snapshot(
+            vec![b, a],
+            vec![rb, ra],
+            vec![("default", "svc", 8080, "10.0.0.1")],
+        ))
+        .unwrap();
+        let value: Value = serde_yaml::from_str(&out.yaml).unwrap();
+        let listeners = value["listeners"].as_sequence().unwrap();
+        assert_eq!(listeners.len(), 1);
+        assert_eq!(listeners[0]["address"].as_str(), Some("0.0.0.0:443"));
+        let certs = listeners[0]["tls"]["certificates"].as_sequence().unwrap();
+        assert_eq!(certs.len(), 2);
+        assert!(certs[0]["default"].as_bool().is_none());
+        assert_eq!(
+            certs[0]["server_names"].as_sequence().unwrap()[0]
+                .as_str()
+                .unwrap(),
+            "b.example.com"
+        );
+        assert_eq!(certs[1]["default"].as_bool(), Some(true));
+        assert_eq!(
+            filter(&value, "router")["routes"]
+                .as_sequence()
+                .unwrap()
+                .len(),
+            2
+        );
+        assert_eq!(out.files.len(), 4);
     }
 
     #[test]
@@ -1478,6 +2072,43 @@ mod tests {
     }
 
     #[test]
+    fn distinct_cas_on_shared_upstream_disable_connection_reuse() {
+        let tls = |ca: &[u8]| BackendTlsIr {
+            ca_cert_pem: ca.to_vec(),
+            hostname: "abc.example.com".into(),
+            sans: Vec::new(),
+            trust_system_ca: false,
+            client_cert_pem: Vec::new(),
+            client_key_pem: Zeroizing::new(Vec::new()),
+            invalid: false,
+        };
+        let mut a = backend("default", "svc-a", 8443);
+        a.backend_tls = Some(tls(b"ca-a"));
+        let mut b = backend("default", "svc-b", 8443);
+        b.backend_tls = Some(tls(b"ca-b"));
+        let ir = snapshot(
+            vec![listener("HTTP", 80, TlsMode::Plaintext)],
+            vec![
+                route("ra", RouteFamily::Http, a),
+                route("rb", RouteFamily::Http, b),
+            ],
+            vec![
+                ("default", "svc-a", 8443, "10.0.0.3"),
+                ("default", "svc-b", 8443, "10.0.0.3"),
+            ],
+        );
+        let out = encode(&ir).unwrap();
+        let value: Value = serde_yaml::from_str(&out.yaml).unwrap();
+        let clusters = filter(&value, "load_balancer")["clusters"]
+            .as_sequence()
+            .unwrap();
+        assert_eq!(clusters.len(), 2);
+        for cluster in clusters {
+            assert_eq!(cluster["idle_timeout_ms"].as_u64(), Some(1));
+        }
+    }
+
+    #[test]
     fn redirect_builds_location_and_status() {
         let mut r = route("r1", RouteFamily::Http, backend("default", "svc", 8080));
         r.request_redirect = Some(RequestRedirectIr {
@@ -1518,7 +2149,8 @@ mod tests {
         );
         let out = encode(&ir).unwrap();
         assert!(out.unsupported.iter().any(|u| u.feature == "UDPRoute"));
-        assert!(out.config.listeners.is_empty());
+        assert_eq!(out.config.listeners.len(), 1);
+        assert_eq!(out.config.listeners[0].address, "0.0.0.0:15000");
     }
 
     #[test]
@@ -1570,8 +2202,66 @@ mod tests {
     }
 
     #[test]
-    fn weighted_multi_cluster_is_reported() {
+    fn weighted_endpoint_weights_reduce_by_gcd() {
         let mut r = route("r1", RouteFamily::Http, backend("default", "a", 8080));
+        r.backends[0].weight = 70;
+        r.backends.push(WeightedBackendIr {
+            backend: backend("default", "b", 8080),
+            weight: 30,
+        });
+        r.matches = vec![empty_match()];
+        let ir = snapshot(
+            vec![listener("HTTP", 80, TlsMode::Plaintext)],
+            vec![r],
+            vec![
+                ("default", "a", 8080, "10.0.0.1"),
+                ("default", "a", 8080, "10.0.0.2"),
+                ("default", "b", 8080, "10.0.0.3"),
+                ("default", "b", 8080, "10.0.0.4"),
+            ],
+        );
+        let out = encode(&ir).unwrap();
+        let value: Value = serde_yaml::from_str(&out.yaml).unwrap();
+        let lb = filter(&value, "load_balancer");
+        let endpoints = lb["clusters"][0]["endpoints"].as_sequence().unwrap();
+        let weights: Vec<u64> = endpoints
+            .iter()
+            .map(|endpoint| endpoint["weight"].as_u64().unwrap())
+            .collect();
+        assert_eq!(weights, vec![7, 7, 3, 3]);
+    }
+
+    #[test]
+    fn weighted_backends_scale_by_endpoint_count() {
+        let mut r = route("r1", RouteFamily::Http, backend("default", "a", 8080));
+        r.backends.push(WeightedBackendIr {
+            backend: backend("default", "b", 8080),
+            weight: 1,
+        });
+        r.matches = vec![empty_match()];
+        let ir = snapshot(
+            vec![listener("HTTP", 80, TlsMode::Plaintext)],
+            vec![r],
+            vec![
+                ("default", "a", 8080, "10.0.0.1"),
+                ("default", "a", 8080, "10.0.0.2"),
+                ("default", "b", 8080, "10.0.0.3"),
+            ],
+        );
+        let out = encode(&ir).unwrap();
+        let value: Value = serde_yaml::from_str(&out.yaml).unwrap();
+        let lb = filter(&value, "load_balancer");
+        let endpoints = lb["clusters"][0]["endpoints"].as_sequence().unwrap();
+        assert_eq!(endpoints.len(), 3);
+        assert_eq!(endpoints[0]["weight"].as_u64(), Some(1));
+        assert_eq!(endpoints[1]["weight"].as_u64(), Some(1));
+        assert_eq!(endpoints[2]["weight"].as_u64(), Some(2));
+    }
+
+    #[test]
+    fn weighted_backends_merge_into_one_cluster() {
+        let mut r = route("r1", RouteFamily::Http, backend("default", "a", 8080));
+        r.backends[0].weight = 3;
         r.backends.push(WeightedBackendIr {
             backend: backend("default", "b", 8080),
             weight: 1,
@@ -1586,8 +2276,18 @@ mod tests {
             ],
         );
         let out = encode(&ir).unwrap();
+        let value: Value = serde_yaml::from_str(&out.yaml).unwrap();
+        let lb = filter(&value, "load_balancer");
+        let clusters = lb["clusters"].as_sequence().unwrap();
+        assert_eq!(clusters.len(), 1);
+        let endpoints = clusters[0]["endpoints"].as_sequence().unwrap();
+        assert_eq!(endpoints.len(), 2);
+        assert_eq!(endpoints[0]["address"].as_str(), Some("10.0.0.1:8080"));
+        assert_eq!(endpoints[0]["weight"].as_u64(), Some(3));
+        assert_eq!(endpoints[1]["address"].as_str(), Some("10.0.0.2:8080"));
+        assert_eq!(endpoints[1]["weight"].as_u64(), Some(1));
         assert!(
-            out.unsupported
+            !out.unsupported
                 .iter()
                 .any(|u| u.feature == "WeightedBackends")
         );
@@ -1611,6 +2311,51 @@ mod tests {
         let out = encode(&ir).unwrap();
         assert!(out.unsupported.iter().any(|u| u.feature == "InferencePool"));
         assert!(out.config.listeners[0].filter_chains.len() == 1);
+    }
+
+    #[test]
+    fn unresolvable_backends_fail_closed_with_static_500() {
+        let mut r = route("r1", RouteFamily::Http, backend("default", "svc", 8080));
+        r.backends.clear();
+        r.matches = vec![RouteMatchIr {
+            path_prefix: Some("/v2".into()),
+            ..empty_match()
+        }];
+        let ir = snapshot(
+            vec![listener("HTTP", 80, TlsMode::Plaintext)],
+            vec![r],
+            vec![],
+        );
+        let out = encode(&ir).unwrap();
+        assert!(out.unsupported.iter().any(|u| u.feature == "NoBackend"));
+        let value: Value = serde_yaml::from_str(&out.yaml).unwrap();
+        let response = filter(&value, "static_response");
+        assert_eq!(response["status"].as_u64(), Some(500));
+        assert_eq!(
+            response["conditions"][0]["when"]["path_prefix"].as_str(),
+            Some("/v2")
+        );
+        assert!(
+            !value["filter_chains"][0]["filters"]
+                .as_sequence()
+                .unwrap()
+                .iter()
+                .any(|f| f["filter"].as_str() == Some("load_balancer"))
+        );
+    }
+
+    #[test]
+    fn backend_timeout_is_enforced_as_a_request_deadline() {
+        let mut r = route("r1", RouteFamily::Http, backend("default", "svc", 8080));
+        r.backend_timeout_ms = Some(500);
+        let ir = snapshot(
+            vec![listener("HTTP", 80, TlsMode::Plaintext)],
+            vec![r],
+            vec![("default", "svc", 8080, "10.0.0.1")],
+        );
+        let out = encode(&ir).unwrap();
+        let value: Value = serde_yaml::from_str(&out.yaml).unwrap();
+        assert_eq!(filter(&value, "timeout")["timeout_ms"].as_u64(), Some(500));
     }
 
     #[test]
@@ -1685,7 +2430,105 @@ mod tests {
 
         let cors = filter(&value, "cors");
         assert_eq!(cors["max_age"].as_u64(), Some(600));
-        assert!(cors.get("conditions").is_none());
+        assert_eq!(
+            cors["conditions"][0]["when"]["path_prefix"].as_str(),
+            Some("/api")
+        );
+        assert_eq!(
+            value["insecure_options"]["skip_pipeline_checks"]["conditional_security"].as_bool(),
+            Some(true)
+        );
+    }
+
+    #[test]
+    fn wildcard_cors_credentials_are_reported_and_dropped() {
+        let mut r = route("r1", RouteFamily::Http, backend("default", "svc", 8080));
+        r.cors = Some(CorsFilterIr {
+            allow_origins: vec!["*".into()],
+            allow_methods: vec!["GET".into()],
+            allow_headers: Vec::new(),
+            expose_headers: Vec::new(),
+            max_age: 60,
+            allow_credentials: true,
+        });
+        let ir = snapshot(
+            vec![listener("HTTP", 80, TlsMode::Plaintext)],
+            vec![r],
+            vec![("default", "svc", 8080, "10.0.0.1")],
+        );
+        let out = encode(&ir).unwrap();
+        assert!(
+            out.unsupported
+                .iter()
+                .any(|u| u.feature == "CorsCredentialsWildcard")
+        );
+        let cors = out.config.filter_chains[0]
+            .filters
+            .iter()
+            .find_map(|f| match f {
+                Filter::Cors(c) => Some(c),
+                _ => None,
+            })
+            .expect("cors filter");
+        assert!(!cors.allow_credentials);
+    }
+
+    #[test]
+    fn distinct_scoped_cors_policies_are_all_emitted() {
+        let mut a = route("a", RouteFamily::Http, backend("default", "svc", 8080));
+        a.matches = vec![RouteMatchIr {
+            path_prefix: Some("/a".into()),
+            ..empty_match()
+        }];
+        a.cors = Some(CorsFilterIr {
+            allow_origins: vec!["https://a.example.com".into()],
+            allow_methods: vec!["GET".into()],
+            allow_headers: Vec::new(),
+            expose_headers: Vec::new(),
+            max_age: 60,
+            allow_credentials: false,
+        });
+        let mut b = route("b", RouteFamily::Http, backend("default", "svc", 8080));
+        b.matches = vec![RouteMatchIr {
+            path_prefix: Some("/b".into()),
+            ..empty_match()
+        }];
+        b.cors = Some(CorsFilterIr {
+            allow_origins: vec!["https://b.example.com".into()],
+            allow_methods: vec!["POST".into()],
+            allow_headers: Vec::new(),
+            expose_headers: Vec::new(),
+            max_age: 60,
+            allow_credentials: true,
+        });
+        let ir = snapshot(
+            vec![listener("HTTP", 80, TlsMode::Plaintext)],
+            vec![a, b],
+            vec![("default", "svc", 8080, "10.0.0.1")],
+        );
+        let out = encode(&ir).unwrap();
+        assert!(
+            !out.unsupported
+                .iter()
+                .any(|u| u.feature == "MultipleCorsConfigs")
+        );
+        let cors: Vec<_> = out.config.filter_chains[0]
+            .filters
+            .iter()
+            .filter_map(|f| match f {
+                Filter::Cors(c) => Some(c),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(cors.len(), 2);
+        assert_eq!(
+            cors[0].conditions[0].when.path_prefix.as_deref(),
+            Some("/a")
+        );
+        assert_eq!(
+            cors[1].conditions[0].when.path_prefix.as_deref(),
+            Some("/b")
+        );
     }
 
     #[test]
@@ -1707,7 +2550,52 @@ mod tests {
     }
 
     #[test]
-    fn redirect_uses_listener_port_and_reports_303() {
+    fn empty_listener_set_gets_a_noop_listener() {
+        let ir = snapshot(Vec::new(), Vec::new(), Vec::new());
+        let out = encode(&ir).unwrap();
+        assert_eq!(out.config.listeners.len(), 1);
+        assert_eq!(out.config.listeners[0].address, "0.0.0.0:15000");
+        assert_eq!(out.config.listeners[0].filter_chains.len(), 1);
+        assert!(out.config.filter_chains[0].filters.is_empty());
+    }
+
+    #[test]
+    fn tls_listener_without_routes_binds_port_and_rejects() {
+        let ir = snapshot(
+            vec![listener("TLS", 443, TlsMode::Passthrough)],
+            vec![],
+            vec![],
+        );
+        let out = encode(&ir).unwrap();
+        assert!(
+            out.unsupported
+                .iter()
+                .any(|u| u.feature == "TlsListenerWithoutRoutes")
+        );
+        assert_eq!(out.config.listeners.len(), 1);
+        assert_eq!(out.config.listeners[0].address, "0.0.0.0:443");
+        assert_eq!(out.config.listeners[0].protocol, Some(Protocol::Tcp));
+        assert!(out.config.listeners[0].upstream.is_none());
+        assert!(out.config.filter_chains[0].filters.is_empty());
+    }
+
+    #[test]
+    fn tcp_listener_without_routes_binds_port_and_rejects() {
+        let ir = snapshot(
+            vec![listener("TCP", 9000, TlsMode::Plaintext)],
+            vec![],
+            vec![],
+        );
+        let out = encode(&ir).unwrap();
+        assert_eq!(out.config.listeners.len(), 1);
+        assert_eq!(out.config.listeners[0].address, "0.0.0.0:9000");
+        assert_eq!(out.config.listeners[0].protocol, Some(Protocol::Tcp));
+        assert!(out.config.listeners[0].upstream.is_none());
+        assert!(out.config.filter_chains[0].filters.is_empty());
+    }
+
+    #[test]
+    fn redirect_303_uses_static_response() {
         let mut r = route("r1", RouteFamily::Http, backend("default", "svc", 8080));
         r.listener = Some(ListenerAttachmentIr {
             parent_kind: "Gateway".into(),
@@ -1735,16 +2623,15 @@ mod tests {
         );
         let out = encode(&ir).unwrap();
         let value: Value = serde_yaml::from_str(&out.yaml).unwrap();
-        let redirect = filter(&value, "redirect");
-        assert_eq!(redirect["status"].as_u64(), Some(302));
-        assert_eq!(
-            redirect["location"].as_str(),
-            Some("${scheme}://${host}:18080/new${query}")
-        );
+        let response = filter(&value, "static_response");
+        assert_eq!(response["status"].as_u64(), Some(303));
+        assert_eq!(response["headers"][0]["name"].as_str(), Some("Location"));
+        assert_eq!(response["headers"][0]["value"].as_str(), Some("/new"));
+        assert_eq!(response["body"].as_str(), Some("See Other"));
         assert!(
             out.unsupported
                 .iter()
-                .any(|u| u.feature == "RedirectStatus303")
+                .any(|u| u.feature == "RedirectStatus303Location")
         );
     }
 
@@ -1765,7 +2652,12 @@ mod tests {
                 .filters
                 .iter()
                 .find_map(|f| match f {
-                    Filter::LoadBalancer(lb) => lb.clusters[0].endpoints.first().cloned(),
+                    Filter::LoadBalancer(lb) => {
+                        lb.clusters[0]
+                            .endpoints
+                            .first()
+                            .map(|e| e.address().to_owned())
+                    }
                     _ => None,
                 })
                 .as_deref(),

@@ -21,6 +21,7 @@ All settings are prefixed `UGWC_` and parsed at startup via `envy`.
 | `UGWC_RECONCILE_CONCURRENCY` | `16` | Concurrent gateway reconcile workers |
 | `UGWC_STATUS_PATCH_CONCURRENCY` | `16` | Concurrent status patches per gateway reconcile |
 | `UGWC_XDS_WIRE` | `gwxds` | Wire profile: `gwxds` (Praxis) or `envoy` |
+| `UGWC_IMPLEMENTATION_PROFILES_PATH` | — | JSON profile overrides keyed by `GatewayClass.spec.controllerName` (`data_plane`, `output`, `proxy_image`, …) |
 | `UGWC_DATAPLANE_ENABLE` | `false` | Create per-gateway Praxis workloads |
 | `UGWC_CONTROL_PLANE_XDS_BOOTSTRAP_ADDR` | — | Praxis ISTIOD_ADDR bootstrap (`host:port` or URI) |
 | `UGWC_OTLP_ENDPOINT` | — | OTLP endpoint (requires `otlp-metrics`/`otlp-traces` features) |
@@ -67,6 +68,8 @@ ugwc publishes Warning events on the Gateway object for operator-visible failure
 | `ProvisionFailed` | Per-gateway dataplane provisioning failed |
 | `TlsMaterialMissing` | One or more HTTPS listeners have certificate errors |
 | `DataplaneMisconfigured` | Missing proxy_image or empty bootstrap address |
+| `PraxisConfigUnsupported` | A Gateway feature cannot be represented in native Praxis config (conflicting CORS policies, method/query-param match, mixed-TLS weighted backends, …); the emitted config may be broader than requested |
+| `PraxisConfigFailed` | Encoding or applying the native Praxis ConfigMap/Secret failed |
 
 View events with `kubectl describe gateway <name>` or `kubectl get events --field-selector involvedObject.name=<name>`.
 
@@ -104,6 +107,10 @@ View events with `kubectl describe gateway <name>` or `kubectl get events --fiel
 | `ugwc_publish_skipped_total` | Counter | — |
 | `ugwc_dataplane_apply_total` | Counter | — |
 | `ugwc_dataplane_error_total` | Counter | — |
+| `ugwc_praxis_config_encode_seconds` | Histogram | — |
+| `ugwc_praxis_config_apply` | Counter | — |
+| `ugwc_praxis_config_error` | Counter | — |
+| `ugwc_praxis_config_unsupported` | Counter | `feature` |
 | `ugwc_ungranted_reference_total` | Counter | `route_kind` |
 | `ugwc_leader_active` | Gauge | — |
 | `ugwc_cache_synced` | Gauge | — |
@@ -214,6 +221,93 @@ Prerequisites and defaults: [README.md](../README.md#gateway-api-conformance-loc
 ./hack/setup.sh
 ./hack/conformance.sh
 ```
+
+## Praxis native config output
+
+The built-in `ugwc.io/default-controller` profile uses `output: praxis_configmap`, so
+per-gateway Praxis deployments receive native YAML instead of dialing xDS. For a
+Gateway `ns/<gateway>`:
+
+| Object | Content |
+|--------|---------|
+| ConfigMap `ugwc-dp-<gateway>` | `data["praxis.yaml"]` |
+| Secret `ugwc-dp-<gateway>-tls` | `listener-<name>.crt/.key` and `backend-<cluster>.ca.pem/.crt/.key`; created for every configmap-mode gateway (empty when the snapshot has no TLS material) |
+| Deployment `ugwc-dp-<gateway>` | mounts `/etc/praxis` and `/etc/praxis-tls`, runs `praxis -c /etc/praxis/praxis.yaml` |
+
+Inspect and debug:
+
+```bash
+kubectl get configmap,secret -n <ns> \
+  -l gateway.ugwc.io/managed=ugwc-per-gateway
+kubectl get configmap ugwc-dp-<gateway> -n <ns> \
+  -o jsonpath='{.data.praxis\.yaml}'
+kubectl logs deploy/ugwc-dp-<gateway> -n <ns>
+kubectl get events -n <ns> --field-selector reason=PraxisConfigUnsupported
+```
+
+Behavior and limits:
+
+- The built-in profile pins `ghcr.io/praxis-proxy/praxis:0.7.5`. The native config
+  schema (including `insecure_options.allow_private_endpoints`) is newer than the old
+  `quay.io/aslakknutsen/praxis:latest` build; do not downgrade the image without
+  regenerating/patching the encoder.
+- The ConfigMap is written only when the compile is programmed; a failed compile keeps
+  the last good file, so the proxy keeps serving the previous config.
+- Praxis requires at least one listener. When a Gateway has no routable listener (for
+  example a TLS-passthrough listener with no TLSRoutes yet), the encoder emits a no-op
+  HTTP listener on port `15000` so the proxy starts and becomes Ready. No Gateway
+  listener is bound to that port.
+- The encoder sets `admin.metrics_address` to `0.0.0.0:15021`, matching the Deployment
+  probes (`/healthy`, `/ready`) and metrics scraping; the `PRAXIS_ADMIN_ADDR`
+  environment variable is not read by Praxis.
+- Static config changes (routes, listeners, filters) and TLS material changes update
+  the pod template's `gateway.ugwc.io/config-revision` annotation, which rolls the
+  proxy so they take effect promptly instead of waiting for kubelet ConfigMap/Secret
+  propagation (typically about a minute). The revision deliberately excludes endpoint
+  lists.
+- Endpoint-only changes are hot reloaded from the mounted ConfigMap by the Praxis file
+  watcher; kubelet sync is eventual, typically within a minute.
+- Gateway listeners that share a port are merged into one Praxis listener: their
+  routing tables are combined (effective route hostnames already include the
+  listener-hostname intersection) and TLS-terminating listeners contribute one
+  certificate each, selected by SNI.
+- Weighted `backendRefs` are merged into one Praxis cluster with endpoint weights
+  scaled by the LCM of endpoint counts, preserving the requested aggregate split.
+  Weights are then reduced by their GCD so the round-robin cycle stays short.
+- **Backend mTLS client certificates** are loaded by the cluster TLS config, which has
+  no file watcher. Rotating one updates the Secret and the config revision, so the
+  proxy Deployment rolls; Praxis does not reload these files in place.
+- Route-scoped CORS is emitted as one conditional CORS filter per route match. Because
+  Praxis treats conditions on security filters as a bypass risk, the generated config
+  sets `insecure_options.skip_pipeline_checks.conditional_security: true` whenever a
+  scoped CORS filter is present.
+- Praxis 0.7.5 rejects `allowCredentials` combined with a wildcard origin, method, or
+  header; Gateway API expects the proxy to echo the request origin in that case. The
+  encoder reports `CorsCredentialsWildcard` and disables credentials for that policy
+  instead of emitting a config Praxis refuses to load.
+- `RequestRedirect` with `ReplacePrefixMatch` is reported as `RedirectPathPrefix` and
+  keeps the original path: Praxis 0.7.5's redirect `Location` template only substitutes
+  the whole request path, so a prefix cannot be stripped or replaced. `ReplaceFullPath`
+  redirects work normally.
+- Praxis 0.7.5's redirect filter accepts only 301/302/307/308. A 303 redirect is served
+  by a `static_response` with status 303 and a static `Location`. The location uses the
+  `ReplaceFullPath` value when present, otherwise the matched route path (or `/`); it
+  cannot echo an unspecified request host or a request path suffix. The encoder reports
+  `RedirectStatus303Location` so callers can see the gap.
+- Praxis 0.7.5's upstream connection pool is keyed by address, SNI, client certificate,
+  and verify flags, but not by the trust anchors. If two clusters dial the same address
+  with the same SNI but trust different CAs, they could share a pooled connection and
+  skip verification. The encoder detects that collision and sets `idle_timeout_ms: 1`
+  on the affected clusters so connections are not kept for reuse; those backends pay
+  a new TLS handshake per request.
+- Praxis has no separate `backendRequest` deadline. A rule's `backendRequest` timeout is
+  enforced as the tighter whole-request timeout (with `request` taking the minimum when
+  both are set); a `0s` value disables only that field.
+- Unsupported mappings (for example method/query-parameter matching or conflicting CORS
+  policies) are surfaced as `PraxisConfigUnsupported` events and the
+  `ugwc_praxis_config_unsupported{feature}` metric rather than being silently dropped.
+- To keep xDS for a class, add a profile file entry with `"output": "xds"` and point
+  `UGWC_IMPLEMENTATION_PROFILES_PATH` at it.
 
 ## Local kind observability (optional)
 

@@ -15,6 +15,28 @@ with 0 failures. Most HTTPRoute extended features are implemented and passing.
 Supported features:
 `Gateway,HTTPRoute,ReferenceGrant,TLSRoute,GRPCRoute,ListenerSet,BackendTLSPolicy,HTTPRouteCORS,HTTPRouteCORSAllowCredentialsBehavior,HTTPRouteMethodMatching,HTTPRouteQueryParamMatching,HTTPRouteSchemeRedirect,HTTPRoutePortRedirect,HTTPRouteHostRewrite,HTTPRouteNamedRouteRule,HTTPRoutePathRedirect,HTTPRoute303RedirectStatusCode,HTTPRoute307RedirectStatusCode,HTTPRoute308RedirectStatusCode,HTTPRouteResponseHeaderModification,HTTPRoutePathRewrite,HTTPRouteRequestTimeout,HTTPRouteBackendTimeout,HTTPRouteListenerPortMatching,HTTPRouteParentRefPort`
 
+> **Native configmap output:** the built-in `ugwc.io/default-controller` profile now
+> renders Praxis native YAML instead of xDS. `HTTPRouteQueryParamMatching` and
+> `HTTPRouteMethodMatching` are not representable in the native router (it selects a
+> cluster by path/host/header only), so that backend reports `QueryParamConditions` /
+> `MethodConditions` as unsupported and routes may over-match. `HTTPRouteCORS` is also
+> excluded: Praxis 0.7.5 refuses `allowCredentials` with a wildcard
+> origin/method/header, while Gateway API expects the proxy to echo the request origin.
+> The encoder reports `CorsCredentialsWildcard`, drops credentials, and keeps the rest
+> of the policy. Exclude these features when running conformance against a
+> `praxis_configmap` class until Praxis supports the required matching/credential
+> behavior (tracked in
+> [`todo-gateway-api-inference-parity.md`](todo-gateway-api-inference-parity.md)). The
+> native conformance feature list is:
+> `Gateway,ReferenceGrant,ListenerSet,BackendTLSPolicy,HTTPRoute,TLSRoute,GRPCRoute,HTTPRouteSchemeRedirect,HTTPRoutePortRedirect,HTTPRoute303RedirectStatusCode,HTTPRoute307RedirectStatusCode,HTTPRoute308RedirectStatusCode,HTTPRouteResponseHeaderModification,HTTPRouteHostRewrite,HTTPRoutePathRewrite,HTTPRouteRequestTimeout,HTTPRouteBackendTimeout,HTTPRouteParentRefPort,HTTPRouteNamedRouteRule,HTTPRouteListenerPortMatching`.
+>
+> `HTTPRoutePathRedirect` is excluded because Praxis 0.7.5's redirect filter
+> cannot express `ReplacePrefixMatch`: its `Location` template only substitutes
+> the whole request path. The encoder reports `RedirectPathPrefix` and keeps the
+> original path. `ReplaceFullPath` redirects are supported, but the conformance
+> test exercises both forms, so the feature is omitted until prefix replacement
+> exists upstream.
+
 ---
 
 ## Feature matrix
@@ -55,8 +77,8 @@ Features are grouped by the component that needs work. Status key:
 | RequestRedirect (host + status) | done        | standard (core) |                                              |
 | HTTPRouteSchemeRedirect         | done        | standard        |                                              |
 | HTTPRoutePortRedirect           | done        | standard        |                                              |
-| HTTPRoutePathRedirect           | done        | standard        |                                              |
-| HTTPRoute303RedirectStatusCode  | done        | standard        |                                              |
+| HTTPRoutePathRedirect           | partial     | standard        | `ReplaceFullPath` only; `ReplacePrefixMatch` is reported as `RedirectPathPrefix` |
+| HTTPRoute303RedirectStatusCode  | partial     | standard        | 303 served by `static_response` with a static `Location` from `ReplaceFullPath`/matched path; cannot echo a request-host or path suffix (`RedirectStatus303Location`) |
 | HTTPRoute307RedirectStatusCode  | done        | standard        |                                              |
 | HTTPRoute308RedirectStatusCode  | done        | standard        |                                              |
 | HTTPRouteRedirectPortAndScheme  | not started | standard        | Skipped — requires `GatewayPort8080` feature |
@@ -87,7 +109,7 @@ Features are grouped by the component that needs work. Status key:
 | Feature                 | Status | Channel  | Notes |
 | ----------------------- | ------ | -------- | ----- |
 | HTTPRouteRequestTimeout | done   | standard |       |
-| HTTPRouteBackendTimeout | done   | standard |       |
+| HTTPRouteBackendTimeout | done   | standard | Praxis has no backend-only deadline; enforced as the tighter whole-request timeout |
 
 
 ### Backend protocol

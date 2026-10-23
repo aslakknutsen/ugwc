@@ -1,9 +1,9 @@
 //! Embedded Minijinja YAML for per-gateway Praxis; applied as [`kube::core::DynamicObject`] (SSA).
 
-use kube::api::{Api, Patch, PatchParams};
-use kube::core::{ApiResource, DynamicObject, GroupVersionKind, TypeMeta};
 use kube::Client;
 use kube::ResourceExt;
+use kube::api::{Api, Patch, PatchParams};
+use kube::core::{ApiResource, DynamicObject, GroupVersionKind, TypeMeta};
 use minijinja::Environment;
 use serde::Deserialize;
 use serde::Serialize;
@@ -49,6 +49,8 @@ pub struct PerGatewayTemplateContext<'a> {
     pub config_source: &'a str,
     pub config_map_name: &'a str,
     pub tls_secret_name: &'a str,
+    /// Static config hash; endpoint-only changes are excluded.
+    pub config_revision: &'a str,
     pub container_ports: &'a [NamePort],
     pub service_ports: &'a [NamePort],
     pub infrastructure_labels: &'a [InfraLabelRow],
@@ -154,6 +156,7 @@ mod tests {
             config_source: "xds",
             config_map_name: "ugwc-dp-gw1",
             tls_secret_name: "ugwc-dp-gw1-tls",
+            config_revision: "deadbeef",
             container_ports: &ports,
             service_ports: &ports[1..],
             infrastructure_labels: &[],
@@ -194,14 +197,17 @@ mod tests {
             config_source: "configmap",
             config_map_name: "ugwc-dp-gw1",
             tls_secret_name: "ugwc-dp-gw1-tls",
+            config_revision: "deadbeef",
             container_ports: &ports,
             service_ports: &ports,
             infrastructure_labels: &[],
         };
         let out = render_per_gateway_praxis(&ctx).expect("render");
+        assert!(out.contains("/usr/local/bin/praxis"));
         assert!(out.contains("/etc/praxis/praxis.yaml"));
         assert!(out.contains("configMap:"));
         assert!(out.contains("secretName: ugwc-dp-gw1-tls"));
+        assert!(out.contains("gateway.ugwc.io/config-revision: deadbeef"));
         assert!(!out.contains("ISTIOD_ADDR"));
         let docs = parse_manifest_documents(&out).expect("parse");
         assert_eq!(docs.len(), 5);

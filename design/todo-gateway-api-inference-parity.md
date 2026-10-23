@@ -8,7 +8,7 @@
 
 ## Baseline — what the code does today
 
-Primary crates: `crates/ugwc-k8s` (watches, loader, status), `crates/ugwc-core` (snapshot, compile, IR), `crates/ugwc-gwxds` (proto / encode).
+Primary crates: `crates/ugwc-k8s` (watches, loader, status), `crates/ugwc-core` (snapshot, compile, IR), `crates/ugwc-gwxds` (proto / encode), `crates/ugwc-praxis` (native Praxis YAML encode).
 
 | Layer | Implemented |
 | ----- | ----------- |
@@ -17,6 +17,7 @@ Primary crates: `crates/ugwc-k8s` (watches, loader, status), `crates/ugwc-core` 
 | **Compile / IR** | HTTP + GRPC + TLS + TCP + UDP routes into IR; ReferenceGrant enforcement on cross-namespace parents/backends/secrets and BackendTLS CA/Secret refs where applicable; Backend TLS on **Service** backends and **InferencePool** backends (pool key + route `backendRef.port` / single `targetPorts` default); `BackendTlsIr` includes optional client cert PEM fields |
 | **Status** | Gateway/listeners; HTTPRoute / GRPCRoute / TLSRoute / TCPRoute / UDPRoute parents; ListenerSet; BackendTLSPolicy ancestors (reasons prefer loader outcome fields); InferencePool parents |
 | **xDS** | `gwxds.proto`: GRPC routes, TLS/TCP/UDP route bits, listener `protocol` / `allowed_routes`, `Backend.tls` (CA, hostname, SANs, invalid, **client_cert / client_key** from IR) / `Backend.inference_pool`, EPP Service host/port |
+| **Native config** | `ugwc-praxis` IR → Praxis native YAML; ConfigMap `ugwc-dp-<gateway>` + Secret `ugwc-dp-<gateway>-tls` delivered by `ugwc-k8s`. Built-in default for `ugwc.io/default-controller`; `xds` remains selectable per controller name. |
 
 **Explicitly not implemented:** `InferenceObjective` (and related `inference.networking.x-k8s.io` CRDs), BackendTLS `targetRefs` kinds beyond **core Service** and **`InferencePool`** (same-namespace policy/target as coded), forwarding **`spec.options`** to the dataplane, request mirroring filters, backend request header modification, backend protocol negotiation (H2C/WebSocket).
 
@@ -87,6 +88,16 @@ Use this as the “done” ledger; keep **Remaining work** for gaps only.
 - [ ] **HTTPRoute backend protocols** — `HTTPRouteBackendProtocolH2C`, `HTTPRouteBackendProtocolWebSocket` (standard, 2 tests). Praxis upstream connection changes.
 - [ ] **GRPCRouteNamedRouteRule** — standard extended feature, 1 test. Named rule support for GRPCRoute (HTTPRoute equivalent already passes).
 - [ ] **TLS listener modes** — `TLSRouteModeTerminate` (standard extended, 4 tests). TLS terminate mode in passthrough listeners.
+
+### Praxis native config output
+
+- [ ] **Output-backend delivery status** — return an `OutputOutcome` (delivered / failed / unsupported) from the publish/provision step and feed it into Gateway status (e.g. `Programmed=False` with an output-specific reason). Today only Events (`PraxisConfigFailed`, `PraxisConfigUnsupported`) and metrics reflect it.
+- [ ] **Query-param and method matching on native config** — the Praxis router selects a cluster by path/host/header only and request conditions have no query matcher; routes over-match and emit `QueryParamConditions` / `MethodConditions`. Needs a Praxis feature or a pre-router filter.
+- [ ] **CORS credentials with wildcards on native config** — Praxis 0.7.5 rejects `allowCredentials` with a wildcard origin, method, or header; Gateway API expects the proxy to echo the request origin. The encoder reports `CorsCredentialsWildcard` and drops credentials. Route-scoped CORS with explicit values is supported via conditional filters.
+- [ ] **InferencePool/EPP on native config** — encoder reports `InferencePool` unsupported; remains xDS-only.
+- [ ] **UDPRoute on native config** — Praxis listeners support HTTP/TCP only.
+- [x] **Weighted multi-service splits on native config** — compatible backends merge into one cluster with endpoint weights scaled by the LCM of endpoint counts (then reduced by their GCD). Backends with different TLS policies are reported and only the first is used.
+- [ ] **Live cert reload** — Praxis does not watch cluster TLS files, and disables hot reload for multi-certificate listeners. The config revision includes TLS material, so rotation rolls the pod; true in-place reload needs Praxis support.
 
 ### Controller hygiene (verify or improve)
 

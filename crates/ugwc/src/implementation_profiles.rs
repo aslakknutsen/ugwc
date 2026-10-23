@@ -11,17 +11,22 @@ use serde::{Deserialize, Serialize};
 /// `GatewayClass.spec.controllerName` for the built-in per-gateway profile (see `hack/setup.sh` / `hack/conformance_defaults.sh`).
 pub const BUILTIN_DEFAULT_CONTROLLER_NAME: &str = "ugwc.io/default-controller";
 
-/// Default Praxis image for the built-in per-gateway profile (matches Istio `gwxds.yaml`).
-pub const BUILTIN_PRAXIS_PROXY_IMAGE: &str = "quay.io/aslakknutsen/praxis:latest";
+/// Default Praxis image for the built-in per-gateway profile.
+///
+/// Pinned: the native encoder relies on schema added after the old
+/// `quay.io/aslakknutsen/praxis:latest` build (notably
+/// `insecure_options.allow_private_endpoints` and
+/// `insecure_options.allow_private_upstreams`).
+pub const BUILTIN_PRAXIS_PROXY_IMAGE: &str = "ghcr.io/praxis-proxy/praxis:0.7.5";
 
-/// Built-in POC profile: per-gateway Praxis, scoped xDS (`one_gateway`), default image.
+/// Built-in POC profile: per-gateway Praxis, native config via ConfigMap/Secret, default image.
 #[must_use]
 pub fn builtin_profiles() -> HashMap<String, ImplementationProfile> {
     HashMap::from([(
         BUILTIN_DEFAULT_CONTROLLER_NAME.to_string(),
         ImplementationProfile {
             data_plane: DataPlaneKind::PerGatewayPraxis,
-            output: OutputKind::Xds,
+            output: OutputKind::PraxisConfigmap,
             subscription_default: SubscriptionScope::OneGateway,
             proxy_image: Some(BUILTIN_PRAXIS_PROXY_IMAGE.to_string()),
         },
@@ -148,11 +153,11 @@ mod tests {
     }
 
     #[test]
-    fn builtin_resolves_per_gateway_praxis_for_gwxds_controller() {
+    fn builtin_resolves_per_gateway_praxis_configmap_for_default_controller() {
         let m = builtin_profiles();
         let p = resolve_for_controller(&m, Some(BUILTIN_DEFAULT_CONTROLLER_NAME));
         assert_eq!(p.data_plane, DataPlaneKind::PerGatewayPraxis);
-        assert_eq!(p.output, OutputKind::Xds);
+        assert_eq!(p.output, OutputKind::PraxisConfigmap);
         assert_eq!(p.subscription_default, SubscriptionScope::OneGateway);
         assert_eq!(p.proxy_image.as_deref(), Some(BUILTIN_PRAXIS_PROXY_IMAGE));
     }

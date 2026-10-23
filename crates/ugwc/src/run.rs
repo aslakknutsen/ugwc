@@ -164,6 +164,37 @@ pub async fn run(cfg: Config) -> Result<(), Box<dyn std::error::Error + Send + S
         let gateway_index = Arc::new(ugwc_k8s::GatewayIndex::new(m.index.clone()));
         let gateway_index_ctrl = gateway_index.clone();
         let reconcile_tx_shutdown = reconcile_tx.clone();
+        // A follower reconciles and patches status but skips dataplane
+        // mutations. Enqueue every known gateway when this replica wins the
+        // lease so provisioning is not lost to the pre-leadership pass.
+        let resync_tx = reconcile_tx.clone();
+        let resync_stores = shared_stores.clone();
+        let mut leader_rx = leader.subscribe();
+        let resync_sd = shutdown.child_token();
+        ugwc_k8s::spawn_with_trace_context(async move {
+            while !resync_sd.is_cancelled() {
+                tokio::select! {
+                    _ = resync_sd.cancelled() => break,
+                    changed = leader_rx.changed() => {
+                        if changed.is_err() {
+                            break;
+                        }
+                        if !*leader_rx.borrow() {
+                            continue;
+                        }
+                        for gw in resync_stores.list_gateways() {
+                            let Some(name) = gw.metadata.name.clone() else {
+                                continue;
+                            };
+                            let ns = gw.metadata.namespace.clone().unwrap_or_default();
+                            if resync_tx.send(ns, name).await.is_err() {
+                                return;
+                            }
+                        }
+                    }
+                }
+            }
+        });
         let kube_task = ugwc_k8s::spawn_with_trace_context(async move {
             let stores_rfn = shared_stores.clone();
             let rfn: ugwc_k8s::ReconcileFn = Arc::new(move |ns: String, name: String| {

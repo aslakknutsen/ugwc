@@ -17,6 +17,19 @@ pub struct PraxisConfig {
     pub filter_chains: Vec<FilterChain>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub insecure_options: Option<InsecureOptions>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub admin: Option<AdminConfig>,
+}
+
+/// Admin / health / metrics listener.
+///
+/// `metrics_address` may bind non-loopback without
+/// `insecure_options.allow_public_admin`; the per-gateway Deployment probes
+/// `/healthy` and `/ready` here.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct AdminConfig {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub metrics_address: Option<String>,
 }
 
 /// Listener transport protocol. Praxis only supports these two.
@@ -55,7 +68,17 @@ pub struct ListenerTls {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct CertKeyPair {
     pub cert_path: String,
+    /// Default certificate for SNI names not covered by `server_names`.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub default: bool,
     pub key_path: String,
+    /// SNI hostnames served by this certificate (multi-cert listeners).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub server_names: Vec<String>,
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
 }
 
 /// Named ordered filter pipeline.
@@ -73,6 +96,7 @@ pub enum Filter {
     Router(RouterFilter),
     LoadBalancer(LoadBalancerFilter),
     Redirect(RedirectFilter),
+    StaticResponse(StaticResponseFilter),
     Headers(HeadersFilter),
     Cors(CorsFilter),
     PathRewrite(PathRewriteFilter),
@@ -117,6 +141,10 @@ impl ConditionMatch {
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct RouterFilter {
     pub routes: Vec<RouterRoute>,
+    /// Gateway API wildcards match any depth (`*.example.com` matches
+    /// `a.b.example.com`); Praxis defaults to single-label only.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub multi_level_subdomain_matching: Option<bool>,
 }
 
 /// One router route. Exactly one of `path`/`path_prefix` is set.
@@ -143,11 +171,38 @@ pub struct LoadBalancerFilter {
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct Cluster {
     pub name: String,
-    pub endpoints: Vec<String>,
+    pub endpoints: Vec<Endpoint>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tls: Option<ClusterTls>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub http: Option<ClusterHttp>,
+    /// Upstream connection idle timeout. Set to a minimal value when an
+    /// upstream TLS connection could be reused across clusters that trust
+    /// different CAs; see `pin_shared_tls_pools`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub idle_timeout_ms: Option<u64>,
+}
+
+/// One upstream endpoint.
+///
+/// Praxis accepts either a bare `host:port` string or a weighted
+/// `{ address, weight }` object. Plain endpoints stay strings so the common
+/// case is readable; weighted backends merge their endpoints into one cluster
+/// and carry a scaled weight per endpoint.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(untagged)]
+pub enum Endpoint {
+    Plain(String),
+    Weighted { address: String, weight: u32 },
+}
+
+impl Endpoint {
+    #[must_use]
+    pub fn address(&self) -> &str {
+        match self {
+            Self::Plain(address) | Self::Weighted { address, .. } => address,
+        }
+    }
 }
 
 /// Upstream TLS (client role); presence enables TLS.
@@ -185,6 +240,21 @@ pub struct RedirectFilter {
     pub location: String,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub allowed_hosts: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub conditions: Vec<Condition>,
+}
+
+/// Fixed response filter.
+///
+/// Used for Gateway API 303 redirects: Praxis 0.7.5's redirect filter does not
+/// accept 303, but `static_response` can return the status directly.
+#[derive(Clone, Debug, Default, PartialEq, Serialize)]
+pub struct StaticResponseFilter {
+    pub status: u16,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub headers: Vec<HeaderPair>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub body: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub conditions: Vec<Condition>,
 }
@@ -277,5 +347,21 @@ pub struct SniRoute {
 /// generated config always allows private endpoints.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 pub struct InsecureOptions {
+    /// Allow HTTP load-balancer clusters to target private Service/pod IPs.
     pub allow_private_endpoints: bool,
+    /// Allow L4 (TCP/TLS passthrough) upstreams to target private IPs.
+    /// Praxis checks this separately from `allow_private_endpoints`.
+    pub allow_private_upstreams: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub skip_pipeline_checks: Option<SkipPipelineChecks>,
+}
+
+/// Pipeline checks relaxed for generated configuration.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+pub struct SkipPipelineChecks {
+    /// Allow request conditions on security filters. Route-scoped CORS needs
+    /// this: requests outside the route's path skip the listener-wide CORS
+    /// filter by design.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub conditional_security: bool,
 }

@@ -7,6 +7,7 @@ pub mod encode;
 pub mod model;
 
 pub use encode::{
-    ConfigFile, EncodeOutput, Unsupported, CONFIG_FILE_NAME, CONFIG_MOUNT_DIR, TLS_MOUNT_DIR,
+    ADMIN_METRICS_ADDRESS, CONFIG_FILE_NAME, CONFIG_MOUNT_DIR, ConfigFile, EncodeOutput,
+    TLS_MOUNT_DIR, Unsupported,
 };
 pub use model::PraxisConfig;

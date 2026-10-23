@@ -28,6 +28,8 @@ prometheus-client.workspace = true
 tower.workspace = true
 zeroize.workspace = true
 opentelemetry = { workspace = true, optional = true }
+sha2.workspace = true
+hex.workspace = true
 
 [features]
 default = []

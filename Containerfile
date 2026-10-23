@@ -24,6 +24,7 @@ COPY crates/ugwc-gwxds/Cargo.toml crates/ugwc-gwxds/Cargo.toml
 COPY crates/ugwc-gwxds/build.rs crates/ugwc-gwxds/build.rs
 COPY crates/ugwc-gwxds/proto crates/ugwc-gwxds/proto
 COPY crates/ugwc-k8s/Cargo.toml crates/ugwc-k8s/Cargo.toml
+COPY crates/ugwc-praxis/Cargo.toml crates/ugwc-praxis/Cargo.toml
 COPY crates/ugwc-xds/Cargo.toml crates/ugwc-xds/Cargo.toml
 COPY crates/metrics-prometheus-client crates/metrics-prometheus-client
 
@@ -33,11 +34,13 @@ ENV UGWC_GIT_COMMIT=${UGWC_GIT_COMMIT}
 RUN mkdir -p crates/ugwc-core/src \
     crates/ugwc-gwxds/src \
     crates/ugwc-k8s/src \
+    crates/ugwc-praxis/src \
     crates/ugwc-xds/src \
     crates/ugwc/src \
     && echo '//! stub' > crates/ugwc-core/src/lib.rs \
     && echo '//! stub' > crates/ugwc-gwxds/src/lib.rs \
     && echo '//! stub' > crates/ugwc-k8s/src/lib.rs \
+    && echo '//! stub' > crates/ugwc-praxis/src/lib.rs \
     && echo '//! stub' > crates/ugwc-xds/src/lib.rs \
     && printf '%s\n' '//! stub' 'fn main() {}' > crates/ugwc/src/main.rs
 
@@ -50,11 +53,12 @@ COPY crates/ugwc-core/src crates/ugwc-core/src
 COPY crates/ugwc-gwxds/src crates/ugwc-gwxds/src
 COPY crates/ugwc-k8s/src crates/ugwc-k8s/src
 COPY crates/ugwc-k8s/templates crates/ugwc-k8s/templates
+COPY crates/ugwc-praxis/src crates/ugwc-praxis/src
 COPY crates/ugwc-xds/src crates/ugwc-xds/src
 COPY crates/ugwc/src crates/ugwc/src
 
 RUN find crates/ugwc-core/src crates/ugwc-gwxds/src \
-    crates/ugwc-k8s/src crates/ugwc-xds/src crates/ugwc/src \
+    crates/ugwc-k8s/src crates/ugwc-praxis/src crates/ugwc-xds/src crates/ugwc/src \
     -name '*.rs' -exec touch {} +
 
 # Copy binary out of cache-mounted target so the next stage can COPY it.
