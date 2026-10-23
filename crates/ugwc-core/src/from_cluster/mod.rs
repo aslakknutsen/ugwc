@@ -23,8 +23,8 @@ use backend_resolve::{
 use conflicts::{
     compute_http_grpc_conflict_losers, compute_tcp_route_conflict_losers,
     compute_tls_route_conflict_losers, compute_udp_route_conflict_losers,
-    hosts_for_grpc_route_on_listener, hosts_for_route_on_listener,
-    hosts_for_tls_route_on_listener, record_listener_conflicts,
+    hosts_for_grpc_route_on_listener, hosts_for_route_on_listener, hosts_for_tls_route_on_listener,
+    record_listener_conflicts,
 };
 use grpc_filters::{extract_grpc_rule_filters, validate_and_convert_grpc_matches};
 use http_filters::{extract_rule_filters, rule_specificity, validate_and_convert_matches};
@@ -399,7 +399,8 @@ pub fn ir_from_cluster(snapshot: &ClusterSnapshot) -> (IrSnapshot, CompileReport
                 continue;
             }
 
-            if filters.redirect.is_none() && backends_ir.is_empty() && !rule.backend_refs.is_empty() {
+            if filters.redirect.is_none() && backends_ir.is_empty() && !rule.backend_refs.is_empty()
+            {
                 report.errors.push(httproute_obj_err(
                     route,
                     format!("Invalid: rule {rule_idx} has no valid backends"),
@@ -436,7 +437,9 @@ pub fn ir_from_cluster(snapshot: &ClusterSnapshot) -> (IrSnapshot, CompileReport
                 let (request_timeout_ms, backend_timeout_ms) = match &rule.timeouts {
                     Some(t) => (
                         t.request.as_deref().and_then(parse_gateway_duration_ms),
-                        t.backend_request.as_deref().and_then(parse_gateway_duration_ms),
+                        t.backend_request
+                            .as_deref()
+                            .and_then(parse_gateway_duration_ms),
                     ),
                     None => (None, None),
                 };
@@ -489,10 +492,7 @@ pub fn ir_from_cluster(snapshot: &ClusterSnapshot) -> (IrSnapshot, CompileReport
 
             let backends_ir = resolve_grpc_route_backends(route, rule, snapshot, &mut report);
 
-            if backends_ir.is_empty()
-                && rule.backend_refs.is_empty()
-                && rule.filters.is_empty()
-            {
+            if backends_ir.is_empty() && rule.backend_refs.is_empty() && rule.filters.is_empty() {
                 continue;
             }
 
@@ -878,4 +878,3 @@ pub fn ir_from_cluster(snapshot: &ClusterSnapshot) -> (IrSnapshot, CompileReport
     };
     (snapshot_out, report)
 }
-

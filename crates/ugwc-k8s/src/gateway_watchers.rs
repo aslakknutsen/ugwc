@@ -14,8 +14,8 @@ use crate::resources::{
 use crate::watch_enqueue::{
     drain_gateway_keys, gateway_key_for_listener_set, gateway_keys_for_backend_tls_policy,
     gateway_keys_for_gateway_class, gateway_keys_for_grpc_route, gateway_keys_for_http_route,
-    gateway_keys_for_inference_pool, gateway_keys_for_reference_grant,
-    gateway_keys_for_tcp_route, gateway_keys_for_tls_route, gateway_keys_for_udp_route,
+    gateway_keys_for_inference_pool, gateway_keys_for_reference_grant, gateway_keys_for_tcp_route,
+    gateway_keys_for_tls_route, gateway_keys_for_udp_route,
 };
 use crate::watch_stream::{self, run_watch_loop, watcher_config, WatchItem};
 
@@ -195,7 +195,8 @@ pub(crate) fn spawn_listener_set_watcher(
                     WatchItem::Applied(l) | WatchItem::Deleted(l) => l,
                 };
                 if matches!(item, WatchItem::Applied(_)) {
-                    if let Err(e) = crate::status::apply_listenerset_spec_only_status(&client, ls).await
+                    if let Err(e) =
+                        crate::status::apply_listenerset_spec_only_status(&client, ls).await
                     {
                         warn!(error = %e, "listenerset spec-only status patch");
                     }

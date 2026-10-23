@@ -386,7 +386,10 @@ fn parent_attaches_to_gateway(
     gw_ns: &str,
     gw_name: &str,
 ) -> bool {
-    let g = parent.group.as_deref().unwrap_or("gateway.networking.k8s.io");
+    let g = parent
+        .group
+        .as_deref()
+        .unwrap_or("gateway.networking.k8s.io");
     let k = parent.kind.as_deref().unwrap_or("Gateway");
     if g != "gateway.networking.k8s.io" || k != "Gateway" {
         return false;

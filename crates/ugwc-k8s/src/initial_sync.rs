@@ -40,8 +40,7 @@ impl InitialSyncGate {
 
     #[must_use]
     pub fn is_ready(&self) -> bool {
-        self.crd_list.load(Ordering::SeqCst)
-            && self.endpointslice_list.load(Ordering::SeqCst)
+        self.crd_list.load(Ordering::SeqCst) && self.endpointslice_list.load(Ordering::SeqCst)
     }
 
     fn try_fire(&self) {

@@ -4,15 +4,15 @@ use std::collections::HashSet;
 
 use gateway_api::{
     experimental::tcproutes::TcpRouteParentRefs, experimental::udproutes::UdpRouteParentRefs,
-    grpcroutes::GrpcRouteParentRefs, httproutes::HttpRouteParentRefs, listenersets::ListenerSetParentRef,
-    tlsroutes::TlsRouteParentRefs,
+    grpcroutes::GrpcRouteParentRefs, httproutes::HttpRouteParentRefs,
+    listenersets::ListenerSetParentRef, tlsroutes::TlsRouteParentRefs,
 };
-use kube::{Api, Client, ResourceExt};
 use kube::api::ListParams;
+use kube::{Api, Client, ResourceExt};
 
 use crate::resources::{
-    backend_tls_policy_targets_inference_pool, backend_tls_policy_targets_service, BackendTLSPolicy,
-    GRPCRoute, HTTPRoute, ListenerSet, TCPRoute, TLSRoute, UDPRoute,
+    backend_tls_policy_targets_inference_pool, backend_tls_policy_targets_service,
+    BackendTLSPolicy, GRPCRoute, HTTPRoute, ListenerSet, TCPRoute, TLSRoute, UDPRoute,
 };
 
 /// Common accessors for Gateway API route `parentRefs` entries and [`ListenerSetParentRef`].
@@ -403,8 +403,7 @@ pub(crate) fn tls_route_references_backend_tls_policy_target(
                 return true;
             }
         }
-        for (pns, pname) in
-            crate::resources::collect_tls_route_rule_inference_pool_refs(rns, rule)
+        for (pns, pname) in crate::resources::collect_tls_route_rule_inference_pool_refs(rns, rule)
         {
             if backend_tls_policy_targets_inference_pool(&pol.spec, pol_ns, &pns, &pname) {
                 return true;
@@ -426,8 +425,7 @@ pub(crate) fn tcp_route_references_backend_tls_policy_target(
                 return true;
             }
         }
-        for (pns, pname) in
-            crate::resources::collect_tcp_route_rule_inference_pool_refs(rns, rule)
+        for (pns, pname) in crate::resources::collect_tcp_route_rule_inference_pool_refs(rns, rule)
         {
             if backend_tls_policy_targets_inference_pool(&pol.spec, pol_ns, &pns, &pname) {
                 return true;
@@ -449,8 +447,7 @@ pub(crate) fn udp_route_references_backend_tls_policy_target(
                 return true;
             }
         }
-        for (pns, pname) in
-            crate::resources::collect_udp_route_rule_inference_pool_refs(rns, rule)
+        for (pns, pname) in crate::resources::collect_udp_route_rule_inference_pool_refs(rns, rule)
         {
             if backend_tls_policy_targets_inference_pool(&pol.spec, pol_ns, &pns, &pname) {
                 return true;

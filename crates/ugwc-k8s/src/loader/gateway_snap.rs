@@ -6,8 +6,8 @@ use ugwc_core::snapshot::{
 use crate::resources::{
     GatewayListeners, GatewayListenersAllowedRoutes, GatewayListenersAllowedRoutesKinds,
     GatewayListenersAllowedRoutesNamespaces, GatewayListenersTls,
-    GatewayListenersTlsCertificateRefs, GatewayListenersTlsMode,
-    ListenerSetListeners, ListenerSetListenersAllowedRoutes, ListenerSetListenersAllowedRoutesKinds,
+    GatewayListenersTlsCertificateRefs, GatewayListenersTlsMode, ListenerSetListeners,
+    ListenerSetListenersAllowedRoutes, ListenerSetListenersAllowedRoutesKinds,
     ListenerSetListenersAllowedRoutesNamespaces, ListenerSetListenersTls,
     ListenerSetListenersTlsCertificateRefs, ListenerSetListenersTlsMode,
 };
@@ -29,16 +29,21 @@ pub(super) fn gateway_allowed_routes_namespaces_snap(
 
 pub(super) fn gateway_allowed_routes_snap(ar: &GatewayListenersAllowedRoutes) -> AllowedRoutesSnap {
     AllowedRoutesSnap {
-        namespaces: ar.namespaces.as_ref().map(gateway_allowed_routes_namespaces_snap),
+        namespaces: ar
+            .namespaces
+            .as_ref()
+            .map(gateway_allowed_routes_namespaces_snap),
         kinds: ar
             .kinds
             .as_deref()
             .unwrap_or_default()
             .iter()
-            .map(|k: &GatewayListenersAllowedRoutesKinds| RouteGroupKindSnap {
-                group: k.group.clone(),
-                kind: k.kind.clone(),
-            })
+            .map(
+                |k: &GatewayListenersAllowedRoutesKinds| RouteGroupKindSnap {
+                    group: k.group.clone(),
+                    kind: k.kind.clone(),
+                },
+            )
             .collect(),
     }
 }
@@ -56,7 +61,9 @@ pub(super) fn listenerset_allowed_routes_namespaces_snap(
     }
 }
 
-pub(super) fn listenerset_allowed_routes_snap(ar: &ListenerSetListenersAllowedRoutes) -> AllowedRoutesSnap {
+pub(super) fn listenerset_allowed_routes_snap(
+    ar: &ListenerSetListenersAllowedRoutes,
+) -> AllowedRoutesSnap {
     AllowedRoutesSnap {
         namespaces: ar
             .namespaces
@@ -67,10 +74,12 @@ pub(super) fn listenerset_allowed_routes_snap(ar: &ListenerSetListenersAllowedRo
             .as_deref()
             .unwrap_or_default()
             .iter()
-            .map(|k: &ListenerSetListenersAllowedRoutesKinds| RouteGroupKindSnap {
-                group: k.group.clone(),
-                kind: k.kind.clone(),
-            })
+            .map(
+                |k: &ListenerSetListenersAllowedRoutesKinds| RouteGroupKindSnap {
+                    group: k.group.clone(),
+                    kind: k.kind.clone(),
+                },
+            )
             .collect(),
     }
 }
@@ -100,7 +109,10 @@ pub(super) fn listenerset_listener_to_snap(l: &ListenerSetListeners) -> GatewayL
             l.protocol.clone()
         },
         hostname: l.hostname.clone(),
-        allowed_routes: l.allowed_routes.as_ref().map(listenerset_allowed_routes_snap),
+        allowed_routes: l
+            .allowed_routes
+            .as_ref()
+            .map(listenerset_allowed_routes_snap),
         tls: l.tls.as_ref().map(listener_tls_listenerset_to_snap),
     }
 }

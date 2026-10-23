@@ -749,7 +749,11 @@ pub(crate) fn intersect_route_listener_hosts(
             }
         }
     }
-    if out.is_empty() { None } else { Some(out) }
+    if out.is_empty() {
+        None
+    } else {
+        Some(out)
+    }
 }
 
 #[must_use]

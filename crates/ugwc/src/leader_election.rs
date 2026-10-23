@@ -82,11 +82,7 @@ async fn release_lease(api: &Api<Lease>, identity: &str) {
     spec.holder_identity = None;
     spec.renew_time = None;
     if let Err(e) = api
-        .patch(
-            LEASE_NAME,
-            &PatchParams::default(),
-            &Patch::Merge(&lease),
-        )
+        .patch(LEASE_NAME, &PatchParams::default(), &Patch::Merge(&lease))
         .await
     {
         warn!(error = %e, "release leader lease");

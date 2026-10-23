@@ -17,22 +17,18 @@ use kube::ResourceExt;
 use tracing::warn;
 use ugwc_core::listener_merge::merge_effective_listeners;
 use ugwc_core::snapshot::{
-    AllowedListenersSnap, ClusterSnapshot,
-    EndpointPortSnap, EndpointSliceSnap,
-    EndpointSnap, EndpointPickerRefSnap, GatewayAddressSnap, GatewayClassSnap,
-    GatewayInfrastructureSnap, GatewayListenerSnap,
-    InferencePoolPortSnap,
-    InferencePoolSelectorSnap, InferencePoolSnap, ListenerNamespacesSnap,
-    ListenerSetSnap, RejectedListenerSetSnap,
-    ReferenceGrantFromSnap, ReferenceGrantSnap, ReferenceGrantToSnap,
+    AllowedListenersSnap, ClusterSnapshot, EndpointPickerRefSnap, EndpointPortSnap,
+    EndpointSliceSnap, EndpointSnap, GatewayAddressSnap, GatewayClassSnap,
+    GatewayInfrastructureSnap, GatewayListenerSnap, InferencePoolPortSnap,
+    InferencePoolSelectorSnap, InferencePoolSnap, ListenerNamespacesSnap, ListenerSetSnap,
+    ReferenceGrantFromSnap, ReferenceGrantSnap, ReferenceGrantToSnap, RejectedListenerSetSnap,
     ServicePortSnap, ServiceSnap,
 };
 
 use crate::crd_supervisor::{ActiveCrds, ManagedCrd};
 use crate::resources::{
-    Gateway, GatewayAllowedListenersNamespacesFrom,
-    InferencePool, ListenerSet,
-    ReferenceGrant, ReferenceGrantFrom, ReferenceGrantTo,
+    Gateway, GatewayAllowedListenersNamespacesFrom, InferencePool, ListenerSet, ReferenceGrant,
+    ReferenceGrantFrom, ReferenceGrantTo,
 };
 use crate::stores::SharedStores;
 
@@ -43,8 +39,7 @@ use route_relevance::{
     tls_route_relevant_to_gateway, udp_route_relevant_to_gateway,
 };
 use route_snaps::{
-    grpc_route_to_snap, http_route_to_snap, tcp_route_to_snap, tls_route_to_snap,
-    udp_route_to_snap,
+    grpc_route_to_snap, http_route_to_snap, tcp_route_to_snap, tls_route_to_snap, udp_route_to_snap,
 };
 use tls_resolve::resolve_gateway_listener_tls;
 
@@ -140,10 +135,7 @@ fn listenerset_parents_gateway(ls: &ListenerSet, gw_ns: &str, gw_name: &str) -> 
     pns == gw_ns && p.name == gw_name
 }
 
-fn namespace_labels(
-    stores: &SharedStores,
-    ns: &str,
-) -> BTreeMap<String, String> {
+fn namespace_labels(stores: &SharedStores, ns: &str) -> BTreeMap<String, String> {
     stores
         .get_namespace(ns)
         .map(|n| n.metadata.labels.clone().unwrap_or_default())
@@ -236,7 +228,11 @@ fn listenerset_to_snap(ls: &ListenerSet) -> ListenerSetSnap {
     let ns = ls.metadata.namespace.clone().unwrap_or_default();
     let name = ls.metadata.name.clone().unwrap_or_default();
     let uid = ls.metadata.uid.clone().unwrap_or_default();
-    let creation_timestamp_rfc3339 = ls.metadata.creation_timestamp.as_ref().map(|t| t.0.to_string());
+    let creation_timestamp_rfc3339 = ls
+        .metadata
+        .creation_timestamp
+        .as_ref()
+        .map(|t| t.0.to_string());
     let parent_refs = vec![listenerset_parent_ref_to_snap(&ls.spec.parent_ref)];
     let mut seen_names = HashSet::new();
     let listeners = ls
@@ -351,12 +347,7 @@ pub fn load_cluster_snapshot(
 
     if crd_active(active_crds, ManagedCrd::GrpcRoute) {
         for item in stores.list_grpc_routes() {
-            if !grpc_route_relevant_to_gateway(
-                &item,
-                gateway_ns,
-                gateway_name,
-                &attached_ls_keys,
-            ) {
+            if !grpc_route_relevant_to_gateway(&item, gateway_ns, gateway_name, &attached_ls_keys) {
                 continue;
             }
             let rns = item.metadata.namespace.clone().unwrap_or_default();
@@ -383,12 +374,7 @@ pub fn load_cluster_snapshot(
 
     if crd_active(active_crds, ManagedCrd::TlsRoute) {
         for item in stores.list_tls_routes() {
-            if !tls_route_relevant_to_gateway(
-                &item,
-                gateway_ns,
-                gateway_name,
-                &attached_ls_keys,
-            ) {
+            if !tls_route_relevant_to_gateway(&item, gateway_ns, gateway_name, &attached_ls_keys) {
                 continue;
             }
             let rns = item.metadata.namespace.clone().unwrap_or_default();
@@ -415,12 +401,7 @@ pub fn load_cluster_snapshot(
 
     if crd_active(active_crds, ManagedCrd::TcpRoute) {
         for item in stores.list_tcp_routes() {
-            if !tcp_route_relevant_to_gateway(
-                &item,
-                gateway_ns,
-                gateway_name,
-                &attached_ls_keys,
-            ) {
+            if !tcp_route_relevant_to_gateway(&item, gateway_ns, gateway_name, &attached_ls_keys) {
                 continue;
             }
             let rns = item.metadata.namespace.clone().unwrap_or_default();
@@ -447,12 +428,7 @@ pub fn load_cluster_snapshot(
 
     if crd_active(active_crds, ManagedCrd::UdpRoute) {
         for item in stores.list_udp_routes() {
-            if !udp_route_relevant_to_gateway(
-                &item,
-                gateway_ns,
-                gateway_name,
-                &attached_ls_keys,
-            ) {
+            if !udp_route_relevant_to_gateway(&item, gateway_ns, gateway_name, &attached_ls_keys) {
                 continue;
             }
             let rns = item.metadata.namespace.clone().unwrap_or_default();

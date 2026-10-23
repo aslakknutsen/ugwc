@@ -7,7 +7,8 @@ use kube::ResourceExt;
 use crate::resources::{BackendTLSPolicy, GRPCRoute, HTTPRoute, TCPRoute, TLSRoute, UDPRoute};
 use crate::stores::SharedStores;
 use crate::watch_helpers::{
-    grpc_route_references_backend_tls_policy_target, http_route_references_backend_tls_policy_target,
+    grpc_route_references_backend_tls_policy_target,
+    http_route_references_backend_tls_policy_target,
     tcp_route_references_backend_tls_policy_target, tls_route_references_backend_tls_policy_target,
     udp_route_references_backend_tls_policy_target,
 };

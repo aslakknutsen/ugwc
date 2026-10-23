@@ -1,31 +1,30 @@
 //! Gateway status writers — shapes align with Gateway API v1 helpers
 //! (`GatewayMustHaveLatestConditions`, listener condition checks).
 
-mod gateway_helpers;
-mod route_status;
-mod listenerset_status;
 mod backend_tls_status;
+mod gateway_helpers;
 mod inference_status;
+mod listenerset_status;
 mod parallel;
+mod route_status;
 
 pub use parallel::run_bounded;
 
-pub use route_status::{
-    apply_http_route_merged_parent_status, apply_grpc_route_merged_parent_status,
-    apply_tls_route_merged_parent_status, apply_tcp_route_merged_parent_status,
-    apply_udp_route_merged_parent_status,
-    HttpRouteMergedParentStatusArgs, GrpcRouteMergedParentStatusArgs,
-    TlsRouteMergedParentStatusArgs, TcpRouteMergedParentStatusArgs,
-    UdpRouteMergedParentStatusArgs,
-};
-pub use listenerset_status::{
-    apply_listenerset_reconciled_status, apply_listenerset_rejected_status,
-    apply_listenerset_spec_only_status,
-};
 pub use backend_tls_status::{
     apply_backend_tls_policies_for_gateway, apply_backend_tls_status_for_ca_ref_change,
 };
 pub use inference_status::apply_inference_pools_for_gateway;
+pub use listenerset_status::{
+    apply_listenerset_reconciled_status, apply_listenerset_rejected_status,
+    apply_listenerset_spec_only_status,
+};
+pub use route_status::{
+    apply_grpc_route_merged_parent_status, apply_http_route_merged_parent_status,
+    apply_tcp_route_merged_parent_status, apply_tls_route_merged_parent_status,
+    apply_udp_route_merged_parent_status, GrpcRouteMergedParentStatusArgs,
+    HttpRouteMergedParentStatusArgs, TcpRouteMergedParentStatusArgs,
+    TlsRouteMergedParentStatusArgs, UdpRouteMergedParentStatusArgs,
+};
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -35,9 +34,9 @@ use kube::{Api, Client};
 use serde::Serialize;
 
 use crate::resources::{
-    GatewayListeners, GatewayListenersTlsMode, GatewayClass, Gateway,
-    GrpcRouteParentRefs, HttpRouteParentRefs, ListenerSetListeners,
-    TcpRouteParentRefs, TlsRouteParentRefs, UdpRouteParentRefs,
+    Gateway, GatewayClass, GatewayListeners, GatewayListenersTlsMode, GrpcRouteParentRefs,
+    HttpRouteParentRefs, ListenerSetListeners, TcpRouteParentRefs, TlsRouteParentRefs,
+    UdpRouteParentRefs,
 };
 use ugwc_core::snapshot::{ParentRefSnap, RouteGroupKindSnap};
 
@@ -128,7 +127,9 @@ impl ListenerAllowedRouteKinds for ListenerSetListeners {
 }
 
 fn status_rows_to_json<T: Serialize>(rows: &[T]) -> Vec<serde_json::Value> {
-    rows.iter().filter_map(|r| serde_json::to_value(r).ok()).collect()
+    rows.iter()
+        .filter_map(|r| serde_json::to_value(r).ok())
+        .collect()
 }
 
 fn supported_kinds_json(
@@ -175,8 +176,7 @@ pub async fn apply_gateway_reconciled_status(
     let gw_ns = gateway.metadata.namespace.as_deref().unwrap_or("");
     let gen = gateway_generation_for_status(api, name, gw_ns).await?;
     let addresses = fetch_gateway_status_addresses_json(client, gw_ns, name).await;
-    let programmed_ok =
-        !outcome.report.has_blocking_errors() && !outcome.snapshot.meta.has_errors;
+    let programmed_ok = !outcome.report.has_blocking_errors() && !outcome.snapshot.meta.has_errors;
     let compile_err_detail: String = outcome
         .report
         .errors
@@ -213,7 +213,8 @@ pub async fn apply_gateway_reconciled_status(
             .unwrap_or(false)
     };
 
-    let (gw_acc_status, gw_acc_reason, gw_acc_msg) = ("True", "Accepted", "ugwc reconciled gateway");
+    let (gw_acc_status, gw_acc_reason, gw_acc_msg) =
+        ("True", "Accepted", "ugwc reconciled gateway");
 
     let listener_status: Vec<serde_json::Value> = listener_names
         .iter()
@@ -259,11 +260,7 @@ pub async fn apply_gateway_reconciled_status(
             };
 
             let (prog_status, prog_reason, prog_msg) = if programmed_ok && !conflicted {
-                (
-                    "True",
-                    "Programmed",
-                    "ugwc compile outcome".to_string(),
-                )
+                ("True", "Programmed", "ugwc compile outcome".to_string())
             } else if conflicted {
                 let cr = eff
                     .and_then(|e| e.conflict_reason.as_deref())
@@ -302,7 +299,8 @@ pub async fn apply_gateway_reconciled_status(
                 .unwrap_or(false);
             let mut cert_broken = gateway_listener_https_cert_unresolved(cluster, lname)
                 || spec_tls_obviously_invalid;
-            if is_https && gateway_compile_reports_invalid_certificate_ref(&outcome.report, gw_ns, name)
+            if is_https
+                && gateway_compile_reports_invalid_certificate_ref(&outcome.report, gw_ns, name)
             {
                 cert_broken = true;
             }
@@ -396,8 +394,7 @@ pub async fn apply_gateway_reconciled_status(
             compile_err_detail
         )
     };
-    let (gw_prog_status, gw_prog_reason, gw_prog_msg) =
-        ("True", "Programmed", gw_prog_msg);
+    let (gw_prog_status, gw_prog_reason, gw_prog_msg) = ("True", "Programmed", gw_prog_msg);
 
     let attached_ls = cluster
         .map(|c| {
@@ -530,11 +527,7 @@ pub async fn patch_gateway_programmed_false(
     reason: &str,
 ) -> Result<(), kube::Error> {
     let gw = api.get(name).await?;
-    let gen = gw
-        .metadata
-        .generation
-        .filter(|&g| g > 0)
-        .unwrap_or(1);
+    let gen = gw.metadata.generation.filter(|&g| g > 0).unwrap_or(1);
     let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
     let status = serde_json::json!({
         "status": {

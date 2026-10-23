@@ -1,8 +1,8 @@
 //! Admin HTTP (`/healthz`, `/readyz`, `/metrics`, `PUT /log-level`).
 
 use std::sync::Arc;
-use std::time::Instant;
 use std::time::Duration;
+use std::time::Instant;
 
 use axum::body::Bytes;
 use axum::extract::{Request, State};
@@ -39,10 +39,8 @@ async fn readyz(State(st): State<AdminState>) -> StatusCode {
     }
 }
 
-async fn metrics_prom() -> Result<
-    ([(axum::http::header::HeaderName, &'static str); 1], String),
-    StatusCode,
-> {
+async fn metrics_prom(
+) -> Result<([(axum::http::header::HeaderName, &'static str); 1], String), StatusCode> {
     let body = crate::metrics::render().map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     Ok((
         [(
@@ -71,11 +69,7 @@ async fn put_log_level(body: Bytes) -> StatusCode {
     }
 }
 
-async fn request_metrics(
-    State(st): State<AdminState>,
-    req: Request,
-    next: Next,
-) -> Response {
+async fn request_metrics(State(st): State<AdminState>, req: Request, next: Next) -> Response {
     let method = req.method().as_str().to_string();
     let started = Instant::now();
     let resp = next.run(req).await;

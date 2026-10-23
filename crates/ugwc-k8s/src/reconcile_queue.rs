@@ -167,16 +167,17 @@ impl DedupQueue {
         }
     }
 
-    async fn dequeue(&self, stats: &QueueStats, wq_metrics: &WorkqueueMetrics) -> Option<(String, String, Instant)> {
+    async fn dequeue(
+        &self,
+        stats: &QueueStats,
+        wq_metrics: &WorkqueueMetrics,
+    ) -> Option<(String, String, Instant)> {
         loop {
             let item = {
                 let mut inner = self.inner.lock().expect("dedup queue lock");
                 if let Some(key) = inner.pending.pop_front() {
                     inner.pending_set.remove(&key);
-                    let enqueued_at = inner
-                        .enqueued_at
-                        .remove(&key)
-                        .unwrap_or_else(Instant::now);
+                    let enqueued_at = inner.enqueued_at.remove(&key).unwrap_or_else(Instant::now);
                     inner.in_flight.insert(key.clone());
                     inner.dirty.remove(&key);
                     Some((key.ns, key.name, enqueued_at))
@@ -207,11 +208,7 @@ impl DedupQueue {
         let key = QueueKey::new(ns.to_string(), name.to_string());
         let mut inner = self.inner.lock().expect("dedup queue lock");
         if !inner.in_flight.remove(&key) {
-            debug_assert!(
-                false,
-                "done called for key not in flight: {}/{}",
-                ns, name
-            );
+            debug_assert!(false, "done called for key not in flight: {}/{}", ns, name);
             return;
         }
         let was_dirty = inner.dirty.remove(&key);
@@ -240,9 +237,7 @@ impl DedupQueue {
 }
 
 fn sync_depth(stats: &QueueStats, inner: &DedupInner) {
-    stats
-        .depth
-        .store(inner.pending.len(), Ordering::Relaxed);
+    stats.depth.store(inner.pending.len(), Ordering::Relaxed);
 }
 
 #[derive(Debug)]
@@ -312,11 +307,7 @@ impl ReconcileSender {
             return Err(());
         }
         self.queue
-            .enqueue(
-                QueueKey::new(ns, name),
-                &self.wq_metrics,
-                &self.stats,
-            )
+            .enqueue(QueueKey::new(ns, name), &self.wq_metrics, &self.stats)
             .await
     }
 
@@ -367,7 +358,8 @@ impl ReconcileQueueMetrics {
             .lock()
             .expect("in_flight_started lock")
             .push(started);
-        self.stats.publish_gauges(&self.wq_metrics, GATEWAY_RECONCILE_QUEUE);
+        self.stats
+            .publish_gauges(&self.wq_metrics, GATEWAY_RECONCILE_QUEUE);
         started
     }
 
@@ -380,28 +372,21 @@ impl ReconcileQueueMetrics {
             }
         }
         loop {
-            let prev = self
-                .stats
-                .longest_running_millis
-                .load(Ordering::Relaxed);
+            let prev = self.stats.longest_running_millis.load(Ordering::Relaxed);
             if elapsed_ms <= prev {
                 break;
             }
             if self
                 .stats
                 .longest_running_millis
-                .compare_exchange_weak(
-                    prev,
-                    elapsed_ms,
-                    Ordering::Relaxed,
-                    Ordering::Relaxed,
-                )
+                .compare_exchange_weak(prev, elapsed_ms, Ordering::Relaxed, Ordering::Relaxed)
                 .is_ok()
             {
                 break;
             }
         }
-        self.stats.publish_gauges(&self.wq_metrics, GATEWAY_RECONCILE_QUEUE);
+        self.stats
+            .publish_gauges(&self.wq_metrics, GATEWAY_RECONCILE_QUEUE);
     }
 }
 
@@ -442,10 +427,10 @@ pub fn new_reconcile_queue(
 
 impl ReconcileQueue {
     pub async fn recv(&self) -> Option<(String, String)> {
-        let (ns, name, enqueued_at) =
-            self.queue
-                .dequeue(&self.metrics.stats, &self.metrics.wq_metrics)
-                .await?;
+        let (ns, name, enqueued_at) = self
+            .queue
+            .dequeue(&self.metrics.stats, &self.metrics.wq_metrics)
+            .await?;
         let wait = enqueued_at.elapsed().as_secs_f64();
         let labels = QueueNameLabels {
             queue_name: GATEWAY_RECONCILE_QUEUE.to_string(),
@@ -513,17 +498,11 @@ mod tests {
         let (tx, queue, metrics) = new_reconcile_queue(8, wq);
         assert_eq!(metrics.in_flight(), 0);
         tx.send("ns".into(), "gw".into()).await.unwrap();
-        assert_eq!(
-            queue.metrics.stats.depth.load(Ordering::Relaxed),
-            1
-        );
+        assert_eq!(queue.metrics.stats.depth.load(Ordering::Relaxed), 1);
         let pair = queue.recv().await;
         assert_eq!(pair, Some(("ns".into(), "gw".into())));
         queue.done("ns", "gw");
-        assert_eq!(
-            queue.metrics.stats.depth.load(Ordering::Relaxed),
-            0
-        );
+        assert_eq!(queue.metrics.stats.depth.load(Ordering::Relaxed), 0);
     }
 
     #[tokio::test]
@@ -621,10 +600,7 @@ mod tests {
         );
         assert_eq!(queue.recv().await, Some(("ns".into(), "gw".into())));
         queue.done("ns", "gw");
-        assert_eq!(
-            queue.metrics.stats.depth.load(Ordering::Relaxed),
-            0
-        );
+        assert_eq!(queue.metrics.stats.depth.load(Ordering::Relaxed), 0);
     }
 
     #[tokio::test]
@@ -658,9 +634,7 @@ mod tests {
         tx.send("ns".into(), "a".into()).await.unwrap();
         tx.send("ns".into(), "b".into()).await.unwrap();
         let tx_bg = tx.clone();
-        let blocked = tokio::spawn(async move {
-            tx_bg.send("ns".into(), "c".into()).await
-        });
+        let blocked = tokio::spawn(async move { tx_bg.send("ns".into(), "c".into()).await });
         tokio::task::yield_now().await;
         assert!(
             !blocked.is_finished(),
@@ -760,11 +734,7 @@ mod tests {
         assert_eq!(k1, Some(("ns".into(), "gw".into())));
         let started = queue.begin_reconcile();
 
-        let blocked = tokio::time::timeout(
-            std::time::Duration::from_millis(50),
-            second,
-        )
-        .await;
+        let blocked = tokio::time::timeout(std::time::Duration::from_millis(50), second).await;
         assert!(
             blocked.is_err(),
             "second worker must block until key is done"

@@ -176,10 +176,7 @@ mod tests {
         m.store_scoped(IrSnapshot::empty_for_scope(IrScopeId::new("ns", "gw")));
         assert_eq!(m.resolve_for_discovery(Some("ns/gw")).scope.0, "ns/gw");
         assert!(m.remove_scoped(&IrScopeId::new("ns", "gw")));
-        assert_eq!(
-            m.resolve_for_discovery(Some("ns/gw")).scope.0,
-            "ns/gw"
-        );
+        assert_eq!(m.resolve_for_discovery(Some("ns/gw")).scope.0, "ns/gw");
     }
 
     #[tokio::test]

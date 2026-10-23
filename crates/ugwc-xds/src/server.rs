@@ -5,15 +5,15 @@ use std::pin::Pin;
 use std::sync::Arc;
 
 use futures::Stream;
-use prost::Message;
 use prometheus_client::encoding::EncodeLabelSet;
 use prometheus_client::metrics::counter::Counter;
 use prometheus_client::metrics::family::Family;
 use prometheus_client::metrics::gauge::Gauge;
 use prometheus_client::metrics::histogram::Histogram;
+use prost::Message;
 use tokio::sync::{mpsc, watch};
 use tokio_stream::wrappers::ReceiverStream;
-use tonic::transport::{Identity, Certificate, Server, ServerTlsConfig};
+use tonic::transport::{Certificate, Identity, Server, ServerTlsConfig};
 use tonic::{Request, Response, Status, Streaming};
 use tracing::{info, warn, Instrument};
 use ugwc_core::IrSnapshot;
@@ -376,12 +376,10 @@ pub async fn serve(
             )
         })?;
 
-        let cert_pem = std::fs::read(cert_path).map_err(|e| {
-            XdsServeError::TlsConfig(format!("read {}: {e}", cert_path.display()))
-        })?;
-        let key_pem = std::fs::read(key_path).map_err(|e| {
-            XdsServeError::TlsConfig(format!("read {}: {e}", key_path.display()))
-        })?;
+        let cert_pem = std::fs::read(cert_path)
+            .map_err(|e| XdsServeError::TlsConfig(format!("read {}: {e}", cert_path.display())))?;
+        let key_pem = std::fs::read(key_path)
+            .map_err(|e| XdsServeError::TlsConfig(format!("read {}: {e}", key_path.display())))?;
 
         let identity = Identity::from_pem(&cert_pem, &key_pem);
         let mut tls_config = ServerTlsConfig::new().identity(identity);

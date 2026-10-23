@@ -1,9 +1,9 @@
 use std::collections::{BTreeMap, HashSet};
 
 use crate::compile::{
-    CompileReport, grpc_route_accepted_condition_for_parent,
-    http_route_accepted_condition_for_parent, tcp_route_accepted_condition_for_parent,
-    tls_route_accepted_condition_for_parent, udp_route_accepted_condition_for_parent,
+    grpc_route_accepted_condition_for_parent, http_route_accepted_condition_for_parent,
+    tcp_route_accepted_condition_for_parent, tls_route_accepted_condition_for_parent,
+    udp_route_accepted_condition_for_parent, CompileReport,
 };
 use crate::http_route_attachment::{
     attachment_keys_for_parent_ref, find_effective_for_key, grpc_attachment_keys_for_parent_ref,
@@ -17,10 +17,11 @@ use crate::snapshot::{
     ClusterSnapshot, GrpcRouteSnap, HttpRouteSnap, TcpRouteSnap, TlsRouteSnap, UdpRouteSnap,
 };
 
-fn bump_listener_route_count(counts: &mut BTreeMap<String, u32>, lk: &crate::ir::ListenerAttachmentIr) {
-    *counts
-        .entry(listener_attachment_count_key(lk))
-        .or_insert(0) += 1;
+fn bump_listener_route_count(
+    counts: &mut BTreeMap<String, u32>,
+    lk: &crate::ir::ListenerAttachmentIr,
+) {
+    *counts.entry(listener_attachment_count_key(lk)).or_insert(0) += 1;
 }
 
 fn http_route_attachment_accepted_for_listener(
@@ -35,9 +36,8 @@ fn http_route_attachment_accepted_for_listener(
         if !keys.iter().any(|k| k == lk) {
             continue;
         }
-        let (st, _, _) = http_route_accepted_condition_for_parent(
-            route, parent, snapshot, attached_ls, report,
-        );
+        let (st, _, _) =
+            http_route_accepted_condition_for_parent(route, parent, snapshot, attached_ls, report);
         if st == "True" {
             return true;
         }
@@ -57,9 +57,8 @@ fn grpc_route_attachment_accepted_for_listener(
         if !keys.iter().any(|k| k == lk) {
             continue;
         }
-        let (st, _, _) = grpc_route_accepted_condition_for_parent(
-            route, parent, snapshot, attached_ls, report,
-        );
+        let (st, _, _) =
+            grpc_route_accepted_condition_for_parent(route, parent, snapshot, attached_ls, report);
         if st == "True" {
             return true;
         }
@@ -79,9 +78,8 @@ fn tls_route_attachment_accepted_for_listener(
         if !keys.iter().any(|k| k == lk) {
             continue;
         }
-        let (st, _, _) = tls_route_accepted_condition_for_parent(
-            route, parent, snapshot, attached_ls, report,
-        );
+        let (st, _, _) =
+            tls_route_accepted_condition_for_parent(route, parent, snapshot, attached_ls, report);
         if st == "True" {
             return true;
         }
@@ -101,9 +99,8 @@ fn tcp_route_attachment_accepted_for_listener(
         if !keys.iter().any(|k| k == lk) {
             continue;
         }
-        let (st, _, _) = tcp_route_accepted_condition_for_parent(
-            route, parent, snapshot, attached_ls, report,
-        );
+        let (st, _, _) =
+            tcp_route_accepted_condition_for_parent(route, parent, snapshot, attached_ls, report);
         if st == "True" {
             return true;
         }
@@ -123,9 +120,8 @@ fn udp_route_attachment_accepted_for_listener(
         if !keys.iter().any(|k| k == lk) {
             continue;
         }
-        let (st, _, _) = udp_route_accepted_condition_for_parent(
-            route, parent, snapshot, attached_ls, report,
-        );
+        let (st, _, _) =
+            udp_route_accepted_condition_for_parent(route, parent, snapshot, attached_ls, report);
         if st == "True" {
             return true;
         }
@@ -156,8 +152,13 @@ pub(super) fn compute_listener_route_attachment_counts(
             if report.http_grpc_conflict_loser_at("HTTPRoute", &route.namespace, &route.name, &lk) {
                 continue;
             }
-            if !http_route_attachment_accepted_for_listener(route, &lk, snapshot, attached_ls, report)
-            {
+            if !http_route_attachment_accepted_for_listener(
+                route,
+                &lk,
+                snapshot,
+                attached_ls,
+                report,
+            ) {
                 continue;
             }
             bump_listener_route_count(&mut counts, &lk);
@@ -177,8 +178,13 @@ pub(super) fn compute_listener_route_attachment_counts(
             if report.http_grpc_conflict_loser_at("GRPCRoute", &route.namespace, &route.name, &lk) {
                 continue;
             }
-            if !grpc_route_attachment_accepted_for_listener(route, &lk, snapshot, attached_ls, report)
-            {
+            if !grpc_route_attachment_accepted_for_listener(
+                route,
+                &lk,
+                snapshot,
+                attached_ls,
+                report,
+            ) {
                 continue;
             }
             bump_listener_route_count(&mut counts, &lk);
@@ -198,8 +204,13 @@ pub(super) fn compute_listener_route_attachment_counts(
             if report.tls_route_conflict_loser_at("TLSRoute", &route.namespace, &route.name, &lk) {
                 continue;
             }
-            if !tls_route_attachment_accepted_for_listener(route, &lk, snapshot, attached_ls, report)
-            {
+            if !tls_route_attachment_accepted_for_listener(
+                route,
+                &lk,
+                snapshot,
+                attached_ls,
+                report,
+            ) {
                 continue;
             }
             bump_listener_route_count(&mut counts, &lk);
@@ -216,8 +227,13 @@ pub(super) fn compute_listener_route_attachment_counts(
             if report.tcp_route_conflict_loser_at("TCPRoute", &route.namespace, &route.name, &lk) {
                 continue;
             }
-            if !tcp_route_attachment_accepted_for_listener(route, &lk, snapshot, attached_ls, report)
-            {
+            if !tcp_route_attachment_accepted_for_listener(
+                route,
+                &lk,
+                snapshot,
+                attached_ls,
+                report,
+            ) {
                 continue;
             }
             bump_listener_route_count(&mut counts, &lk);
@@ -234,8 +250,13 @@ pub(super) fn compute_listener_route_attachment_counts(
             if report.udp_route_conflict_loser_at("UDPRoute", &route.namespace, &route.name, &lk) {
                 continue;
             }
-            if !udp_route_attachment_accepted_for_listener(route, &lk, snapshot, attached_ls, report)
-            {
+            if !udp_route_attachment_accepted_for_listener(
+                route,
+                &lk,
+                snapshot,
+                attached_ls,
+                report,
+            ) {
                 continue;
             }
             bump_listener_route_count(&mut counts, &lk);
@@ -243,4 +264,3 @@ pub(super) fn compute_listener_route_attachment_counts(
     }
     counts
 }
-

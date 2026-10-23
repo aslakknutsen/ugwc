@@ -6,11 +6,11 @@ use kube::{Api, Client};
 
 use crate::resources::ListenerSet;
 
-use super::supported_kinds_json;
 use super::gateway_helpers::{
     listener_route_kinds_broken_for_status, listenerset_generation_for_status,
     listenerset_listener_cert_ref_not_permitted,
 };
+use super::supported_kinds_json;
 
 /// Update `ListenerSet` status for listeners merged onto a reconciled Gateway.
 pub async fn apply_listenerset_reconciled_status(
@@ -86,11 +86,7 @@ pub async fn apply_listenerset_reconciled_status(
                 let cr = eff
                     .and_then(|e| e.conflict_reason.as_deref())
                     .unwrap_or("HostnameConflict");
-                (
-                    "False",
-                    cr,
-                    "indistinct listener after merge",
-                )
+                ("False", cr, "indistinct listener after merge")
             } else {
                 ("True", "Accepted", "ugwc reconciled listener entry")
             };

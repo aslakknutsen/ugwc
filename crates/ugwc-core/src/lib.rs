@@ -33,10 +33,10 @@ pub use http_route_attachment::{
     reference_grant_permits_service_ref, route_accepted_for_parent_ref,
 };
 pub use ir::{
-    backend_endpoints_map_key, BackendEndpointIr, BackendIr, BackendTlsIr, IrRevision, IrScopeId,
-    IrSnapshot, ListenerAttachmentIr, ListenerIr, NamedHeaderIr, RequestHeaderModifierIr,
-    CorsFilterIr, RequestRedirectIr, RouteMatchIr, RouteRuleIr, SnapshotMeta, TlsMode, UrlRewriteIr,
-    WeightedBackendIr, IR_VERSION,
+    backend_endpoints_map_key, BackendEndpointIr, BackendIr, BackendTlsIr, CorsFilterIr,
+    IrRevision, IrScopeId, IrSnapshot, ListenerAttachmentIr, ListenerIr, NamedHeaderIr,
+    RequestHeaderModifierIr, RequestRedirectIr, RouteMatchIr, RouteRuleIr, SnapshotMeta, TlsMode,
+    UrlRewriteIr, WeightedBackendIr, IR_VERSION,
 };
 pub use listener_merge::merge_effective_listeners;
 pub use listener_route_kinds::{

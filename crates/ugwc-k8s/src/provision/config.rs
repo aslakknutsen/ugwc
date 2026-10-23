@@ -9,13 +9,13 @@ use std::collections::BTreeMap;
 
 use sha2::{Digest, Sha256};
 
-use k8s_openapi::ByteString;
 use k8s_openapi::api::core::v1::{ConfigMap, Secret};
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::OwnerReference;
-use kube::Client;
+use k8s_openapi::ByteString;
 use kube::api::{Api, Patch, PatchParams};
+use kube::Client;
 
-use super::{ProvisionError, per_gateway_dataplane_name};
+use super::{per_gateway_dataplane_name, ProvisionError};
 use crate::resources::Gateway;
 
 /// ConfigMap name for the per-gateway Praxis document (`ugwc-dp-<gateway>`).

@@ -16,13 +16,11 @@ use kube::{Api, Client, ResourceExt};
 use tracing::{debug, info, instrument, warn};
 
 use crate::crd_supervisor::{run_crd_supervisor, ActiveCrds};
-use crate::initial_sync::InitialSyncGate;
 use crate::gateway_index::GatewayIndex;
+use crate::initial_sync::InitialSyncGate;
 use crate::reconcile_queue::{ReconcileQueue, ReconcileSender};
 use crate::stores::SharedStores;
-use crate::watch_enqueue::{
-    drain_gateway_keys, gateway_key_for_managed_service,
-};
+use crate::watch_enqueue::{drain_gateway_keys, gateway_key_for_managed_service};
 use crate::watch_stream::{self, watcher_config, WatchItem};
 
 pub type ReconcileFuture = Pin<Box<dyn Future<Output = Result<(), String>> + Send>>;
@@ -30,10 +28,7 @@ pub type ReconcileFn = Arc<dyn Fn(String, String) -> ReconcileFuture + Send + Sy
 
 /// Create reflector writers and build [`SharedStores`] from their readers.
 /// Returns the stores (for sharing with `ReconcileFn`) and the writers (for the controller).
-pub fn build_shared_stores() -> (
-    Arc<SharedStores>,
-    AlwaysOnWriters,
-) {
+pub fn build_shared_stores() -> (Arc<SharedStores>, AlwaysOnWriters) {
     let ep_writer = reflector::store::Writer::<EndpointSlice>::default();
     let ep_store = ep_writer.as_reader();
 
@@ -49,7 +44,9 @@ pub fn build_shared_stores() -> (
     let ns_writer = reflector::store::Writer::<Namespace>::default();
     let ns_store = ns_writer.as_reader();
 
-    let stores = Arc::new(SharedStores::new(ep_store, svc_store, sec_store, cm_store, ns_store));
+    let stores = Arc::new(SharedStores::new(
+        ep_store, svc_store, sec_store, cm_store, ns_store,
+    ));
     let writers = AlwaysOnWriters {
         endpoint_slices: ep_writer,
         services: svc_writer,
@@ -71,7 +68,17 @@ pub struct AlwaysOnWriters {
 
 /// Observe gateways (CRD-gated via [`run_crd_supervisor`]), routes, grants, backend TLS policies,
 /// CA ConfigMaps, endpoints, secrets, classes, and inference pools.
-#[instrument(skip(client, shutdown, reconcile, work_queue, reconcile_tx, sync_gate, stores, writers, gateway_index))]
+#[instrument(skip(
+    client,
+    shutdown,
+    reconcile,
+    work_queue,
+    reconcile_tx,
+    sync_gate,
+    stores,
+    writers,
+    gateway_index
+))]
 pub async fn run_gateway_controller(
     client: Client,
     shutdown: tokio_util::sync::CancellationToken,
@@ -107,7 +114,10 @@ pub async fn run_gateway_controller(
     let gate_sup = sync_gate.clone();
     let stores_sup = stores.clone();
     crate::spawn::spawn_with_trace_context(async move {
-        run_crd_supervisor(c_sup, sd_sup, tx_sup, owned_sup, active_sup, gate_sup, stores_sup).await;
+        run_crd_supervisor(
+            c_sup, sd_sup, tx_sup, owned_sup, active_sup, gate_sup, stores_sup,
+        )
+        .await;
     });
 
     // ── EndpointSlice watcher (reflector-backed) ────────────────────────

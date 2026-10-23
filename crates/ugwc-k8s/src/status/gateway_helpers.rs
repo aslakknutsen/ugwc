@@ -1,6 +1,6 @@
 use k8s_openapi::api::core::v1::Service;
-use kube::Client;
 use kube::Api;
+use kube::Client;
 use tracing::warn;
 
 use crate::provision::per_gateway_dataplane_name;
@@ -158,7 +158,11 @@ pub(super) fn listenerset_listener_cert_ref_not_permitted(
             return false;
         }
         !ugwc_core::reference_grant_permits_listener_secret_ref(
-            grants, ls_ns, "ListenerSet", secret_ns, &r.name,
+            grants,
+            ls_ns,
+            "ListenerSet",
+            secret_ns,
+            &r.name,
         )
     })
 }
@@ -201,11 +205,8 @@ pub(super) fn gateway_status_addresses_from_service(svc: &Service) -> Vec<serde_
     // If the dataplane is a LoadBalancer, only publish once an ingress IP exists. Publishing
     // ClusterIP while the LB is pending breaks conformance (host runs `go test` against
     // `Gateway.status.addresses`).
-    let is_load_balancer = svc
-        .spec
-        .as_ref()
-        .and_then(|s| s.type_.as_deref())
-        == Some("LoadBalancer");
+    let is_load_balancer =
+        svc.spec.as_ref().and_then(|s| s.type_.as_deref()) == Some("LoadBalancer");
     if is_load_balancer {
         return Vec::new();
     }

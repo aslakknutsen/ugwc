@@ -61,49 +61,46 @@ mod backend_tls_loader_tests {
             ..Default::default()
         }));
 
-        let mut btp_writer =
-            kube::runtime::reflector::store::Writer::<crate::resources::BackendTLSPolicy>::default();
+        let mut btp_writer = kube::runtime::reflector::store::Writer::<
+            crate::resources::BackendTLSPolicy,
+        >::default();
         let btp_store = btp_writer.as_reader();
-        btp_writer.apply_watcher_event(&Event::Apply(
-            crate::resources::BackendTLSPolicy {
-                metadata: kube::api::ObjectMeta {
-                    name: Some("pol".into()),
-                    namespace: Some("ns".into()),
-                    ..Default::default()
-                },
-                spec: BackendTlsPolicySpec {
-                    target_refs: vec![BackendTlsPolicyTargetRefs {
-                        group: String::new(),
-                        kind: "Service".into(),
-                        name: "svc".into(),
-                        section_name: None,
-                    }],
-                    validation: BackendTlsPolicyValidation {
-                        hostname: "host".into(),
-                        ca_certificate_refs: Some(vec![
-                            BackendTlsPolicyValidationCaCertificateRefs {
-                                group: String::new(),
-                                kind: "ConfigMap".into(),
-                                name: "ca".into(),
-                            },
-                        ]),
-                        ..Default::default()
-                    },
-                    options: None,
-                },
+        btp_writer.apply_watcher_event(&Event::Apply(crate::resources::BackendTLSPolicy {
+            metadata: kube::api::ObjectMeta {
+                name: Some("pol".into()),
+                namespace: Some("ns".into()),
                 ..Default::default()
             },
-        ));
+            spec: BackendTlsPolicySpec {
+                target_refs: vec![BackendTlsPolicyTargetRefs {
+                    group: String::new(),
+                    kind: "Service".into(),
+                    name: "svc".into(),
+                    section_name: None,
+                }],
+                validation: BackendTlsPolicyValidation {
+                    hostname: "host".into(),
+                    ca_certificate_refs: Some(vec![BackendTlsPolicyValidationCaCertificateRefs {
+                        group: String::new(),
+                        kind: "ConfigMap".into(),
+                        name: "ca".into(),
+                    }]),
+                    ..Default::default()
+                },
+                options: None,
+            },
+            ..Default::default()
+        }));
 
         let ep = kube::runtime::reflector::store::Writer::<
             k8s_openapi::api::discovery::v1::EndpointSlice,
         >::default();
-        let svc = kube::runtime::reflector::store::Writer::<
-            k8s_openapi::api::core::v1::Service,
-        >::default();
-        let sec = kube::runtime::reflector::store::Writer::<
-            k8s_openapi::api::core::v1::Secret,
-        >::default();
+        let svc =
+            kube::runtime::reflector::store::Writer::<k8s_openapi::api::core::v1::Service>::default(
+            );
+        let sec =
+            kube::runtime::reflector::store::Writer::<k8s_openapi::api::core::v1::Secret>::default(
+            );
         let ns = kube::runtime::reflector::store::Writer::<
             k8s_openapi::api::core::v1::Namespace,
         >::default();

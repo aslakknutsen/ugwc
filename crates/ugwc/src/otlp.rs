@@ -7,12 +7,12 @@ mod imp {
     use opentelemetry_otlp::WithExportConfig;
     #[cfg(feature = "otlp-metrics")]
     use opentelemetry_sdk::metrics::{PeriodicReader, SdkMeterProvider};
-    #[cfg(feature = "otlp-metrics")]
-    use std::time::Duration;
     use opentelemetry_sdk::propagation::TraceContextPropagator;
     use opentelemetry_sdk::runtime::Tokio;
     use opentelemetry_sdk::trace::TracerProvider;
     use opentelemetry_sdk::Resource;
+    #[cfg(feature = "otlp-metrics")]
+    use std::time::Duration;
     use tracing::warn;
 
     #[cfg(feature = "otlp-metrics")]

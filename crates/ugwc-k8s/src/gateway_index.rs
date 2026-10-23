@@ -43,7 +43,12 @@ impl GatewayIndexMetrics {
     pub fn noop() -> Self {
         Self {
             fanout_size: Family::new_with_constructor(|| {
-                Histogram::new([0.0, 1.0, 2.0, 5.0, 10.0, 25.0, 50.0, 100.0, 250.0, 500.0, 1000.0].into_iter())
+                Histogram::new(
+                    [
+                        0.0, 1.0, 2.0, 5.0, 10.0, 25.0, 50.0, 100.0, 250.0, 500.0, 1000.0,
+                    ]
+                    .into_iter(),
+                )
             }),
             gateways_indexed: Gauge::default(),
         }
@@ -301,12 +306,24 @@ mod tests {
     }
 
     fn empty_stores() -> SharedStores {
-        let ep = kube::runtime::reflector::store::Writer::<k8s_openapi::api::discovery::v1::EndpointSlice>::default();
-        let svc = kube::runtime::reflector::store::Writer::<k8s_openapi::api::core::v1::Service>::default();
-        let sec = kube::runtime::reflector::store::Writer::<k8s_openapi::api::core::v1::Secret>::default();
+        let ep = kube::runtime::reflector::store::Writer::<
+            k8s_openapi::api::discovery::v1::EndpointSlice,
+        >::default();
+        let svc =
+            kube::runtime::reflector::store::Writer::<k8s_openapi::api::core::v1::Service>::default(
+            );
+        let sec =
+            kube::runtime::reflector::store::Writer::<k8s_openapi::api::core::v1::Secret>::default(
+            );
         let cm = kube::runtime::reflector::store::Writer::<k8s_openapi::api::core::v1::ConfigMap>::default();
         let ns = kube::runtime::reflector::store::Writer::<k8s_openapi::api::core::v1::Namespace>::default();
-        SharedStores::new(ep.as_reader(), svc.as_reader(), sec.as_reader(), cm.as_reader(), ns.as_reader())
+        SharedStores::new(
+            ep.as_reader(),
+            svc.as_reader(),
+            sec.as_reader(),
+            cm.as_reader(),
+            ns.as_reader(),
+        )
     }
 
     #[test]
@@ -456,7 +473,9 @@ mod tests {
         };
         let refs = refs_from_snapshot(&empty_stores(), &snap);
         assert!(refs.services.contains(&("ns".into(), "svc".into())));
-        assert!(refs.secrets.contains(&("sec-ns".into(), "tls-secret".into())));
+        assert!(refs
+            .secrets
+            .contains(&("sec-ns".into(), "tls-secret".into())));
     }
 
     #[test]
@@ -500,39 +519,36 @@ mod tests {
             ..Default::default()
         }));
 
-        let mut btp_writer =
-            kube::runtime::reflector::store::Writer::<crate::resources::BackendTLSPolicy>::default();
+        let mut btp_writer = kube::runtime::reflector::store::Writer::<
+            crate::resources::BackendTLSPolicy,
+        >::default();
         let btp_store = btp_writer.as_reader();
-        btp_writer.apply_watcher_event(&Event::Apply(
-            crate::resources::BackendTLSPolicy {
-                metadata: kube::api::ObjectMeta {
-                    name: Some("pol".into()),
-                    namespace: Some("ns".into()),
-                    ..Default::default()
-                },
-                spec: BackendTlsPolicySpec {
-                    target_refs: vec![BackendTlsPolicyTargetRefs {
-                        group: String::new(),
-                        kind: "Service".into(),
-                        name: "svc".into(),
-                        section_name: None,
-                    }],
-                    validation: BackendTlsPolicyValidation {
-                        hostname: "host".into(),
-                        ca_certificate_refs: Some(vec![
-                            BackendTlsPolicyValidationCaCertificateRefs {
-                                group: String::new(),
-                                kind: "ConfigMap".into(),
-                                name: "test-cm".into(),
-                            },
-                        ]),
-                        ..Default::default()
-                    },
-                    options: None,
-                },
+        btp_writer.apply_watcher_event(&Event::Apply(crate::resources::BackendTLSPolicy {
+            metadata: kube::api::ObjectMeta {
+                name: Some("pol".into()),
+                namespace: Some("ns".into()),
                 ..Default::default()
             },
-        ));
+            spec: BackendTlsPolicySpec {
+                target_refs: vec![BackendTlsPolicyTargetRefs {
+                    group: String::new(),
+                    kind: "Service".into(),
+                    name: "svc".into(),
+                    section_name: None,
+                }],
+                validation: BackendTlsPolicyValidation {
+                    hostname: "host".into(),
+                    ca_certificate_refs: Some(vec![BackendTlsPolicyValidationCaCertificateRefs {
+                        group: String::new(),
+                        kind: "ConfigMap".into(),
+                        name: "test-cm".into(),
+                    }]),
+                    ..Default::default()
+                },
+                options: None,
+            },
+            ..Default::default()
+        }));
 
         stores.set_http_route_store(hr_store);
         stores.set_backend_tls_policy_store(btp_store);

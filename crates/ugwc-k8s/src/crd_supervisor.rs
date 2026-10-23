@@ -21,15 +21,15 @@ use tracing::{info, warn};
 /// Live view of which CRDs the supervisor currently considers active.
 pub type ActiveCrds = Arc<RwLock<HashSet<ManagedCrd>>>;
 
-use crate::initial_sync::InitialSyncGate;
 use crate::gateway_watchers::{
     spawn_backend_tls_policy_watcher, spawn_gateway_class_watcher, spawn_gateway_watcher,
     spawn_grpc_route_watcher, spawn_http_route_watcher, spawn_inference_pool_watcher,
     spawn_listener_set_watcher, spawn_reference_grant_watcher, spawn_tcp_route_watcher,
     spawn_tls_route_watcher, spawn_udp_route_watcher,
 };
+use crate::initial_sync::InitialSyncGate;
 use crate::resources::{
-    BackendTLSPolicy, Gateway, GatewayClass, GRPCRoute, HTTPRoute, InferencePool, ListenerSet,
+    BackendTLSPolicy, GRPCRoute, Gateway, GatewayClass, HTTPRoute, InferencePool, ListenerSet,
     ReferenceGrant, TCPRoute, TLSRoute, UDPRoute,
 };
 use crate::stores::SharedStores;
@@ -114,11 +114,7 @@ fn warn_version_mismatch_if_needed(
     if served.iter().any(|v| v == expected.as_ref()) {
         return;
     }
-    let rv = crd
-        .metadata
-        .resource_version
-        .clone()
-        .unwrap_or_default();
+    let rv = crd.metadata.resource_version.clone().unwrap_or_default();
     if last_warned_rv.get(&m) == Some(&rv) {
         return;
     }
@@ -386,7 +382,12 @@ mod tests {
     use super::*;
     use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
 
-    fn crd(group: &str, kind: &str, versions: &[(&str, bool)], deletion: bool) -> CustomResourceDefinition {
+    fn crd(
+        group: &str,
+        kind: &str,
+        versions: &[(&str, bool)],
+        deletion: bool,
+    ) -> CustomResourceDefinition {
         CustomResourceDefinition {
             metadata: ObjectMeta {
                 name: Some(format!("things.{group}")),
@@ -436,9 +437,19 @@ mod tests {
 
     #[test]
     fn eligible_respects_deletion_timestamp() {
-        let c = crd("gateway.networking.k8s.io", "Gateway", &[("v1", true)], true);
+        let c = crd(
+            "gateway.networking.k8s.io",
+            "Gateway",
+            &[("v1", true)],
+            true,
+        );
         assert!(!crd_eligible(&c));
-        let c2 = crd("gateway.networking.k8s.io", "Gateway", &[("v1", true)], false);
+        let c2 = crd(
+            "gateway.networking.k8s.io",
+            "Gateway",
+            &[("v1", true)],
+            false,
+        );
         assert!(crd_eligible(&c2));
     }
 
@@ -456,15 +467,28 @@ mod tests {
     #[test]
     fn tlsroute_served_v1_matches_typed_version() {
         let mut map = HashMap::new();
-        let c = crd("gateway.networking.k8s.io", "TLSRoute", &[("v1", true)], false);
+        let c = crd(
+            "gateway.networking.k8s.io",
+            "TLSRoute",
+            &[("v1", true)],
+            false,
+        );
         warn_version_mismatch_if_needed(ManagedCrd::TlsRoute, &c, &mut map);
-        assert!(map.is_empty(), "served v1 should match typed version, not apiVersion group/v1");
+        assert!(
+            map.is_empty(),
+            "served v1 should match typed version, not apiVersion group/v1"
+        );
     }
 
     #[test]
     fn version_warn_throttles_by_resource_version() {
         let mut map = HashMap::new();
-        let c = crd("gateway.networking.k8s.io", "UDPRoute", &[("v1", true)], false);
+        let c = crd(
+            "gateway.networking.k8s.io",
+            "UDPRoute",
+            &[("v1", true)],
+            false,
+        );
         warn_version_mismatch_if_needed(ManagedCrd::UdpRoute, &c, &mut map);
         assert!(map.contains_key(&ManagedCrd::UdpRoute));
         warn_version_mismatch_if_needed(ManagedCrd::UdpRoute, &c, &mut map);

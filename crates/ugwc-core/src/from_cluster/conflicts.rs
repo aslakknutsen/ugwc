@@ -519,7 +519,10 @@ pub(super) fn compute_udp_route_conflict_losers(
     losers
 }
 
-pub(super) fn hosts_for_route_on_listener(route: &HttpRouteSnap, eff: &EffectiveListenerSnap) -> Vec<String> {
+pub(super) fn hosts_for_route_on_listener(
+    route: &HttpRouteSnap,
+    eff: &EffectiveListenerSnap,
+) -> Vec<String> {
     let Some(intersected) = intersect_route_listener_hosts(&route.hostnames, &eff.hostname) else {
         return Vec::new();
     };
@@ -529,4 +532,3 @@ pub(super) fn hosts_for_route_on_listener(route: &HttpRouteSnap, eff: &Effective
         intersected
     }
 }
-

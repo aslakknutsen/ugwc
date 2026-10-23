@@ -37,9 +37,10 @@ pub async fn run(cfg: Config) -> Result<(), Box<dyn std::error::Error + Send + S
             ..Default::default()
         },
     )?;
-    let cache: Arc<MultiScopeSnapshot> =
-        Arc::new(MultiScopeSnapshot::new(initial_out.snapshot, m.xds.scope_miss.clone()));
-    
+    let cache: Arc<MultiScopeSnapshot> = Arc::new(MultiScopeSnapshot::new(
+        initial_out.snapshot,
+        m.xds.scope_miss.clone(),
+    ));
 
     let shutdown = tokio_util::sync::CancellationToken::new();
     let admin_sd = shutdown.child_token();
@@ -77,7 +78,8 @@ pub async fn run(cfg: Config) -> Result<(), Box<dyn std::error::Error + Send + S
     let revision_tx = Some(cache.revision_sender());
     let xds_server_metrics = m.xds.server.clone();
     let xds_task = ugwc_k8s::spawn_with_trace_context(async move {
-        if let Err(e) = serve_xds(xds_cfg, cache_xds, revision_tx, xds_sd, xds_server_metrics).await {
+        if let Err(e) = serve_xds(xds_cfg, cache_xds, revision_tx, xds_sd, xds_server_metrics).await
+        {
             tracing::error!(error = %e, "xds server exited");
         }
     });
@@ -109,8 +111,7 @@ pub async fn run(cfg: Config) -> Result<(), Box<dyn std::error::Error + Send + S
         };
 
         let (leader, lease_handle) = if cfg.leader_election {
-            let ns =
-                std::env::var("POD_NAMESPACE").unwrap_or_else(|_| "default".to_string());
+            let ns = std::env::var("POD_NAMESPACE").unwrap_or_else(|_| "default".to_string());
             let identity = std::env::var("HOSTNAME")
                 .unwrap_or_else(|_| format!("ugwc-{}", std::process::id()));
             let lease_sd = shutdown.child_token();
@@ -149,9 +150,8 @@ pub async fn run(cfg: Config) -> Result<(), Box<dyn std::error::Error + Send + S
         let status_cache: std::sync::Arc<
             std::sync::Mutex<std::collections::HashMap<String, String>>,
         > = std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new()));
-        let active_crds: ugwc_k8s::ActiveCrds = Arc::new(std::sync::RwLock::new(
-            std::collections::HashSet::new(),
-        ));
+        let active_crds: ugwc_k8s::ActiveCrds =
+            Arc::new(std::sync::RwLock::new(std::collections::HashSet::new()));
         let active_crds_reconcile = active_crds.clone();
         let status_cache_k = status_cache.clone();
         let gateway_events = ugwc_k8s::GatewayEvents::new(client.clone());
@@ -349,8 +349,7 @@ async fn wait_for_shutdown_signal() {
     #[cfg(unix)]
     {
         use tokio::signal::unix::{signal, SignalKind};
-        let mut term =
-            signal(SignalKind::terminate()).expect("install SIGTERM handler");
+        let mut term = signal(SignalKind::terminate()).expect("install SIGTERM handler");
         tokio::select! {
             _ = tokio::signal::ctrl_c() => {}
             _ = term.recv() => {}

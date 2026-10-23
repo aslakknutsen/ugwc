@@ -213,8 +213,7 @@ async fn apply_one_inference_pool(
         .inference_pools
         .iter()
         .any(|p| p.namespace == pool_ns && p.name == pool_name);
-    let resolved_refs_ok =
-        inference_pool_resolved_refs_ok(snapshot, report, &pool_ns, &pool_name);
+    let resolved_refs_ok = inference_pool_resolved_refs_ok(snapshot, report, &pool_ns, &pool_name);
     let accepted_ok = programmed_ok && resolved_refs_ok;
 
     let resolved_refs_reason = if resolved_refs_ok {
@@ -331,7 +330,11 @@ async fn apply_one_inference_pool(
     };
 
     if let Err(e) = api
-        .patch_status(&pool_name, &PatchParams::apply("ugwc"), &Patch::Merge(status))
+        .patch_status(
+            &pool_name,
+            &PatchParams::apply("ugwc"),
+            &Patch::Merge(status),
+        )
         .await
     {
         warn!(

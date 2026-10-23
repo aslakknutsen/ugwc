@@ -139,17 +139,29 @@ impl SharedStores {
     }
 
     pub fn set_reference_grant_store(&self, store: Store<ReferenceGrant>) {
-        *self.reference_grants.write().expect("reference_grants lock") = Some(store);
+        *self
+            .reference_grants
+            .write()
+            .expect("reference_grants lock") = Some(store);
     }
     pub fn clear_reference_grant_store(&self) {
-        *self.reference_grants.write().expect("reference_grants lock") = None;
+        *self
+            .reference_grants
+            .write()
+            .expect("reference_grants lock") = None;
     }
 
     pub fn set_backend_tls_policy_store(&self, store: Store<BackendTLSPolicy>) {
-        *self.backend_tls_policies.write().expect("backend_tls_policies lock") = Some(store);
+        *self
+            .backend_tls_policies
+            .write()
+            .expect("backend_tls_policies lock") = Some(store);
     }
     pub fn clear_backend_tls_policy_store(&self) {
-        *self.backend_tls_policies.write().expect("backend_tls_policies lock") = None;
+        *self
+            .backend_tls_policies
+            .write()
+            .expect("backend_tls_policies lock") = None;
     }
 
     pub fn set_inference_pool_store(&self, store: Store<InferencePool>) {
@@ -259,11 +271,13 @@ impl SharedStores {
     }
 
     pub fn get_config_map(&self, ns: &str, name: &str) -> Option<Arc<ConfigMap>> {
-        self.config_maps.get(&ObjectRef::<ConfigMap>::new(name).within(ns))
+        self.config_maps
+            .get(&ObjectRef::<ConfigMap>::new(name).within(ns))
     }
 
     pub fn get_service(&self, ns: &str, name: &str) -> Option<Arc<Service>> {
-        self.services.get(&ObjectRef::<Service>::new(name).within(ns))
+        self.services
+            .get(&ObjectRef::<Service>::new(name).within(ns))
     }
 
     pub fn get_namespace(&self, name: &str) -> Option<Arc<Namespace>> {

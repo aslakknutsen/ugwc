@@ -31,7 +31,8 @@ pub struct ReconcileCtx {
     pub client: Client,
     pub primary_controller: String,
     pub status_cache: Arc<Mutex<HashMap<String, String>>>,
-    pub impl_profiles: std::collections::HashMap<String, crate::implementation_profiles::ImplementationProfile>,
+    pub impl_profiles:
+        std::collections::HashMap<String, crate::implementation_profiles::ImplementationProfile>,
     pub dataplane_enable: bool,
     pub control_plane_xds: String,
     pub xds_insecure: bool,
@@ -63,285 +64,264 @@ pub async fn reconcile_gateway(ctx: ReconcileCtx, ns: String, name: String) -> R
     let api: Api<Gateway> = Api::namespaced(ctx.client.clone(), &ns);
     Span::current().record("k8s.resource.generation", latest.metadata.generation);
 
-                    let t_load = Instant::now();
-                    let cluster =
-                        match ugwc_k8s::load_cluster_snapshot(&ctx.stores, &ns, &name, &ctx.active_crds) {
-                            Ok(c) => {
-                                let refs = ugwc_k8s::refs_from_snapshot(&ctx.stores, &c);
-                                ctx.gateway_index.update_gateway(&ns, &name, refs);
-                                Some(c)
-                            }
-                            Err(e) => {
-                                warn!(error = %e, %ns, %name, "cluster snapshot load");
-                                None
-                            }
-                        };
-                    metrics::observe_snapshot_load_seconds(t_load.elapsed().as_secs_f64());
+    let t_load = Instant::now();
+    let cluster = match ugwc_k8s::load_cluster_snapshot(&ctx.stores, &ns, &name, &ctx.active_crds) {
+        Ok(c) => {
+            let refs = ugwc_k8s::refs_from_snapshot(&ctx.stores, &c);
+            ctx.gateway_index.update_gateway(&ns, &name, refs);
+            Some(c)
+        }
+        Err(e) => {
+            warn!(error = %e, %ns, %name, "cluster snapshot load");
+            None
+        }
+    };
+    metrics::observe_snapshot_load_seconds(t_load.elapsed().as_secs_f64());
 
-                    let input = CompileInput {
-                        reconcile_gateway: Some((ns.clone(), name.clone())),
-                        cluster,
-                        ..Default::default()
-                    };
-                    let t_compile = Instant::now();
-                    let co = do_compile(&ctx.fp, &input)?;
-                    metrics::observe_compile_seconds(t_compile.elapsed().as_secs_f64());
-                    metrics::set_compile_output_size(
-                        co.snapshot.listeners.len(),
-                        co.snapshot.routes.len(),
-                        co.snapshot.backends.len(),
-                    );
-                    metrics::record_ungranted_references(&co.report);
+    let input = CompileInput {
+        reconcile_gateway: Some((ns.clone(), name.clone())),
+        cluster,
+        ..Default::default()
+    };
+    let t_compile = Instant::now();
+    let co = do_compile(&ctx.fp, &input)?;
+    metrics::observe_compile_seconds(t_compile.elapsed().as_secs_f64());
+    metrics::set_compile_output_size(
+        co.snapshot.listeners.len(),
+        co.snapshot.routes.len(),
+        co.snapshot.backends.len(),
+    );
+    metrics::record_ungranted_references(&co.report);
 
-                    if co.report.has_errors() {
-                        metrics::record_compile_error();
-                    }
-                    if co.report.has_blocking_errors() {
-                        if let Some(ref ev) = ctx.events {
-                            ev.publish_warning(
-                                &latest,
-                                ugwc_k8s::REASON_COMPILE_BLOCKED,
-                                "Gateway compile has blocking errors; see status conditions",
-                                None,
-                            )
-                            .await;
-                        }
-                    }
+    if co.report.has_errors() {
+        metrics::record_compile_error();
+    }
+    if co.report.has_blocking_errors() {
+        if let Some(ref ev) = ctx.events {
+            ev.publish_warning(
+                &latest,
+                ugwc_k8s::REASON_COMPILE_BLOCKED,
+                "Gateway compile has blocking errors; see status conditions",
+                None,
+            )
+            .await;
+        }
+    }
 
+    if let Some(ref ev) = ctx.events {
+        if let Some(ref snap) = input.cluster {
+            let tls_errors: Vec<&str> = snap
+                .effective_listeners
+                .iter()
+                .filter_map(|l| l.tls_resolve_error.as_deref())
+                .collect();
+            if !tls_errors.is_empty() {
+                let msg = format!(
+                    "{} listener(s) with TLS errors: {}",
+                    tls_errors.len(),
+                    tls_errors.join("; ")
+                );
+                ev.publish_warning(&latest, ugwc_k8s::REASON_TLS_MATERIAL_MISSING, &msg, None)
+                    .await;
+            }
+        }
+    }
+
+    let programmed_ok = !co.report.has_blocking_errors() && !co.snapshot.meta.has_errors;
+    if let Some(ref snap) = input.cluster {
+        ctx.gateway_state_metrics
+            .record_from_reconcile(snap, programmed_ok);
+    }
+
+    if let Err(e) = ugwc_k8s::apply_gateway_reconciled_status(
+        &ctx.client,
+        &api,
+        &latest,
+        &co,
+        input.cluster.as_ref(),
+        Some(ctx.status_cache.clone()),
+    )
+    .await
+    {
+        warn!(error = %e, %ns, %name, "gateway status patch");
+    }
+
+    if let Some(ref snap) = input.cluster {
+        apply_attached_resource_statuses(&ctx, snap, &co, programmed_ok, &ns, &name).await;
+    }
+
+    if !ctx.leader.is_leader() {
+        metrics::record_publish_skipped();
+        return Ok(());
+    }
+
+    let controller_name = input
+        .cluster
+        .as_ref()
+        .and_then(|c| c.gateway_class.as_ref())
+        .map(|gc| gc.controller_name.as_str());
+    let profile =
+        implementation_profiles::resolve_for_controller(&ctx.impl_profiles, controller_name);
+
+    // Native Praxis configurations are delivered straight to
+    // the per-gateway workload; only xDS profiles feed the
+    // shared snapshot cache.
+    if matches!(profile.output, OutputKind::Xds) {
+        let prev = ctx.cache.previous_for_scope(&co.snapshot.scope);
+        let plan = plan_publish(prev.as_deref(), &co.snapshot, &ctx.fp);
+        do_publish(&ctx.cache, &co, &plan);
+    }
+
+    match &profile.data_plane {
+        DataPlaneKind::External => {}
+        DataPlaneKind::SharedDeployment => {
+            ugwc_k8s::reconcile_shared_deployment_stub(&name);
+        }
+        DataPlaneKind::PerGatewayPraxis => {
+            if !ctx.dataplane_enable {
+                ugwc_k8s::warn_per_gateway_without_enable(&name);
+            } else if programmed_ok {
+                let Some(img) = profile.proxy_image.as_deref() else {
+                    warn!(%name, "per_gateway_praxis missing proxy_image");
+                    metrics::record_dataplane_error();
                     if let Some(ref ev) = ctx.events {
-                        if let Some(ref snap) = input.cluster {
-                            let tls_errors: Vec<&str> = snap
-                                .effective_listeners
-                                .iter()
-                                .filter_map(|l| l.tls_resolve_error.as_deref())
-                                .collect();
-                            if !tls_errors.is_empty() {
-                                let msg = format!(
-                                    "{} listener(s) with TLS errors: {}",
-                                    tls_errors.len(),
-                                    tls_errors.join("; ")
-                                );
+                        ev.publish_warning(
+                            &latest,
+                            ugwc_k8s::REASON_DATAPLANE_MISCONFIGURED,
+                            "per_gateway_praxis profile missing proxy_image",
+                            None,
+                        )
+                        .await;
+                    }
+                    return Ok(());
+                };
+
+                let encoded = match profile.output {
+                    OutputKind::Xds => {
+                        if ctx.control_plane_xds.trim().is_empty() {
+                            warn!(%name, "dataplane enabled but bootstrap xDS addr empty");
+                            metrics::record_dataplane_error();
+                            if let Some(ref ev) = ctx.events {
                                 ev.publish_warning(
                                     &latest,
-                                    ugwc_k8s::REASON_TLS_MATERIAL_MISSING,
-                                    &msg,
+                                    ugwc_k8s::REASON_DATAPLANE_MISCONFIGURED,
+                                    "UGWC_CONTROL_PLANE_XDS_BOOTSTRAP_ADDR is empty",
+                                    None,
+                                )
+                                .await;
+                            }
+                            return Ok(());
+                        }
+                        None
+                    }
+                    OutputKind::PraxisConfigmap => {
+                        let t_encode = Instant::now();
+                        let out = match ugwc_praxis::encode::encode(&co.snapshot) {
+                            Ok(out) => out,
+                            Err(e) => {
+                                warn!(error = %e, %ns, %name, "praxis config encode");
+                                metrics::record_praxis_config_error();
+                                if let Some(ref ev) = ctx.events {
+                                    ev.publish_warning(
+                                        &latest,
+                                        ugwc_k8s::REASON_PRAXIS_CONFIG_FAILED,
+                                        &format!("encode Praxis configuration: {e}"),
+                                        None,
+                                    )
+                                    .await;
+                                }
+                                return Ok(());
+                            }
+                        };
+                        metrics::observe_praxis_config_encode_seconds(
+                            t_encode.elapsed().as_secs_f64(),
+                        );
+                        for finding in &out.unsupported {
+                            metrics::record_praxis_config_unsupported(&finding.feature);
+                        }
+                        if !out.unsupported.is_empty() {
+                            let summary = out
+                                .unsupported
+                                .iter()
+                                .take(5)
+                                .map(|u| format!("{}: {}", u.feature, u.detail))
+                                .collect::<Vec<_>>()
+                                .join("; ");
+                            if let Some(ref ev) = ctx.events {
+                                ev.publish_warning(
+                                    &latest,
+                                    ugwc_k8s::REASON_PRAXIS_CONFIG_UNSUPPORTED,
+                                    &format!(
+                                        "{} unsupported Gateway API feature(s): {summary}",
+                                        out.unsupported.len()
+                                    ),
                                     None,
                                 )
                                 .await;
                             }
                         }
+                        Some(out)
                     }
+                };
 
-                    let programmed_ok =
-                        !co.report.has_blocking_errors() && !co.snapshot.meta.has_errors;
-                    if let Some(ref snap) = input.cluster {
-                        ctx.gateway_state_metrics.record_from_reconcile(snap, programmed_ok);
+                let scope = format!("{ns}/{name}");
+                let (config_source, xds_bootstrap_addr) = match profile.output {
+                    OutputKind::Xds => (
+                        ugwc_k8s::PraxisConfigSource::Xds,
+                        ugwc_k8s::praxis_istiod_dial_url(&ctx.control_plane_xds, ctx.xds_insecure),
+                    ),
+                    OutputKind::PraxisConfigmap => {
+                        (ugwc_k8s::PraxisConfigSource::ConfigMap, String::new())
                     }
-
-                    if let Err(e) = ugwc_k8s::apply_gateway_reconciled_status(
-                        &ctx.client,
-                        &api,
-                        &latest,
-                        &co,
-                        input.cluster.as_ref(),
-                        Some(ctx.status_cache.clone()),
-                    )
-                    .await
-                    {
-                        warn!(error = %e, %ns, %name, "gateway status patch");
-                    }
-
-                    if let Some(ref snap) = input.cluster {
-                        apply_attached_resource_statuses(
-                            &ctx,
-                            snap,
-                            &co,
-                            programmed_ok,
-                            &ns,
-                            &name,
-                        )
-                        .await;
-                    }
-
-                    if !ctx.leader.is_leader() {
-                        metrics::record_publish_skipped();
-                        return Ok(());
-                    }
-
-                    let controller_name = input
-                        .cluster
-                        .as_ref()
-                        .and_then(|c| c.gateway_class.as_ref())
-                        .map(|gc| gc.controller_name.as_str());
-                    let profile = implementation_profiles::resolve_for_controller(
-                        &ctx.impl_profiles,
-                        controller_name,
-                    );
-
-                    // Native Praxis configurations are delivered straight to
-                    // the per-gateway workload; only xDS profiles feed the
-                    // shared snapshot cache.
-                    if matches!(profile.output, OutputKind::Xds) {
-                        let prev = ctx.cache.previous_for_scope(&co.snapshot.scope);
-                        let plan = plan_publish(prev.as_deref(), &co.snapshot, &ctx.fp);
-                        do_publish(&ctx.cache, &co, &plan);
-                    }
-
-                    match &profile.data_plane {
-                        DataPlaneKind::External => {}
-                        DataPlaneKind::SharedDeployment => {
-                            ugwc_k8s::reconcile_shared_deployment_stub(&name);
-                        }
-                        DataPlaneKind::PerGatewayPraxis => {
-                            if !ctx.dataplane_enable {
-                                ugwc_k8s::warn_per_gateway_without_enable(&name);
-                            } else if programmed_ok {
-                                let Some(img) = profile.proxy_image.as_deref() else {
-                                    warn!(%name, "per_gateway_praxis missing proxy_image");
-                                    metrics::record_dataplane_error();
-                                    if let Some(ref ev) = ctx.events {
-                                        ev.publish_warning(
-                                            &latest,
-                                            ugwc_k8s::REASON_DATAPLANE_MISCONFIGURED,
-                                            "per_gateway_praxis profile missing proxy_image",
-                                            None,
-                                        )
-                                        .await;
-                                    }
-                                    return Ok(());
-                                };
-
-                                let encoded = match profile.output {
-                                    OutputKind::Xds => {
-                                        if ctx.control_plane_xds.trim().is_empty() {
-                                            warn!(%name, "dataplane enabled but bootstrap xDS addr empty");
-                                            metrics::record_dataplane_error();
-                                            if let Some(ref ev) = ctx.events {
-                                                ev.publish_warning(
-                                                    &latest,
-                                                    ugwc_k8s::REASON_DATAPLANE_MISCONFIGURED,
-                                                    "UGWC_CONTROL_PLANE_XDS_BOOTSTRAP_ADDR is empty",
-                                                    None,
-                                                )
-                                                .await;
-                                            }
-                                            return Ok(());
-                                        }
-                                        None
-                                    }
-                                    OutputKind::PraxisConfigmap => {
-                                        let t_encode = Instant::now();
-                                        let out = match ugwc_praxis::encode::encode(&co.snapshot) {
-                                            Ok(out) => out,
-                                            Err(e) => {
-                                                warn!(error = %e, %ns, %name, "praxis config encode");
-                                                metrics::record_praxis_config_error();
-                                                if let Some(ref ev) = ctx.events {
-                                                    ev.publish_warning(
-                                                        &latest,
-                                                        ugwc_k8s::REASON_PRAXIS_CONFIG_FAILED,
-                                                        &format!("encode Praxis configuration: {e}"),
-                                                        None,
-                                                    )
-                                                    .await;
-                                                }
-                                                return Ok(());
-                                            }
-                                        };
-                                        metrics::observe_praxis_config_encode_seconds(
-                                            t_encode.elapsed().as_secs_f64(),
-                                        );
-                                        for finding in &out.unsupported {
-                                            metrics::record_praxis_config_unsupported(
-                                                &finding.feature,
-                                            );
-                                        }
-                                        if !out.unsupported.is_empty() {
-                                            let summary = out
-                                                .unsupported
-                                                .iter()
-                                                .take(5)
-                                                .map(|u| format!("{}: {}", u.feature, u.detail))
-                                                .collect::<Vec<_>>()
-                                                .join("; ");
-                                            if let Some(ref ev) = ctx.events {
-                                                ev.publish_warning(
-                                                    &latest,
-                                                    ugwc_k8s::REASON_PRAXIS_CONFIG_UNSUPPORTED,
-                                                    &format!(
-                                                        "{} unsupported Gateway API feature(s): {summary}",
-                                                        out.unsupported.len()
-                                                    ),
-                                                    None,
-                                                )
-                                                .await;
-                                            }
-                                        }
-                                        Some(out)
-                                    }
-                                };
-
-                                let scope = format!("{ns}/{name}");
-                                let (config_source, xds_bootstrap_addr) = match profile.output {
-                                    OutputKind::Xds => (
-                                        ugwc_k8s::PraxisConfigSource::Xds,
-                                        ugwc_k8s::praxis_istiod_dial_url(
-                                            &ctx.control_plane_xds,
-                                            ctx.xds_insecure,
-                                        ),
-                                    ),
-                                    OutputKind::PraxisConfigmap => {
-                                        (ugwc_k8s::PraxisConfigSource::ConfigMap, String::new())
-                                    }
-                                };
-                                let args = ugwc_k8s::PraxisProvisionArgs {
-                                    proxy_image: img.to_string(),
-                                    xds_bootstrap_addr,
-                                    xds_insecure: ctx.xds_insecure,
-                                    xds_wire: ctx.xds_wire.clone(),
-                                    gateway_scope: scope,
-                                    gateway_class_name: latest.spec.gateway_class_name.clone(),
-                                    config_source,
-                                };
-                                let listener_ports = input
-                                    .cluster
-                                    .as_ref()
-                                    .map(ugwc_k8s::collect_effective_listener_ports);
-                                match ugwc_k8s::reconcile_per_gateway_praxis(
-                                    &ctx.client,
-                                    &latest,
-                                    &args,
-                                    listener_ports.as_deref(),
-                                    encoded.as_ref(),
-                                )
-                                .await
-                                {
-                                    Ok(()) => {
-                                        metrics::record_dataplane_apply();
-                                        if matches!(profile.output, OutputKind::PraxisConfigmap) {
-                                            metrics::record_praxis_config_apply();
-                                        }
-                                    }
-                                    Err(e) => {
-                                        warn!(error = %e, %ns, %name, "dataplane provision");
-                                        metrics::record_dataplane_error();
-                                        if matches!(profile.output, OutputKind::PraxisConfigmap) {
-                                            metrics::record_praxis_config_error();
-                                        }
-                                        if let Some(ref ev) = ctx.events {
-                                            ev.publish_warning(
-                                                &latest,
-                                                ugwc_k8s::REASON_PROVISION_FAILED,
-                                                &format!("dataplane provision failed: {e}"),
-                                                None,
-                                            )
-                                            .await;
-                                        }
-                                    }
-                                }
-                            }
+                };
+                let args = ugwc_k8s::PraxisProvisionArgs {
+                    proxy_image: img.to_string(),
+                    xds_bootstrap_addr,
+                    xds_insecure: ctx.xds_insecure,
+                    xds_wire: ctx.xds_wire.clone(),
+                    gateway_scope: scope,
+                    gateway_class_name: latest.spec.gateway_class_name.clone(),
+                    config_source,
+                };
+                let listener_ports = input
+                    .cluster
+                    .as_ref()
+                    .map(ugwc_k8s::collect_effective_listener_ports);
+                match ugwc_k8s::reconcile_per_gateway_praxis(
+                    &ctx.client,
+                    &latest,
+                    &args,
+                    listener_ports.as_deref(),
+                    encoded.as_ref(),
+                )
+                .await
+                {
+                    Ok(()) => {
+                        metrics::record_dataplane_apply();
+                        if matches!(profile.output, OutputKind::PraxisConfigmap) {
+                            metrics::record_praxis_config_apply();
                         }
                     }
+                    Err(e) => {
+                        warn!(error = %e, %ns, %name, "dataplane provision");
+                        metrics::record_dataplane_error();
+                        if matches!(profile.output, OutputKind::PraxisConfigmap) {
+                            metrics::record_praxis_config_error();
+                        }
+                        if let Some(ref ev) = ctx.events {
+                            ev.publish_warning(
+                                &latest,
+                                ugwc_k8s::REASON_PROVISION_FAILED,
+                                &format!("dataplane provision failed: {e}"),
+                                None,
+                            )
+                            .await;
+                        }
+                    }
+                }
+            }
+        }
+    }
 
     Ok(())
 }
@@ -392,9 +372,8 @@ async fn apply_attached_resource_statuses(
         + snap.backend_tls_policy_outcomes.len()
         + snap.referenced_inference_pools().len();
 
-    let mut futs: Vec<
-        std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + '_>>,
-    > = Vec::new();
+    let mut futs: Vec<std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + '_>>> =
+        Vec::new();
 
     for ls_snap in &snap.listener_sets {
         patch_listenerset_reconciled(
@@ -640,13 +619,9 @@ async fn patch_listenerset_rejected(
     let ls_api: Api<ListenerSet> = Api::namespaced(ctx.client.clone(), &ls_ns);
     match ls_api.get(&ls_name).await {
         Ok(ls) => {
-            if let Err(e) = ugwc_k8s::apply_listenerset_rejected_status(
-                &ctx.client,
-                &ls,
-                &reason,
-                status_cache,
-            )
-            .await
+            if let Err(e) =
+                ugwc_k8s::apply_listenerset_rejected_status(&ctx.client, &ls, &reason, status_cache)
+                    .await
             {
                 warn!(
                     error = %e,

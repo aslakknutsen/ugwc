@@ -46,7 +46,10 @@ where
     )
 }
 
-fn map_event<K>(last_gen: &Arc<Mutex<HashMap<(String, String), u64>>>, ev: Event<K>) -> Option<WatchItem<K>>
+fn map_event<K>(
+    last_gen: &Arc<Mutex<HashMap<(String, String), u64>>>,
+    ev: Event<K>,
+) -> Option<WatchItem<K>>
 where
     K: Resource<DynamicType: Default>,
 {
@@ -276,7 +279,13 @@ pub fn reflector_configmap_watch_stream(
     writer: reflector::store::Writer<k8s_openapi::api::core::v1::ConfigMap>,
 ) -> (
     Store<k8s_openapi::api::core::v1::ConfigMap>,
-    Pin<Box<dyn Stream<Item = Result<WatchItem<k8s_openapi::api::core::v1::ConfigMap>, watcher::Error>> + Send>>,
+    Pin<
+        Box<
+            dyn Stream<
+                    Item = Result<WatchItem<k8s_openapi::api::core::v1::ConfigMap>, watcher::Error>,
+                > + Send,
+        >,
+    >,
 ) {
     reflector_watch_stream_with_map(api, cfg, writer, map_configmap_event)
 }
@@ -288,7 +297,12 @@ pub fn reflector_secret_watch_stream(
     writer: reflector::store::Writer<k8s_openapi::api::core::v1::Secret>,
 ) -> (
     Store<k8s_openapi::api::core::v1::Secret>,
-    Pin<Box<dyn Stream<Item = Result<WatchItem<k8s_openapi::api::core::v1::Secret>, watcher::Error>> + Send>>,
+    Pin<
+        Box<
+            dyn Stream<Item = Result<WatchItem<k8s_openapi::api::core::v1::Secret>, watcher::Error>>
+                + Send,
+        >,
+    >,
 ) {
     reflector_watch_stream_with_map(api, cfg, writer, map_secret_event)
 }
@@ -400,13 +414,20 @@ mod tests {
             ..Default::default()
         };
         let h1 = configmap_data_fingerprint(&cm);
-        cm.data.as_mut().unwrap().insert("ca.crt".into(), String::new());
+        cm.data
+            .as_mut()
+            .unwrap()
+            .insert("ca.crt".into(), String::new());
         let h2 = configmap_data_fingerprint(&cm);
         assert_ne!(h1, h2);
 
         let last = Arc::new(Mutex::new(HashMap::new()));
         let mut valid_cm = cm.clone();
-        valid_cm.data.as_mut().unwrap().insert("ca.crt".into(), "valid".into());
+        valid_cm
+            .data
+            .as_mut()
+            .unwrap()
+            .insert("ca.crt".into(), "valid".into());
         assert!(map_configmap_event(&last, Event::Apply(valid_cm)).is_some());
         assert!(map_configmap_event(&last, Event::Apply(cm.clone())).is_some());
         assert!(map_configmap_event(&last, Event::Apply(cm)).is_none());

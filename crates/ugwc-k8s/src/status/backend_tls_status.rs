@@ -194,12 +194,7 @@ pub async fn apply_backend_tls_status_for_ca_ref_change(
                 resource_name,
             )
         } else {
-            backend_tls_policy_spec_references_secret(
-                &pol.spec,
-                pol_ns,
-                resource_ns,
-                resource_name,
-            )
+            backend_tls_policy_spec_references_secret(&pol.spec, pol_ns, resource_ns, resource_name)
         };
         if !references {
             continue;
@@ -279,8 +274,9 @@ mod tests {
             ..Default::default()
         }));
 
-        let mut btp_writer =
-            kube::runtime::reflector::store::Writer::<crate::resources::BackendTLSPolicy>::default();
+        let mut btp_writer = kube::runtime::reflector::store::Writer::<
+            crate::resources::BackendTLSPolicy,
+        >::default();
         let btp_store = btp_writer.as_reader();
         btp_writer.apply_watcher_event(&kube::runtime::watcher::Event::Apply(
             crate::resources::BackendTLSPolicy {
@@ -316,12 +312,12 @@ mod tests {
         let ep = kube::runtime::reflector::store::Writer::<
             k8s_openapi::api::discovery::v1::EndpointSlice,
         >::default();
-        let svc = kube::runtime::reflector::store::Writer::<
-            k8s_openapi::api::core::v1::Service,
-        >::default();
-        let sec = kube::runtime::reflector::store::Writer::<
-            k8s_openapi::api::core::v1::Secret,
-        >::default();
+        let svc =
+            kube::runtime::reflector::store::Writer::<k8s_openapi::api::core::v1::Service>::default(
+            );
+        let sec =
+            kube::runtime::reflector::store::Writer::<k8s_openapi::api::core::v1::Secret>::default(
+            );
         let ns = kube::runtime::reflector::store::Writer::<
             k8s_openapi::api::core::v1::Namespace,
         >::default();

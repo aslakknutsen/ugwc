@@ -52,7 +52,6 @@ pub struct PraxisFeatureLabels {
     pub feature: String,
 }
 
-
 // Empty label set for metrics without labels.
 #[derive(Clone, Debug, Hash, PartialEq, Eq)]
 pub struct NoLabels;
@@ -246,25 +245,53 @@ pub fn install() -> Result<Metrics, String> {
     );
 
     let leader_active = Gauge::default();
-    registry.register("ugwc_leader_active", "Leader election active", leader_active.clone());
+    registry.register(
+        "ugwc_leader_active",
+        "Leader election active",
+        leader_active.clone(),
+    );
 
     let cache_synced = Gauge::default();
-    registry.register("ugwc_cache_synced", "Cache synced (readiness)", cache_synced.clone());
+    registry.register(
+        "ugwc_cache_synced",
+        "Cache synced (readiness)",
+        cache_synced.clone(),
+    );
 
     let ir_listeners = Gauge::default();
-    registry.register("ugwc_compile_ir_listeners", "IR listener count", ir_listeners.clone());
+    registry.register(
+        "ugwc_compile_ir_listeners",
+        "IR listener count",
+        ir_listeners.clone(),
+    );
 
     let ir_routes = Gauge::default();
-    registry.register("ugwc_compile_ir_routes", "IR route count", ir_routes.clone());
+    registry.register(
+        "ugwc_compile_ir_routes",
+        "IR route count",
+        ir_routes.clone(),
+    );
 
     let ir_backends = Gauge::default();
-    registry.register("ugwc_compile_ir_backends", "IR backend count", ir_backends.clone());
+    registry.register(
+        "ugwc_compile_ir_backends",
+        "IR backend count",
+        ir_backends.clone(),
+    );
 
     let dataplane_apply = Counter::default();
-    registry.register("ugwc_dataplane_apply", "Dataplane apply total", dataplane_apply.clone());
+    registry.register(
+        "ugwc_dataplane_apply",
+        "Dataplane apply total",
+        dataplane_apply.clone(),
+    );
 
     let dataplane_error = Counter::default();
-    registry.register("ugwc_dataplane_error", "Dataplane error total", dataplane_error.clone());
+    registry.register(
+        "ugwc_dataplane_error",
+        "Dataplane error total",
+        dataplane_error.clone(),
+    );
 
     let praxis_config_encode_duration = Family::<NoLabels, Histogram>::new_with_constructor(|| {
         Histogram::new(exponential_buckets(0.0001, 2.0, 14))
@@ -317,10 +344,18 @@ pub fn install() -> Result<Metrics, String> {
     // -- Workqueue --
     use ugwc_k8s::reconcile_queue::QueueNameLabels;
     let wq_adds = Family::<QueueNameLabels, Counter>::default();
-    registry.register("ugwc_workqueue_adds", "Workqueue adds total", wq_adds.clone());
+    registry.register(
+        "ugwc_workqueue_adds",
+        "Workqueue adds total",
+        wq_adds.clone(),
+    );
 
     let wq_retries = Family::<QueueNameLabels, Counter>::default();
-    registry.register("ugwc_workqueue_retries", "Workqueue retries total", wq_retries.clone());
+    registry.register(
+        "ugwc_workqueue_retries",
+        "Workqueue retries total",
+        wq_retries.clone(),
+    );
 
     let wq_dedup = Family::<QueueNameLabels, Counter>::default();
     registry.register(
@@ -353,10 +388,9 @@ pub fn install() -> Result<Metrics, String> {
         wq_unfinished.clone(),
     );
 
-    let wq_queue_duration =
-        Family::<QueueNameLabels, Histogram>::new_with_constructor(|| {
-            Histogram::new(exponential_buckets(0.001, 2.0, 14))
-        });
+    let wq_queue_duration = Family::<QueueNameLabels, Histogram>::new_with_constructor(|| {
+        Histogram::new(exponential_buckets(0.001, 2.0, 14))
+    });
     registry.register(
         "ugwc_workqueue_queue_duration_seconds",
         "Time spent in queue before processing",
@@ -372,10 +406,9 @@ pub fn install() -> Result<Metrics, String> {
         kube_requests.clone(),
     );
 
-    let kube_request_duration =
-        Family::<RestClientLabels, Histogram>::new_with_constructor(|| {
-            Histogram::new(exponential_buckets(0.001, 2.0, 14))
-        });
+    let kube_request_duration = Family::<RestClientLabels, Histogram>::new_with_constructor(|| {
+        Histogram::new(exponential_buckets(0.001, 2.0, 14))
+    });
     registry.register(
         "ugwc_rest_client_request_duration_seconds",
         "Kubernetes REST client request duration",
@@ -390,8 +423,7 @@ pub fn install() -> Result<Metrics, String> {
         xds_streams_active.clone(),
     );
 
-    let xds_disconnects =
-        Family::<ugwc_xds::XdsDisconnectLabels, Counter>::default();
+    let xds_disconnects = Family::<ugwc_xds::XdsDisconnectLabels, Counter>::default();
     registry.register(
         "ugwc_xds_stream_disconnects",
         "xDS stream disconnects total",
@@ -399,7 +431,11 @@ pub fn install() -> Result<Metrics, String> {
     );
 
     let xds_push_bytes = Counter::default();
-    registry.register("ugwc_xds_push_bytes", "xDS push bytes total", xds_push_bytes.clone());
+    registry.register(
+        "ugwc_xds_push_bytes",
+        "xDS push bytes total",
+        xds_push_bytes.clone(),
+    );
 
     let xds_push_resources = Gauge::default();
     registry.register(
@@ -427,7 +463,11 @@ pub fn install() -> Result<Metrics, String> {
 
     // -- Tokio runtime --
     let tokio_workers = Gauge::default();
-    registry.register("ugwc_tokio_workers_count", "Tokio worker count", tokio_workers.clone());
+    registry.register(
+        "ugwc_tokio_workers_count",
+        "Tokio worker count",
+        tokio_workers.clone(),
+    );
 
     let tokio_busy = Gauge::default();
     registry.register(
@@ -437,10 +477,18 @@ pub fn install() -> Result<Metrics, String> {
     );
 
     let tokio_polls = Gauge::default();
-    registry.register("ugwc_tokio_total_polls_count", "Tokio total polls", tokio_polls.clone());
+    registry.register(
+        "ugwc_tokio_total_polls_count",
+        "Tokio total polls",
+        tokio_polls.clone(),
+    );
 
     let tokio_noop = Gauge::default();
-    registry.register("ugwc_tokio_total_noop_count", "Tokio total noop count", tokio_noop.clone());
+    registry.register(
+        "ugwc_tokio_total_noop_count",
+        "Tokio total noop count",
+        tokio_noop.clone(),
+    );
 
     let tokio_steal = Gauge::default();
     registry.register(
@@ -505,7 +553,10 @@ pub fn install() -> Result<Metrics, String> {
     let index_fanout_size =
         Family::<ugwc_k8s::IndexEventKindLabels, Histogram>::new_with_constructor(|| {
             Histogram::new(
-                [0.0, 1.0, 2.0, 5.0, 10.0, 25.0, 50.0, 100.0, 250.0, 500.0, 1000.0].into_iter(),
+                [
+                    0.0, 1.0, 2.0, 5.0, 10.0, 25.0, 50.0, 100.0, 250.0, 500.0, 1000.0,
+                ]
+                .into_iter(),
             )
         });
     registry.register(
@@ -608,7 +659,9 @@ pub fn get() -> &'static Metrics {
 
 /// Full Prometheus text exposition for `/metrics`.
 pub fn render() -> Result<String, String> {
-    let state = STATE.get().ok_or_else(|| "metrics not installed".to_string())?;
+    let state = STATE
+        .get()
+        .ok_or_else(|| "metrics not installed".to_string())?;
     let registry = state.registry.lock().map_err(|e| e.to_string())?;
     let mut body = String::new();
     encode(&mut body, &registry).map_err(|e| e.to_string())?;

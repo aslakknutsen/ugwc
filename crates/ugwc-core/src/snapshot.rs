@@ -865,7 +865,11 @@ impl ClusterSnapshot {
     pub fn referenced_tls_secrets(&self, gateway_ns: &str) -> Vec<(String, String)> {
         let mut out: Vec<(String, String)> = Vec::new();
         Self::collect_listener_tls_secrets(gateway_ns, &self.listeners, &mut out);
-        Self::collect_effective_listener_tls_secrets(gateway_ns, &self.effective_listeners, &mut out);
+        Self::collect_effective_listener_tls_secrets(
+            gateway_ns,
+            &self.effective_listeners,
+            &mut out,
+        );
         for ls in &self.listener_sets {
             Self::collect_listener_tls_secrets(&ls.namespace, &ls.listeners, &mut out);
         }

@@ -1,8 +1,8 @@
 use std::collections::HashSet;
 
 use crate::resources::{
-    GRPCRoute, GrpcRouteParentRefs, HTTPRoute, HttpRouteParentRefs, TCPRoute, TcpRouteParentRefs,
-    TLSRoute, TlsRouteParentRefs, UDPRoute, UdpRouteParentRefs,
+    GRPCRoute, GrpcRouteParentRefs, HTTPRoute, HttpRouteParentRefs, TCPRoute, TLSRoute,
+    TcpRouteParentRefs, TlsRouteParentRefs, UDPRoute, UdpRouteParentRefs,
 };
 
 fn route_attaches_to_gateway_parent_fields(
@@ -36,7 +36,10 @@ fn route_attaches_to_listener_set_parent_fields(
     if g != "gateway.networking.k8s.io" || k != "ListenerSet" {
         return false;
     }
-    let ls_ns = namespace.or(route_namespace).unwrap_or_default().to_string();
+    let ls_ns = namespace
+        .or(route_namespace)
+        .unwrap_or_default()
+        .to_string();
     attached_ls.contains(&(ls_ns, name.to_string()))
 }
 

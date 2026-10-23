@@ -5,9 +5,7 @@ use crate::compile::{CompileReport, ObjectRefErr};
 use crate::http_route_attachment::{
     reference_grant_permits_inference_pool_ref, reference_grant_permits_service_ref,
 };
-use crate::ir::{
-    BackendEndpointIr, BackendIr, InferencePoolBackendIr, WeightedBackendIr,
-};
+use crate::ir::{BackendEndpointIr, BackendIr, InferencePoolBackendIr, WeightedBackendIr};
 use crate::snapshot::{
     ClusterSnapshot, GrpcRouteRuleSnap, GrpcRouteSnap, HttpBackendRefSnap, HttpRouteRuleSnap,
     HttpRouteSnap, InferencePoolSnap, ServiceSnap, TcpRouteRuleSnap, TcpRouteSnap,
@@ -178,7 +176,10 @@ fn resolve_inference_pool_backend(
     })
 }
 
-pub(super) fn resolve_service_port(svc: &ServiceSnap, br: &HttpBackendRefSnap) -> Result<u16, String> {
+pub(super) fn resolve_service_port(
+    svc: &ServiceSnap,
+    br: &HttpBackendRefSnap,
+) -> Result<u16, String> {
     if let Some(p) = br.port {
         return Ok(p);
     }
@@ -204,13 +205,21 @@ pub(super) fn headless_dial_port(svc: &ServiceSnap, service_port: u16) -> Option
         .and_then(|sp| sp.target_port)
 }
 
-pub(super) fn find_service<'a>(sn: &'a ClusterSnapshot, ns: &str, name: &str) -> Option<&'a ServiceSnap> {
+pub(super) fn find_service<'a>(
+    sn: &'a ClusterSnapshot,
+    ns: &str,
+    name: &str,
+) -> Option<&'a ServiceSnap> {
     sn.services
         .iter()
         .find(|s| s.namespace == ns && s.name == name)
 }
 
-pub(super) fn collect_endpoints(sn: &ClusterSnapshot, svc_ns: &str, svc_name: &str) -> Vec<BackendEndpointIr> {
+pub(super) fn collect_endpoints(
+    sn: &ClusterSnapshot,
+    svc_ns: &str,
+    svc_name: &str,
+) -> Vec<BackendEndpointIr> {
     let mut out = Vec::new();
     for sl in &sn.endpoint_slices {
         if sl.namespace != svc_ns {
@@ -239,10 +248,15 @@ pub(super) fn collect_endpoints(sn: &ClusterSnapshot, svc_ns: &str, svc_name: &s
     out
 }
 
-pub(super) fn service_has_any_endpointslice(snapshot: &ClusterSnapshot, svc_ns: &str, svc_name: &str) -> bool {
-    snapshot.endpoint_slices.iter().any(|sl| {
-        sl.namespace == svc_ns && sl.service_name.as_deref() == Some(svc_name)
-    })
+pub(super) fn service_has_any_endpointslice(
+    snapshot: &ClusterSnapshot,
+    svc_ns: &str,
+    svc_name: &str,
+) -> bool {
+    snapshot
+        .endpoint_slices
+        .iter()
+        .any(|sl| sl.namespace == svc_ns && sl.service_name.as_deref() == Some(svc_name))
 }
 
 pub(super) fn resolve_http_route_backends(
@@ -316,7 +330,9 @@ pub(super) fn resolve_http_route_backends(
         };
         let backend_tls = snapshot
             .backend_tls_effective
-            .get(&crate::ir::backend_endpoints_map_key(svc_ns, svc_name, port))
+            .get(&crate::ir::backend_endpoints_map_key(
+                svc_ns, svc_name, port,
+            ))
             .map(|e| e.tls.clone());
         if backend_tls.as_ref().is_some_and(|t| t.invalid) {
             report.errors.push(ObjectRefErr {
@@ -415,7 +431,9 @@ pub(super) fn resolve_grpc_route_backends(
         };
         let backend_tls = snapshot
             .backend_tls_effective
-            .get(&crate::ir::backend_endpoints_map_key(svc_ns, svc_name, port))
+            .get(&crate::ir::backend_endpoints_map_key(
+                svc_ns, svc_name, port,
+            ))
             .map(|e| e.tls.clone());
         if backend_tls.as_ref().is_some_and(|t| t.invalid) {
             report.errors.push(ObjectRefErr {
@@ -514,7 +532,9 @@ pub(super) fn resolve_tls_route_backends(
         };
         let backend_tls = snapshot
             .backend_tls_effective
-            .get(&crate::ir::backend_endpoints_map_key(svc_ns, svc_name, port))
+            .get(&crate::ir::backend_endpoints_map_key(
+                svc_ns, svc_name, port,
+            ))
             .map(|e| e.tls.clone());
         if backend_tls.as_ref().is_some_and(|t| t.invalid) {
             report.errors.push(ObjectRefErr {
@@ -613,7 +633,9 @@ pub(super) fn resolve_tcp_route_backends(
         };
         let backend_tls = snapshot
             .backend_tls_effective
-            .get(&crate::ir::backend_endpoints_map_key(svc_ns, svc_name, port))
+            .get(&crate::ir::backend_endpoints_map_key(
+                svc_ns, svc_name, port,
+            ))
             .map(|e| e.tls.clone());
         if backend_tls.as_ref().is_some_and(|t| t.invalid) {
             report.errors.push(ObjectRefErr {
@@ -712,7 +734,9 @@ pub(super) fn resolve_udp_route_backends(
         };
         let backend_tls = snapshot
             .backend_tls_effective
-            .get(&crate::ir::backend_endpoints_map_key(svc_ns, svc_name, port))
+            .get(&crate::ir::backend_endpoints_map_key(
+                svc_ns, svc_name, port,
+            ))
             .map(|e| e.tls.clone());
         if backend_tls.as_ref().is_some_and(|t| t.invalid) {
             report.errors.push(ObjectRefErr {
@@ -749,4 +773,3 @@ pub(super) fn resolve_weighted_backends(
 ) -> Vec<WeightedBackendIr> {
     resolve_http_route_backends(route, rule, snapshot, report)
 }
-

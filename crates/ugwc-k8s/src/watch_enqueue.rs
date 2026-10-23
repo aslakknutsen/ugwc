@@ -8,13 +8,13 @@ use kube::{Api, Client, ResourceExt};
 use tracing::warn;
 
 use crate::reconcile_queue::ReconcileSender;
-use crate::stores::SharedStores;
 use crate::resources::{
     backend_tls_policy_spec_references_configmap, backend_tls_policy_spec_references_secret,
-    gateway_spec_references_secret, listenerset_spec_references_secret, BackendTLSPolicy, Gateway,
-    GRPCRoute, HTTPRoute, ListenerSet, ReferenceGrant, ReferenceGrantFrom, ReferenceGrantTo,
-    TCPRoute, TLSRoute, UDPRoute,
+    gateway_spec_references_secret, listenerset_spec_references_secret, BackendTLSPolicy,
+    GRPCRoute, Gateway, HTTPRoute, ListenerSet, ReferenceGrant, ReferenceGrantFrom,
+    ReferenceGrantTo, TCPRoute, TLSRoute, UDPRoute,
 };
+use crate::stores::SharedStores;
 use crate::watch_helpers::{
     gateway_targets_for_backend_tls_policy, gateway_targets_for_grpc_route,
     gateway_targets_for_inference_pool, gateway_targets_for_route, gateway_targets_for_tcp_route,
@@ -66,9 +66,8 @@ pub async fn gateway_keys_for_reference_grant(
     keys
 }
 
-const ROUTE_REFERENCE_GRANT_KINDS: &[&str] = &[
-    "HTTPRoute", "GRPCRoute", "TLSRoute", "TCPRoute", "UDPRoute",
-];
+const ROUTE_REFERENCE_GRANT_KINDS: &[&str] =
+    &["HTTPRoute", "GRPCRoute", "TLSRoute", "TCPRoute", "UDPRoute"];
 
 fn reference_grant_from_matches(from: &ReferenceGrantFrom, from_kind: &str, from_ns: &str) -> bool {
     const G_FROM: &str = "gateway.networking.k8s.io";
@@ -132,7 +131,11 @@ fn gateway_spec_has_grantable_secret_ref(
 ) -> bool {
     secret_ns != from_ns
         && reference_grant_permits_listener_secret_from_spec(
-            rg, from_kind, from_ns, secret_ns, secret_name,
+            rg,
+            from_kind,
+            from_ns,
+            secret_ns,
+            secret_name,
         )
 }
 
@@ -145,10 +148,14 @@ fn gateway_spec_references_grant_secrets(
         let Some(ref tls) = l.tls else {
             return false;
         };
-        tls.certificate_refs.as_deref().unwrap_or_default().iter().any(|r| {
-            let secret_ns = r.namespace.as_deref().unwrap_or(gw_ns);
-            gateway_spec_has_grantable_secret_ref(rg, "Gateway", gw_ns, secret_ns, &r.name)
-        })
+        tls.certificate_refs
+            .as_deref()
+            .unwrap_or_default()
+            .iter()
+            .any(|r| {
+                let secret_ns = r.namespace.as_deref().unwrap_or(gw_ns);
+                gateway_spec_has_grantable_secret_ref(rg, "Gateway", gw_ns, secret_ns, &r.name)
+            })
     })
 }
 
@@ -161,10 +168,14 @@ fn listenerset_spec_references_grant_secrets(
         let Some(ref tls) = l.tls else {
             return false;
         };
-        tls.certificate_refs.as_deref().unwrap_or_default().iter().any(|r| {
-            let secret_ns = r.namespace.as_deref().unwrap_or(ls_ns);
-            gateway_spec_has_grantable_secret_ref(rg, "ListenerSet", ls_ns, secret_ns, &r.name)
-        })
+        tls.certificate_refs
+            .as_deref()
+            .unwrap_or_default()
+            .iter()
+            .any(|r| {
+                let secret_ns = r.namespace.as_deref().unwrap_or(ls_ns);
+                gateway_spec_has_grantable_secret_ref(rg, "ListenerSet", ls_ns, secret_ns, &r.name)
+            })
     })
 }
 
@@ -449,12 +460,8 @@ pub async fn gateway_keys_for_inference_pool(
 /// Owning gateway for a ugwc-managed dataplane Service (from labels).
 pub fn gateway_key_for_managed_service(svc: &Service) -> Option<(String, String)> {
     let labels = svc.metadata.labels.as_ref()?;
-    let gw_ns = labels
-        .get("gateway.ugwc.io/gateway-namespace")?
-        .clone();
-    let gw_name = labels
-        .get("gateway.ugwc.io/gateway-name")?
-        .clone();
+    let gw_ns = labels.get("gateway.ugwc.io/gateway-namespace")?.clone();
+    let gw_name = labels.get("gateway.ugwc.io/gateway-name")?.clone();
     if gw_ns.is_empty() || gw_name.is_empty() {
         None
     } else {
@@ -498,9 +505,11 @@ pub fn gateway_keys_for_secret_from_stores(
     for pol in stores.list_backend_tls_policies() {
         let pol_ns = pol.metadata.namespace.as_deref().unwrap_or("");
         if backend_tls_policy_spec_references_secret(&pol.spec, pol_ns, secret_ns, secret_name) {
-            keys.extend(crate::watch_helpers_store::gateway_targets_for_backend_tls_policy_from_stores(
-                stores, &pol,
-            ));
+            keys.extend(
+                crate::watch_helpers_store::gateway_targets_for_backend_tls_policy_from_stores(
+                    stores, &pol,
+                ),
+            );
         }
     }
     keys
@@ -519,9 +528,11 @@ pub fn gateway_keys_for_configmap_from_stores(
         if !backend_tls_policy_spec_references_configmap(&pol.spec, pol_ns, cm_ns, cm_name) {
             continue;
         }
-        keys.extend(crate::watch_helpers_store::gateway_targets_for_backend_tls_policy_from_stores(
-            stores, &pol,
-        ));
+        keys.extend(
+            crate::watch_helpers_store::gateway_targets_for_backend_tls_policy_from_stores(
+                stores, &pol,
+            ),
+        );
     }
     keys
 }
@@ -547,10 +558,7 @@ pub async fn gateway_keys_for_gateway_class(
 }
 
 /// Send all keys; returns false if the queue closed.
-pub async fn drain_gateway_keys(
-    keys: HashSet<(String, String)>,
-    tx: &ReconcileSender,
-) -> bool {
+pub async fn drain_gateway_keys(keys: HashSet<(String, String)>, tx: &ReconcileSender) -> bool {
     for (pns, pname) in keys {
         if tx.send(pns, pname).await.is_err() {
             return false;
@@ -561,7 +569,9 @@ pub async fn drain_gateway_keys(
 
 #[cfg(test)]
 mod tests {
-    use crate::resources::{ReferenceGrant, ReferenceGrantFrom, ReferenceGrantSpec, ReferenceGrantTo};
+    use crate::resources::{
+        ReferenceGrant, ReferenceGrantFrom, ReferenceGrantSpec, ReferenceGrantTo,
+    };
     use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
 
     fn route_namespace_hints(from: &[ReferenceGrantFrom]) -> Vec<String> {
@@ -685,10 +695,18 @@ mod tests {
             ..Default::default()
         };
         assert!(super::reference_grant_permits_listener_secret_from_spec(
-            &rg, "Gateway", "gw-ns", "sec-ns", "tls-secret",
+            &rg,
+            "Gateway",
+            "gw-ns",
+            "sec-ns",
+            "tls-secret",
         ));
         assert!(!super::reference_grant_permits_listener_secret_from_spec(
-            &rg, "Gateway", "gw-ns", "sec-ns", "other-secret",
+            &rg,
+            "Gateway",
+            "gw-ns",
+            "sec-ns",
+            "other-secret",
         ));
     }
 

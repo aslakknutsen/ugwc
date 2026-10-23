@@ -13,8 +13,8 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use regex::escape as regex_escape;
 use ugwc_core::ir::{
-    BackendIr, BackendTlsIr, IrSnapshot, ListenerIr, RequestRedirectIr, RouteFamily, RouteMatchIr,
-    RouteRuleIr, TlsMode, WeightedBackendIr, backend_endpoints_map_key,
+    backend_endpoints_map_key, BackendIr, BackendTlsIr, IrSnapshot, ListenerIr, RequestRedirectIr,
+    RouteFamily, RouteMatchIr, RouteRuleIr, TlsMode, WeightedBackendIr,
 };
 
 use crate::model::{
@@ -1690,9 +1690,9 @@ mod tests {
     use super::*;
     use serde_yaml::Value;
     use ugwc_core::ir::{
-        BackendEndpointIr, BackendTlsIr, CorsFilterIr, IR_VERSION, InferencePoolBackendIr,
-        IrRevision, IrScopeId, ListenerAttachmentIr, NamedHeaderIr, RequestHeaderModifierIr,
-        RouteMatchIr, SnapshotMeta, UrlRewriteIr,
+        BackendEndpointIr, BackendTlsIr, CorsFilterIr, InferencePoolBackendIr, IrRevision,
+        IrScopeId, ListenerAttachmentIr, NamedHeaderIr, RequestHeaderModifierIr, RouteMatchIr,
+        SnapshotMeta, UrlRewriteIr, IR_VERSION,
     };
     use zeroize::Zeroizing;
 
@@ -2010,18 +2010,14 @@ mod tests {
         let tls = &filter(&value, "load_balancer")["clusters"][0]["tls"];
         assert_eq!(tls["verify"].as_bool(), Some(true));
         assert_eq!(tls["sni"].as_str(), Some("svc.default.svc.cluster.local"));
-        assert!(
-            tls["ca"]["ca_path"]
-                .as_str()
-                .unwrap()
-                .starts_with(TLS_MOUNT_DIR)
-        );
-        assert!(
-            tls["client_cert"]["cert_path"]
-                .as_str()
-                .unwrap()
-                .starts_with(TLS_MOUNT_DIR)
-        );
+        assert!(tls["ca"]["ca_path"]
+            .as_str()
+            .unwrap()
+            .starts_with(TLS_MOUNT_DIR));
+        assert!(tls["client_cert"]["cert_path"]
+            .as_str()
+            .unwrap()
+            .starts_with(TLS_MOUNT_DIR));
     }
 
     #[test]
@@ -2086,11 +2082,9 @@ mod tests {
             Some("https://new.example.com/new${query}")
         );
         let filters = value["filter_chains"][0]["filters"].as_sequence().unwrap();
-        assert!(
-            filters
-                .iter()
-                .all(|f| f["filter"].as_str() != Some("router"))
-        );
+        assert!(filters
+            .iter()
+            .all(|f| f["filter"].as_str() != Some("router")));
     }
 
     #[test]
@@ -2239,11 +2233,10 @@ mod tests {
         assert_eq!(endpoints[0]["weight"].as_u64(), Some(3));
         assert_eq!(endpoints[1]["address"].as_str(), Some("10.0.0.2:8080"));
         assert_eq!(endpoints[1]["weight"].as_u64(), Some(1));
-        assert!(
-            !out.unsupported
-                .iter()
-                .any(|u| u.feature == "WeightedBackends")
-        );
+        assert!(!out
+            .unsupported
+            .iter()
+            .any(|u| u.feature == "WeightedBackends"));
     }
 
     #[test]
@@ -2288,13 +2281,11 @@ mod tests {
             response["conditions"][0]["when"]["path_prefix"].as_str(),
             Some("/v2")
         );
-        assert!(
-            !value["filter_chains"][0]["filters"]
-                .as_sequence()
-                .unwrap()
-                .iter()
-                .any(|f| f["filter"].as_str() == Some("load_balancer"))
-        );
+        assert!(!value["filter_chains"][0]["filters"]
+            .as_sequence()
+            .unwrap()
+            .iter()
+            .any(|f| f["filter"].as_str() == Some("load_balancer")));
     }
 
     #[test]
@@ -2410,11 +2401,10 @@ mod tests {
             vec![("default", "svc", 8080, "10.0.0.1")],
         );
         let out = encode(&ir).unwrap();
-        assert!(
-            out.unsupported
-                .iter()
-                .any(|u| u.feature == "CorsCredentialsWildcard")
-        );
+        assert!(out
+            .unsupported
+            .iter()
+            .any(|u| u.feature == "CorsCredentialsWildcard"));
         let cors = out.config.filter_chains[0]
             .filters
             .iter()
@@ -2460,11 +2450,10 @@ mod tests {
             vec![("default", "svc", 8080, "10.0.0.1")],
         );
         let out = encode(&ir).unwrap();
-        assert!(
-            !out.unsupported
-                .iter()
-                .any(|u| u.feature == "MultipleCorsConfigs")
-        );
+        assert!(!out
+            .unsupported
+            .iter()
+            .any(|u| u.feature == "MultipleCorsConfigs"));
         let cors: Vec<_> = out.config.filter_chains[0]
             .filters
             .iter()
@@ -2493,12 +2482,10 @@ mod tests {
         );
         let out = encode(&ir).unwrap();
         let value: Value = serde_yaml::from_str(&out.yaml).unwrap();
-        assert!(
-            value["filter_chains"][0]["filters"]
-                .as_sequence()
-                .unwrap()
-                .is_empty()
-        );
+        assert!(value["filter_chains"][0]["filters"]
+            .as_sequence()
+            .unwrap()
+            .is_empty());
         assert!(out.unsupported.is_empty());
     }
 
@@ -2520,11 +2507,10 @@ mod tests {
             vec![],
         );
         let out = encode(&ir).unwrap();
-        assert!(
-            out.unsupported
-                .iter()
-                .any(|u| u.feature == "TlsListenerWithoutRoutes")
-        );
+        assert!(out
+            .unsupported
+            .iter()
+            .any(|u| u.feature == "TlsListenerWithoutRoutes"));
         assert_eq!(out.config.listeners.len(), 1);
         assert_eq!(out.config.listeners[0].address, "0.0.0.0:443");
         assert_eq!(out.config.listeners[0].protocol, Some(Protocol::Tcp));
@@ -2575,23 +2561,18 @@ mod tests {
             vec![],
         );
         let out = encode(&ir).unwrap();
-        assert!(
-            out.unsupported
-                .iter()
-                .any(|u| u.feature == "RedirectStatus303")
-        );
+        assert!(out
+            .unsupported
+            .iter()
+            .any(|u| u.feature == "RedirectStatus303"));
         let value: Value = serde_yaml::from_str(&out.yaml).unwrap();
         let filters = value["filter_chains"][0]["filters"].as_sequence().unwrap();
-        assert!(
-            filters
-                .iter()
-                .all(|f| f["filter"].as_str() != Some("redirect"))
-        );
-        assert!(
-            filters
-                .iter()
-                .all(|f| f["filter"].as_str() != Some("static_response"))
-        );
+        assert!(filters
+            .iter()
+            .all(|f| f["filter"].as_str() != Some("redirect")));
+        assert!(filters
+            .iter()
+            .all(|f| f["filter"].as_str() != Some("static_response")));
     }
 
     #[test]

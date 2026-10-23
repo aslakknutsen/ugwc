@@ -4,9 +4,7 @@ use std::sync::{Arc, Mutex};
 use kube::api::{Patch, PatchParams};
 use kube::{Api, Client};
 
-use crate::resources::{
-    GRPCRoute, HTTPRoute, TCPRoute, TLSRoute, UDPRoute,
-};
+use crate::resources::{GRPCRoute, HTTPRoute, TCPRoute, TLSRoute, UDPRoute};
 use ugwc_core::snapshot::ParentRefSnap;
 use ugwc_core::{
     grpc_route_accepted_condition_for_parent, http_route_accepted_condition_for_parent,
@@ -206,9 +204,9 @@ pub async fn apply_http_route_merged_parent_status(
         let Some(pref) = row.get("parentRef") else {
             return true;
         };
-        !ours.iter().any(|snap| {
-            parent_ref_matches_json(pref, &parent_ref_json_from_snap(snap, route_ns))
-        })
+        !ours
+            .iter()
+            .any(|snap| parent_ref_matches_json(pref, &parent_ref_json_from_snap(snap, route_ns)))
     });
 
     let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
@@ -364,9 +362,9 @@ pub async fn apply_grpc_route_merged_parent_status(
         let Some(pref) = row.get("parentRef") else {
             return true;
         };
-        !ours.iter().any(|snap| {
-            parent_ref_matches_json(pref, &parent_ref_json_from_snap(snap, route_ns))
-        })
+        !ours
+            .iter()
+            .any(|snap| parent_ref_matches_json(pref, &parent_ref_json_from_snap(snap, route_ns)))
     });
 
     let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
@@ -522,9 +520,9 @@ pub async fn apply_tls_route_merged_parent_status(
         let Some(pref) = row.get("parentRef") else {
             return true;
         };
-        !ours.iter().any(|snap| {
-            parent_ref_matches_json(pref, &parent_ref_json_from_snap(snap, route_ns))
-        })
+        !ours
+            .iter()
+            .any(|snap| parent_ref_matches_json(pref, &parent_ref_json_from_snap(snap, route_ns)))
     });
 
     let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
@@ -680,9 +678,9 @@ pub async fn apply_tcp_route_merged_parent_status(
         let Some(pref) = row.get("parentRef") else {
             return true;
         };
-        !ours.iter().any(|snap| {
-            parent_ref_matches_json(pref, &parent_ref_json_from_snap(snap, route_ns))
-        })
+        !ours
+            .iter()
+            .any(|snap| parent_ref_matches_json(pref, &parent_ref_json_from_snap(snap, route_ns)))
     });
 
     let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
@@ -838,9 +836,9 @@ pub async fn apply_udp_route_merged_parent_status(
         let Some(pref) = row.get("parentRef") else {
             return true;
         };
-        !ours.iter().any(|snap| {
-            parent_ref_matches_json(pref, &parent_ref_json_from_snap(snap, route_ns))
-        })
+        !ours
+            .iter()
+            .any(|snap| parent_ref_matches_json(pref, &parent_ref_json_from_snap(snap, route_ns)))
     });
 
     let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);

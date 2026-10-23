@@ -1,9 +1,9 @@
 //! Embedded Minijinja YAML for per-gateway Praxis; applied as [`kube::core::DynamicObject`] (SSA).
 
-use kube::Client;
-use kube::ResourceExt;
 use kube::api::{Api, Patch, PatchParams};
 use kube::core::{ApiResource, DynamicObject, GroupVersionKind, TypeMeta};
+use kube::Client;
+use kube::ResourceExt;
 use minijinja::Environment;
 use serde::Deserialize;
 use serde::Serialize;

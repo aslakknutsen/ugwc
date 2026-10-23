@@ -8,11 +8,11 @@ use crate::listener_merge::merge_effective_listeners;
 use crate::snapshot::{
     AllowedRoutesNamespacesSnap, AllowedRoutesSnap, BackendTlsEffectiveSnap, EndpointPortSnap,
     EndpointSliceSnap, EndpointSnap, GatewayListenerSnap, GatewayListenerTlsSnap,
-    GrpcRouteRuleSnap, GrpcRouteSnap, HttpBackendRefSnap, HttpHeaderMatchSnap,
-    HttpPathMatchSnap, HttpQueryParamMatchSnap, HttpRequestMatchSnap, HttpRouteRuleSnap,
-    ListenerSetSnap, ParentRefSnap, ReferenceGrantFromSnap, ReferenceGrantSnap,
-    ReferenceGrantToSnap, RouteGroupKindSnap, ServicePortSnap, ServiceSnap, TcpRouteRuleSnap,
-    TcpRouteSnap, TlsRouteRuleSnap, TlsRouteSnap, UdpRouteRuleSnap, UdpRouteSnap,
+    GrpcRouteRuleSnap, GrpcRouteSnap, HttpBackendRefSnap, HttpHeaderMatchSnap, HttpPathMatchSnap,
+    HttpQueryParamMatchSnap, HttpRequestMatchSnap, HttpRouteRuleSnap, ListenerSetSnap,
+    ParentRefSnap, ReferenceGrantFromSnap, ReferenceGrantSnap, ReferenceGrantToSnap,
+    RouteGroupKindSnap, ServicePortSnap, ServiceSnap, TcpRouteRuleSnap, TcpRouteSnap,
+    TlsRouteRuleSnap, TlsRouteSnap, UdpRouteRuleSnap, UdpRouteSnap,
 };
 
 fn minimal_cluster() -> ClusterSnapshot {
@@ -451,9 +451,10 @@ fn route_attachment_counts_with_selector_namespace() {
     c.listeners[0].allowed_routes = Some(AllowedRoutesSnap {
         namespaces: Some(AllowedRoutesNamespacesSnap {
             from: Some("Selector".into()),
-            selector_match_labels: BTreeMap::from([
-                ("kubernetes.io/metadata.name".into(), "default".into()),
-            ]),
+            selector_match_labels: BTreeMap::from([(
+                "kubernetes.io/metadata.name".into(),
+                "default".into(),
+            )]),
         }),
         kinds: vec![RouteGroupKindSnap {
             group: Some("gateway.networking.k8s.io".into()),
@@ -462,9 +463,7 @@ fn route_attachment_counts_with_selector_namespace() {
     });
     c.namespace_labels = BTreeMap::from([(
         "default".into(),
-        BTreeMap::from([
-            ("kubernetes.io/metadata.name".into(), "default".into()),
-        ]),
+        BTreeMap::from([("kubernetes.io/metadata.name".into(), "default".into())]),
     )]);
     c.effective_listeners = merge_effective_listeners(&c.listeners, &[]);
     let (_ir, rep) = ir_from_cluster(&c);
@@ -581,19 +580,26 @@ fn partially_invalid_reference_grant_keeps_valid_rule_marks_invalid() {
         }),
         kinds: vec![],
     });
-    c.effective_listeners =
-        merge_effective_listeners(&c.listeners, &[]);
+    c.effective_listeners = merge_effective_listeners(&c.listeners, &[]);
 
     c.services.push(ServiceSnap {
         namespace: "app-backend".into(),
         name: "v1".into(),
-        ports: vec![ServicePortSnap { name: "http".into(), port: 8080, target_port: Some(3000) }],
+        ports: vec![ServicePortSnap {
+            name: "http".into(),
+            port: 8080,
+            target_port: Some(3000),
+        }],
         cluster_ip: None,
     });
     c.services.push(ServiceSnap {
         namespace: "app-backend".into(),
         name: "v2".into(),
-        ports: vec![ServicePortSnap { name: "http".into(), port: 8080, target_port: Some(3000) }],
+        ports: vec![ServicePortSnap {
+            name: "http".into(),
+            port: 8080,
+            target_port: Some(3000),
+        }],
         cluster_ip: None,
     });
     c.endpoint_slices.push(EndpointSliceSnap {
@@ -602,7 +608,10 @@ fn partially_invalid_reference_grant_keeps_valid_rule_marks_invalid() {
         service_name: Some("v1".into()),
         endpoints: vec![EndpointSnap {
             addresses: vec!["10.0.1.1".into()],
-            ports: vec![EndpointPortSnap { name: Some("http".into()), port: 3000 }],
+            ports: vec![EndpointPortSnap {
+                name: Some("http".into()),
+                port: 3000,
+            }],
         }],
     });
     c.endpoint_slices.push(EndpointSliceSnap {
@@ -611,24 +620,28 @@ fn partially_invalid_reference_grant_keeps_valid_rule_marks_invalid() {
         service_name: Some("v2".into()),
         endpoints: vec![EndpointSnap {
             addresses: vec!["10.0.1.2".into()],
-            ports: vec![EndpointPortSnap { name: Some("http".into()), port: 3000 }],
+            ports: vec![EndpointPortSnap {
+                name: Some("http".into()),
+                port: 3000,
+            }],
         }],
     });
 
-    c.reference_grants.push(crate::snapshot::ReferenceGrantSnap {
-        namespace: "app-backend".into(),
-        name: "g".into(),
-        from: vec![crate::snapshot::ReferenceGrantFromSnap {
-            group: Some("gateway.networking.k8s.io".into()),
-            kind: "HTTPRoute".into(),
-            namespace: "infra".into(),
-        }],
-        to: vec![crate::snapshot::ReferenceGrantToSnap {
-            group: Some("".into()),
-            kind: "Service".into(),
-            name: Some("v1".into()),
-        }],
-    });
+    c.reference_grants
+        .push(crate::snapshot::ReferenceGrantSnap {
+            namespace: "app-backend".into(),
+            name: "g".into(),
+            from: vec![crate::snapshot::ReferenceGrantFromSnap {
+                group: Some("gateway.networking.k8s.io".into()),
+                kind: "HTTPRoute".into(),
+                namespace: "infra".into(),
+            }],
+            to: vec![crate::snapshot::ReferenceGrantToSnap {
+                group: Some("".into()),
+                kind: "Service".into(),
+                name: Some("v1".into()),
+            }],
+        });
 
     c.http_routes = vec![HttpRouteSnap {
         namespace: "infra".into(),
@@ -694,7 +707,9 @@ fn partially_invalid_reference_grant_keeps_valid_rule_marks_invalid() {
     assert_eq!(ir.routes.len(), 2, "both rules must appear in the IR");
 
     let v2_rule = ir.routes.iter().find(|r| {
-        r.matches.iter().any(|m| m.path_prefix.as_deref() == Some("/v2"))
+        r.matches
+            .iter()
+            .any(|m| m.path_prefix.as_deref() == Some("/v2"))
     });
     assert!(v2_rule.is_some(), "must have a /v2 rule in IR");
     assert!(
@@ -703,7 +718,9 @@ fn partially_invalid_reference_grant_keeps_valid_rule_marks_invalid() {
     );
 
     let catchall = ir.routes.iter().find(|r| {
-        r.matches.iter().any(|m| m.path_prefix.as_deref() == Some("/"))
+        r.matches
+            .iter()
+            .any(|m| m.path_prefix.as_deref() == Some("/"))
     });
     assert!(catchall.is_some(), "must have a catch-all rule in IR");
     assert!(
@@ -711,10 +728,10 @@ fn partially_invalid_reference_grant_keeps_valid_rule_marks_invalid() {
         "catch-all rule must have backends (v1 allowed by grant)"
     );
     assert_eq!(
-        catchall.unwrap().backends[0].backend.service_name, "v1",
+        catchall.unwrap().backends[0].backend.service_name,
+        "v1",
         "catch-all backend must be v1"
     );
-
 }
 
 #[test]

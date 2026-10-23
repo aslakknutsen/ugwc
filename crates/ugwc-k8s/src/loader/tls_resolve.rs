@@ -87,9 +87,7 @@ pub(super) fn resolve_gateway_listener_tls(
         }
         let (from_ns, from_kind) = match &e.parent {
             ListenerParentSnap::InlineGateway => (gateway_ns.to_string(), "Gateway"),
-            ListenerParentSnap::ListenerSet { namespace, .. } => {
-                (namespace.clone(), "ListenerSet")
-            }
+            ListenerParentSnap::ListenerSet { namespace, .. } => (namespace.clone(), "ListenerSet"),
         };
         let mut grant_blocked = false;
         for r in refs.iter() {

@@ -1,30 +1,27 @@
 use ugwc_core::snapshot::{
     GrpcHeaderMatchSnap, GrpcMethodMatchSnap, GrpcRouteFilterSnap, GrpcRouteMatchSnap,
-    GrpcRouteRuleSnap, GrpcRouteSnap, HttpBackendRefSnap, HttpCorsFilterSnap,
-    HttpHeaderFilterSnap, HttpHeaderMatchSnap, HttpHeaderNameValueSnap, HttpPathMatchSnap,
-    HttpPathModifierSnap, HttpQueryParamMatchSnap, HttpRequestMatchSnap,
-    HttpRequestRedirectFilterSnap, HttpRouteFilterSnap, HttpRouteRuleSnap, HttpRouteSnap,
-    HttpRouteTimeoutsSnap, HttpUrlRewriteFilterSnap, TcpRouteRuleSnap, TcpRouteSnap,
-    TlsRouteRuleSnap, TlsRouteSnap, UdpRouteRuleSnap, UdpRouteSnap,
+    GrpcRouteRuleSnap, GrpcRouteSnap, HttpBackendRefSnap, HttpCorsFilterSnap, HttpHeaderFilterSnap,
+    HttpHeaderMatchSnap, HttpHeaderNameValueSnap, HttpPathMatchSnap, HttpPathModifierSnap,
+    HttpQueryParamMatchSnap, HttpRequestMatchSnap, HttpRequestRedirectFilterSnap,
+    HttpRouteFilterSnap, HttpRouteRuleSnap, HttpRouteSnap, HttpRouteTimeoutsSnap,
+    HttpUrlRewriteFilterSnap, TcpRouteRuleSnap, TcpRouteSnap, TlsRouteRuleSnap, TlsRouteSnap,
+    UdpRouteRuleSnap, UdpRouteSnap,
 };
 
 use crate::resources::{
     GRPCRoute, GrpcRouteRules, GrpcRouteRulesBackendRefs, GrpcRouteRulesFilters,
     GrpcRouteRulesFiltersRequestHeaderModifier, GrpcRouteRulesFiltersResponseHeaderModifier,
     GrpcRouteRulesFiltersType, GrpcRouteRulesMatches, GrpcRouteRulesMatchesHeaders,
-    GrpcRouteRulesMatchesHeadersType, GrpcRouteRulesMatchesMethodType, HTTPRoute,
-    HttpRouteRules, HttpRouteRulesBackendRefs, HttpRouteRulesFilters,
-    HttpRouteRulesFiltersRequestHeaderModifier, HttpRouteRulesFiltersRequestRedirectPath,
-    HttpRouteRulesFiltersRequestRedirectPathType, HttpRouteRulesFiltersRequestRedirectScheme,
-    HttpRouteRulesFiltersResponseHeaderModifier, HttpRouteRulesFiltersType,
-    HttpRouteRulesFiltersUrlRewritePath,
-    HttpRouteRulesFiltersUrlRewritePathType,
-    HttpRouteRulesMatches, HttpRouteRulesMatchesHeaders, HttpRouteRulesMatchesHeadersType,
-    HttpRouteRulesMatchesMethod, HttpRouteRulesMatchesPathType, HttpRouteRulesMatchesQueryParams,
-    HttpRouteRulesTimeouts,
-    TCPRoute, TcpRouteRules, TcpRouteRulesBackendRefs,
-    TLSRoute, TlsRouteRules, TlsRouteRulesBackendRefs,
-    UDPRoute, UdpRouteRules, UdpRouteRulesBackendRefs,
+    GrpcRouteRulesMatchesHeadersType, GrpcRouteRulesMatchesMethodType, HTTPRoute, HttpRouteRules,
+    HttpRouteRulesBackendRefs, HttpRouteRulesFilters, HttpRouteRulesFiltersRequestHeaderModifier,
+    HttpRouteRulesFiltersRequestRedirectPath, HttpRouteRulesFiltersRequestRedirectPathType,
+    HttpRouteRulesFiltersRequestRedirectScheme, HttpRouteRulesFiltersResponseHeaderModifier,
+    HttpRouteRulesFiltersType, HttpRouteRulesFiltersUrlRewritePath,
+    HttpRouteRulesFiltersUrlRewritePathType, HttpRouteRulesMatches, HttpRouteRulesMatchesHeaders,
+    HttpRouteRulesMatchesHeadersType, HttpRouteRulesMatchesMethod, HttpRouteRulesMatchesPathType,
+    HttpRouteRulesMatchesQueryParams, HttpRouteRulesTimeouts, TCPRoute, TLSRoute, TcpRouteRules,
+    TcpRouteRulesBackendRefs, TlsRouteRules, TlsRouteRulesBackendRefs, UDPRoute, UdpRouteRules,
+    UdpRouteRulesBackendRefs,
 };
 
 use super::parent_refs::{
@@ -59,7 +56,9 @@ fn http_header_filter_snap(h: &HttpRouteRulesFiltersRequestHeaderModifier) -> Ht
     }
 }
 
-fn grpc_req_header_filter_snap(h: &GrpcRouteRulesFiltersRequestHeaderModifier) -> HttpHeaderFilterSnap {
+fn grpc_req_header_filter_snap(
+    h: &GrpcRouteRulesFiltersRequestHeaderModifier,
+) -> HttpHeaderFilterSnap {
     HttpHeaderFilterSnap {
         set: h
             .set
@@ -125,7 +124,9 @@ fn http_route_filters_type_str(ty: &HttpRouteRulesFiltersType) -> &'static str {
     }
 }
 
-fn redirect_scheme_snap(sch: Option<&HttpRouteRulesFiltersRequestRedirectScheme>) -> Option<String> {
+fn redirect_scheme_snap(
+    sch: Option<&HttpRouteRulesFiltersRequestRedirectScheme>,
+) -> Option<String> {
     sch.map(|s| match s {
         HttpRouteRulesFiltersRequestRedirectScheme::Http => "http".to_string(),
         HttpRouteRulesFiltersRequestRedirectScheme::Https => "https".to_string(),
@@ -156,7 +157,9 @@ fn url_rewrite_path_modifier_snap(p: &HttpRouteRulesFiltersUrlRewritePath) -> Ht
     }
 }
 
-fn resp_header_filter_snap(h: &HttpRouteRulesFiltersResponseHeaderModifier) -> HttpHeaderFilterSnap {
+fn resp_header_filter_snap(
+    h: &HttpRouteRulesFiltersResponseHeaderModifier,
+) -> HttpHeaderFilterSnap {
     HttpHeaderFilterSnap {
         set: h
             .set
@@ -200,15 +203,16 @@ fn http_method_str(m: &HttpRouteRulesMatchesMethod) -> String {
 fn http_route_filter_snap(f: &HttpRouteRulesFilters) -> HttpRouteFilterSnap {
     HttpRouteFilterSnap {
         filter_type: http_route_filters_type_str(&f.r#type).to_string(),
-        request_redirect: f.request_redirect.as_ref().map(|rr| HttpRequestRedirectFilterSnap {
-            scheme: redirect_scheme_snap(rr.scheme.as_ref()),
-            hostname: rr.hostname.clone(),
-            port: snap_u16_port(rr.port),
-            status_code: rr
-                .status_code
-                .and_then(|c| i32::try_from(c).ok()),
-            path: rr.path.as_ref().map(http_path_modifier_snap),
-        }),
+        request_redirect: f
+            .request_redirect
+            .as_ref()
+            .map(|rr| HttpRequestRedirectFilterSnap {
+                scheme: redirect_scheme_snap(rr.scheme.as_ref()),
+                hostname: rr.hostname.clone(),
+                port: snap_u16_port(rr.port),
+                status_code: rr.status_code.and_then(|c| i32::try_from(c).ok()),
+                path: rr.path.as_ref().map(http_path_modifier_snap),
+            }),
         request_header_modifier: f
             .request_header_modifier
             .as_ref()
@@ -255,19 +259,27 @@ fn grpc_route_filter_snap(f: &GrpcRouteRulesFilters) -> GrpcRouteFilterSnap {
     }
 }
 
-pub(super) fn http_path_match_type_str(ty: Option<&HttpRouteRulesMatchesPathType>) -> Option<String> {
+pub(super) fn http_path_match_type_str(
+    ty: Option<&HttpRouteRulesMatchesPathType>,
+) -> Option<String> {
     ty.map(|t| format!("{t:?}"))
 }
 
-pub(super) fn http_header_match_type_str(ty: Option<&HttpRouteRulesMatchesHeadersType>) -> Option<String> {
+pub(super) fn http_header_match_type_str(
+    ty: Option<&HttpRouteRulesMatchesHeadersType>,
+) -> Option<String> {
     ty.map(|t| format!("{t:?}"))
 }
 
-pub(super) fn grpc_header_match_type_str(ty: Option<&GrpcRouteRulesMatchesHeadersType>) -> Option<String> {
+pub(super) fn grpc_header_match_type_str(
+    ty: Option<&GrpcRouteRulesMatchesHeadersType>,
+) -> Option<String> {
     ty.map(|t| format!("{t:?}"))
 }
 
-pub(super) fn grpc_method_match_type_str(ty: Option<&GrpcRouteRulesMatchesMethodType>) -> Option<String> {
+pub(super) fn grpc_method_match_type_str(
+    ty: Option<&GrpcRouteRulesMatchesMethodType>,
+) -> Option<String> {
     ty.map(|t| format!("{t:?}"))
 }
 
@@ -373,11 +385,13 @@ pub(super) fn http_route_to_snap(route: &HTTPRoute) -> HttpRouteSnap {
                         .as_deref()
                         .unwrap_or_default()
                         .iter()
-                        .map(|qp: &HttpRouteRulesMatchesQueryParams| HttpQueryParamMatchSnap {
-                            name: qp.name.clone(),
-                            value: qp.value.clone(),
-                            match_type: qp.r#type.as_ref().map(|t| format!("{t:?}")),
-                        })
+                        .map(
+                            |qp: &HttpRouteRulesMatchesQueryParams| HttpQueryParamMatchSnap {
+                                name: qp.name.clone(),
+                                value: qp.value.clone(),
+                                match_type: qp.r#type.as_ref().map(|t| format!("{t:?}")),
+                            },
+                        )
                         .collect(),
                 })
                 .collect(),
@@ -395,10 +409,13 @@ pub(super) fn http_route_to_snap(route: &HTTPRoute) -> HttpRouteSnap {
                 .iter()
                 .map(http_backend_ref_to_snap)
                 .collect(),
-            timeouts: r.timeouts.as_ref().map(|t: &HttpRouteRulesTimeouts| HttpRouteTimeoutsSnap {
-                request: t.request.clone(),
-                backend_request: t.backend_request.clone(),
-            }),
+            timeouts: r
+                .timeouts
+                .as_ref()
+                .map(|t: &HttpRouteRulesTimeouts| HttpRouteTimeoutsSnap {
+                    request: t.request.clone(),
+                    backend_request: t.backend_request.clone(),
+                }),
         })
         .collect();
 
@@ -505,11 +522,7 @@ pub(super) fn tls_route_to_snap(route: &TLSRoute) -> TlsRouteSnap {
         .rules
         .iter()
         .map(|r: &TlsRouteRules| TlsRouteRuleSnap {
-            backend_refs: r
-                .backend_refs
-                .iter()
-                .map(tls_backend_ref_to_snap)
-                .collect(),
+            backend_refs: r.backend_refs.iter().map(tls_backend_ref_to_snap).collect(),
         })
         .collect();
 
@@ -543,11 +556,7 @@ pub(super) fn tcp_route_to_snap(route: &TCPRoute) -> TcpRouteSnap {
         .rules
         .iter()
         .map(|r: &TcpRouteRules| TcpRouteRuleSnap {
-            backend_refs: r
-                .backend_refs
-                .iter()
-                .map(tcp_backend_ref_to_snap)
-                .collect(),
+            backend_refs: r.backend_refs.iter().map(tcp_backend_ref_to_snap).collect(),
         })
         .collect();
 
@@ -580,11 +589,7 @@ pub(super) fn udp_route_to_snap(route: &UDPRoute) -> UdpRouteSnap {
         .rules
         .iter()
         .map(|r: &UdpRouteRules| UdpRouteRuleSnap {
-            backend_refs: r
-                .backend_refs
-                .iter()
-                .map(udp_backend_ref_to_snap)
-                .collect(),
+            backend_refs: r.backend_refs.iter().map(udp_backend_ref_to_snap).collect(),
         })
         .collect();
 

@@ -168,4 +168,3 @@ pub(super) fn extract_grpc_rule_filters(
     }
     (hdr_mod, resp_hdr)
 }
-

@@ -30,7 +30,13 @@ pub(super) fn match_specificity(m: &RouteMatchIr) -> (u8, usize, u8, usize, usiz
     let method_score = if m.method.is_some() { 1u8 } else { 0 };
     let header_count = m.headers_exact.len();
     let query_count = m.query_params_exact.len();
-    (path_type_score, path_len, method_score, header_count, query_count)
+    (
+        path_type_score,
+        path_len,
+        method_score,
+        header_count,
+        query_count,
+    )
 }
 
 /// Max specificity across all match clauses in a rule (higher = more specific).
@@ -271,7 +277,10 @@ pub(super) fn extract_rule_filters(
             "RequestMirror" | "ExtensionRef" => {
                 report.errors.push(httproute_obj_err(
                     route,
-                    format!("UnsupportedValue: filter type {} (rule {rule_idx} filter {fi})", f.filter_type),
+                    format!(
+                        "UnsupportedValue: filter type {} (rule {rule_idx} filter {fi})",
+                        f.filter_type
+                    ),
                 ));
             }
             other => {
@@ -290,4 +299,3 @@ pub(super) fn extract_rule_filters(
         cors,
     }
 }
-

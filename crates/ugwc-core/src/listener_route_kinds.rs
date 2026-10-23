@@ -133,7 +133,12 @@ pub fn effective_listener_supported_route_kinds_for_status(
         return Vec::new();
     }
 
-    let default_http_grpc = || vec![gw_route_group_kind("HTTPRoute"), gw_route_group_kind("GRPCRoute")];
+    let default_http_grpc = || {
+        vec![
+            gw_route_group_kind("HTTPRoute"),
+            gw_route_group_kind("GRPCRoute"),
+        ]
+    };
 
     if kinds.is_empty() {
         return default_http_grpc();
@@ -164,9 +169,7 @@ pub fn effective_listener_supported_route_kinds_for_status(
 mod tests {
     use super::*;
     use crate::listener_merge::merge_effective_listeners;
-    use crate::snapshot::{
-        AllowedRoutesSnap, GatewayListenerSnap, RouteGroupKindSnap,
-    };
+    use crate::snapshot::{AllowedRoutesSnap, GatewayListenerSnap, RouteGroupKindSnap};
 
     #[test]
     fn invalid_http_listener_all_bad_kinds_yields_empty_supported() {

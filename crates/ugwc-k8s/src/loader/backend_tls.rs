@@ -3,13 +3,13 @@
 use std::collections::{BTreeMap, HashSet};
 
 use kube::ResourceExt;
-use zeroize::Zeroizing;
 use ugwc_core::http_route_attachment::reference_grant_permits_backend_tls_policy_resource_ref;
 use ugwc_core::ir::BackendTlsIr;
 use ugwc_core::snapshot::{
     BackendTlsEffectiveSnap, BackendTlsPolicyOutcomeSnap, InferencePoolSnap, ReferenceGrantSnap,
     ServiceSnap,
 };
+use zeroize::Zeroizing;
 
 use crate::resources::{
     BackendTlsPolicyValidation, BackendTlsPolicyValidationCaCertificateRefs,
@@ -513,11 +513,22 @@ pub(crate) fn policy_outcome_from_policy_stores(
     grants: &[ReferenceGrantSnap],
     conflicted: bool,
 ) -> BackendTlsPolicyOutcomeSnap {
-    let policy_ns = pol.metadata.namespace.as_deref().unwrap_or("default").to_string();
+    let policy_ns = pol
+        .metadata
+        .namespace
+        .as_deref()
+        .unwrap_or("default")
+        .to_string();
     let policy_name = pol.metadata.name.as_deref().unwrap_or("").to_string();
     let (tls_ir, tls_resolve_reason) =
         backend_tls_ir_from_validation(stores, &policy_ns, &pol.spec.validation, grants);
-    build_policy_outcome_snap(policy_ns, policy_name, tls_ir, tls_resolve_reason, conflicted)
+    build_policy_outcome_snap(
+        policy_ns,
+        policy_name,
+        tls_ir,
+        tls_resolve_reason,
+        conflicted,
+    )
 }
 
 /// Refresh a snapshot outcome using live store CA material (preserves conflict flag).

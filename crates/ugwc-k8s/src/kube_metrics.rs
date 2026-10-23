@@ -32,9 +32,7 @@ pub struct KubeClientMetrics {
 }
 
 /// Build a [`Client`] with REST request duration metrics on the HTTP stack.
-pub async fn try_default_instrumented(
-    metrics: KubeClientMetrics,
-) -> Result<Client, kube::Error> {
+pub async fn try_default_instrumented(metrics: KubeClientMetrics) -> Result<Client, kube::Error> {
     let config = Config::infer()
         .await
         .map_err(|e| kube::Error::Service(format!("config infer: {e}").into()))?;

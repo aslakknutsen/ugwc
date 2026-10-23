@@ -6,14 +6,14 @@ use kube::CustomResource;
 use serde::{Deserialize, Serialize};
 
 // ── Standard channel re-exports ──────────────────────────────────────────────
+pub use gateway_api::backendtlspolicies::*;
 pub use gateway_api::gatewayclasses::*;
 pub use gateway_api::gateways::*;
-pub use gateway_api::listenersets::*;
-pub use gateway_api::httproutes::*;
 pub use gateway_api::grpcroutes::*;
-pub use gateway_api::tlsroutes::*;
+pub use gateway_api::httproutes::*;
+pub use gateway_api::listenersets::*;
 pub use gateway_api::referencegrants::*;
-pub use gateway_api::backendtlspolicies::*;
+pub use gateway_api::tlsroutes::*;
 
 // ── Experimental channel re-exports (TCPRoute, UDPRoute) ─────────────────────
 pub use gateway_api::experimental::tcproutes::*;
@@ -174,9 +174,14 @@ pub fn backend_tls_policy_spec_references_configmap(
     cm_namespace: &str,
     cm_name: &str,
 ) -> bool {
-    for ca in spec.validation.ca_certificate_refs.as_deref().unwrap_or_default() {
-        let is_cm = ca.kind.eq_ignore_ascii_case("ConfigMap")
-            && (ca.group.is_empty() || ca.group == "");
+    for ca in spec
+        .validation
+        .ca_certificate_refs
+        .as_deref()
+        .unwrap_or_default()
+    {
+        let is_cm =
+            ca.kind.eq_ignore_ascii_case("ConfigMap") && (ca.group.is_empty() || ca.group == "");
         if is_cm && ca.name == cm_name {
             // CACertificateRefs is LocalObjectReference (no namespace field) — always local.
             if _policy_namespace == cm_namespace {
@@ -195,7 +200,12 @@ pub fn backend_tls_policy_spec_references_secret(
     secret_namespace: &str,
     secret_name: &str,
 ) -> bool {
-    for ca in spec.validation.ca_certificate_refs.as_deref().unwrap_or_default() {
+    for ca in spec
+        .validation
+        .ca_certificate_refs
+        .as_deref()
+        .unwrap_or_default()
+    {
         if ca.kind.eq_ignore_ascii_case("Secret")
             && (ca.group.is_empty() || ca.group == "")
             && ca.name == secret_name
@@ -219,8 +229,8 @@ pub fn backend_tls_policy_targets_service(
         return false;
     }
     for t in &spec.target_refs {
-        let is_svc = t.kind.eq_ignore_ascii_case("Service")
-            && (t.group.is_empty() || t.group == "");
+        let is_svc =
+            t.kind.eq_ignore_ascii_case("Service") && (t.group.is_empty() || t.group == "");
         if is_svc && t.name == svc_name {
             return true;
         }
@@ -241,8 +251,7 @@ pub fn backend_tls_policy_targets_inference_pool(
     }
     for t in &spec.target_refs {
         let is_pool = t.kind.eq_ignore_ascii_case("InferencePool")
-            && (t.group.is_empty()
-                || t.group.eq_ignore_ascii_case("inference.networking.k8s.io"));
+            && (t.group.is_empty() || t.group.eq_ignore_ascii_case("inference.networking.k8s.io"));
         if is_pool && t.name == pool_name {
             return true;
         }

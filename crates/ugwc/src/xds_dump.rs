@@ -62,7 +62,10 @@ fn is_gwxds_resource_type_url(type_url: &str) -> bool {
 
 fn print_decoded_resource(any: &xds_api::pb::google::protobuf::Any) {
     if !is_gwxds_resource_type_url(&any.type_url) {
-        println!("  (decode skipped: expected istio.gwxds.Resource, got {})", any.type_url);
+        println!(
+            "  (decode skipped: expected istio.gwxds.Resource, got {})",
+            any.type_url
+        );
         return;
     }
     match ugwc_gwxds::istio::gwxds::Resource::decode(any.value.as_slice()) {
