@@ -65,9 +65,9 @@ helm-uninstall:
 	helm uninstall "$(HELM_RELEASE)" --namespace "$(HELM_NAMESPACE)"
 
 # kind + MetalLB + CRDs + ugwc + GatewayClass — see docs/operations.md
-hack-setup:
+hack-setup: _ensure_protoc_tmp
 	./hack/setup.sh
 
 # Requires Go, git, kubectl; cluster from hack/setup.sh — see hack/conformance.sh
-conformance:
+conformance: _ensure_protoc_tmp
 	./hack/conformance.sh
