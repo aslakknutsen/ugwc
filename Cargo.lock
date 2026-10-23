@@ -2730,6 +2730,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "ugwc-praxis"
+version = "0.1.0"
+dependencies = [
+ "regex",
+ "serde",
+ "serde_yaml",
+ "ugwc-core",
+ "zeroize",
+]
+
+[[package]]
 name = "ugwc-xds"
 version = "0.1.0"
 dependencies = [

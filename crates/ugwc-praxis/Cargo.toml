@@ -1,0 +1,16 @@
+[package]
+name = "ugwc-praxis"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Encode ugwc IR into Praxis native YAML configuration"
+
+[dependencies]
+ugwc-core = { path = "../ugwc-core" }
+serde.workspace = true
+serde_yaml.workspace = true
+regex.workspace = true
+
+[dev-dependencies]
+zeroize.workspace = true

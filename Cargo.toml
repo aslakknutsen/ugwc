@@ -5,6 +5,7 @@ members = [
     "crates/ugwc-core",
     "crates/ugwc-gwxds",
     "crates/ugwc-k8s",
+    "crates/ugwc-praxis",
     "crates/ugwc-xds",
 ]
 exclude = ["crates/metrics-prometheus-client"]
