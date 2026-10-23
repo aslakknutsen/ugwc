@@ -26,7 +26,6 @@ COPY crates/ugwc-gwxds/proto crates/ugwc-gwxds/proto
 COPY crates/ugwc-k8s/Cargo.toml crates/ugwc-k8s/Cargo.toml
 COPY crates/ugwc-praxis/Cargo.toml crates/ugwc-praxis/Cargo.toml
 COPY crates/ugwc-xds/Cargo.toml crates/ugwc-xds/Cargo.toml
-COPY crates/metrics-prometheus-client crates/metrics-prometheus-client
 
 ARG UGWC_GIT_COMMIT=unknown
 ENV UGWC_GIT_COMMIT=${UGWC_GIT_COMMIT}
