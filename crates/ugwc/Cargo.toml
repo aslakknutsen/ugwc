@@ -15,6 +15,7 @@ path = "src/main.rs"
 ugwc-core = { path = "../ugwc-core" }
 ugwc-k8s = { path = "../ugwc-k8s" }
 ugwc-gwxds = { path = "../ugwc-gwxds" }
+ugwc-praxis = { path = "../ugwc-praxis" }
 ugwc-xds = { path = "../ugwc-xds" }
 prost.workspace = true
 tokio.workspace = true

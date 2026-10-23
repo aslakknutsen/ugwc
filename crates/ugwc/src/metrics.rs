@@ -47,6 +47,11 @@ pub struct MethodStatusLabels {
     pub status: String,
 }
 
+#[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
+pub struct PraxisFeatureLabels {
+    pub feature: String,
+}
+
 
 // Empty label set for metrics without labels.
 #[derive(Clone, Debug, Hash, PartialEq, Eq)]
@@ -86,6 +91,10 @@ pub struct ReconcileMetrics {
     pub ir_backends: Gauge,
     pub dataplane_apply: Counter,
     pub dataplane_error: Counter,
+    pub praxis_config_encode_duration: Family<NoLabels, Histogram>,
+    pub praxis_config_apply: Counter,
+    pub praxis_config_error: Counter,
+    pub praxis_config_unsupported: Family<PraxisFeatureLabels, Counter>,
     pub ungranted_references: Family<RouteKindLabels, Counter>,
 }
 
@@ -256,6 +265,36 @@ pub fn install() -> Result<Metrics, String> {
 
     let dataplane_error = Counter::default();
     registry.register("ugwc_dataplane_error", "Dataplane error total", dataplane_error.clone());
+
+    let praxis_config_encode_duration = Family::<NoLabels, Histogram>::new_with_constructor(|| {
+        Histogram::new(exponential_buckets(0.0001, 2.0, 14))
+    });
+    registry.register(
+        "ugwc_praxis_config_encode_seconds",
+        "Duration of encoding gateway IR into Praxis native configuration",
+        praxis_config_encode_duration.clone(),
+    );
+
+    let praxis_config_apply = Counter::default();
+    registry.register(
+        "ugwc_praxis_config_apply",
+        "Praxis ConfigMap apply total",
+        praxis_config_apply.clone(),
+    );
+
+    let praxis_config_error = Counter::default();
+    registry.register(
+        "ugwc_praxis_config_error",
+        "Praxis ConfigMap encode/apply error total",
+        praxis_config_error.clone(),
+    );
+
+    let praxis_config_unsupported = Family::<PraxisFeatureLabels, Counter>::default();
+    registry.register(
+        "ugwc_praxis_config_unsupported",
+        "Gateway API features unsupported by the Praxis native-config encoder",
+        praxis_config_unsupported.clone(),
+    );
 
     let ungranted_references = Family::<RouteKindLabels, Counter>::default();
     registry.register(
@@ -500,6 +539,10 @@ pub fn install() -> Result<Metrics, String> {
             ir_backends,
             dataplane_apply,
             dataplane_error,
+            praxis_config_encode_duration,
+            praxis_config_apply,
+            praxis_config_error,
+            praxis_config_unsupported,
             ungranted_references,
         },
         admin: AdminMetrics {
@@ -682,6 +725,32 @@ pub fn record_dataplane_apply() {
 
 pub fn record_dataplane_error() {
     get().reconcile.dataplane_error.inc();
+}
+
+pub fn observe_praxis_config_encode_seconds(seconds: f64) {
+    get()
+        .reconcile
+        .praxis_config_encode_duration
+        .get_or_create(&NoLabels)
+        .observe(seconds);
+}
+
+pub fn record_praxis_config_apply() {
+    get().reconcile.praxis_config_apply.inc();
+}
+
+pub fn record_praxis_config_error() {
+    get().reconcile.praxis_config_error.inc();
+}
+
+pub fn record_praxis_config_unsupported(feature: &str) {
+    get()
+        .reconcile
+        .praxis_config_unsupported
+        .get_or_create(&PraxisFeatureLabels {
+            feature: feature.to_string(),
+        })
+        .inc();
 }
 
 pub fn record_ungranted_references(report: &ugwc_core::CompileReport) {

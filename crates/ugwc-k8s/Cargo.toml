@@ -8,6 +8,7 @@ description = "kube clients, watches, status writers (Gateway API)"
 
 [dependencies]
 ugwc-core = { path = "../ugwc-core" }
+ugwc-praxis = { path = "../ugwc-praxis" }
 kube.workspace = true
 kube-runtime.workspace = true
 k8s-openapi.workspace = true

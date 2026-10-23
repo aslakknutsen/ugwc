@@ -76,6 +76,11 @@ spec:
         - name: praxis
           image: {{ proxy_image_json }}
           imagePullPolicy: IfNotPresent
+{% if config_source == "configmap" %}
+          args:
+            - "-c"
+            - "/etc/praxis/praxis.yaml"
+{% endif %}
           ports:
 {% for p in container_ports %}
             - containerPort: {{ p.port }}
@@ -93,6 +98,7 @@ spec:
             runAsUser: 10101
             runAsGroup: 10101
           env:
+{% if config_source == "xds" %}
             - name: ISTIOD_ADDR
               value: {{ xds_bootstrap_addr_json }}
             - name: XDS_NODE_ID
@@ -101,6 +107,7 @@ spec:
               value: {{ xds_insecure_json }}
             - name: UGWC_XDS_WIRE
               value: {{ xds_wire_json }}
+{% endif %}
             - name: GATEWAY_NAME
               value: {{ gateway_name_json }}
             - name: GATEWAY_NAMESPACE
@@ -140,6 +147,14 @@ spec:
           volumeMounts:
             - mountPath: /tmp
               name: tmp
+{% if config_source == "configmap" %}
+            - mountPath: /etc/praxis
+              name: praxis-config
+              readOnly: true
+            - mountPath: /etc/praxis-tls
+              name: praxis-tls
+              readOnly: true
+{% endif %}
           resources:
             requests:
               cpu: 100m
@@ -150,6 +165,17 @@ spec:
       volumes:
         - name: tmp
           emptyDir: {}
+{% if config_source == "configmap" %}
+        - name: praxis-config
+          configMap:
+            name: {{ config_map_name }}
+            items:
+              - key: praxis.yaml
+                path: praxis.yaml
+        - name: praxis-tls
+          secret:
+            secretName: {{ tls_secret_name }}
+{% endif %}
 ---
 apiVersion: v1
 kind: Service

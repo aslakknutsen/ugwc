@@ -192,8 +192,8 @@ impl<'a> State<'a> {
                 );
                 return None;
             }
-            let cert_key = format!("listener-tls/{name}.crt");
-            let key_key = format!("listener-tls/{name}.key");
+            let cert_key = format!("listener-{name}.crt");
+            let key_key = format!("listener-{name}.key");
             self.files.push(ConfigFile {
                 key: cert_key.clone(),
                 contents: ln.tls_cert_pem.clone(),
@@ -572,7 +572,7 @@ impl<'a> State<'a> {
         let ca = if tls.ca_cert_pem.is_empty() {
             None
         } else {
-            let key = format!("backend-tls/{cluster}.ca.pem");
+            let key = format!("backend-{cluster}.ca.pem");
             self.files.push(ConfigFile {
                 key: key.clone(),
                 contents: tls.ca_cert_pem.clone(),
@@ -591,8 +591,8 @@ impl<'a> State<'a> {
             );
             None
         } else {
-            let cert_key = format!("backend-tls/{cluster}.crt");
-            let key_key = format!("backend-tls/{cluster}.key");
+            let cert_key = format!("backend-{cluster}.crt");
+            let key_key = format!("backend-{cluster}.key");
             self.files.push(ConfigFile {
                 key: cert_key.clone(),
                 contents: tls.client_cert_pem.clone(),

@@ -2673,6 +2673,7 @@ dependencies = [
  "ugwc-core",
  "ugwc-gwxds",
  "ugwc-k8s",
+ "ugwc-praxis",
  "ugwc-xds",
  "xds-api",
 ]
@@ -2726,6 +2727,7 @@ dependencies = [
  "tower 0.5.3",
  "tracing",
  "ugwc-core",
+ "ugwc-praxis",
  "zeroize",
 ]
 

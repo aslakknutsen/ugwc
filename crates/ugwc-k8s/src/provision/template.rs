@@ -45,6 +45,10 @@ pub struct PerGatewayTemplateContext<'a> {
     pub xds_insecure_json: String,
     pub xds_wire_json: String,
     pub gateway_name_json: String,
+    /// `xds` or `configmap`.
+    pub config_source: &'a str,
+    pub config_map_name: &'a str,
+    pub tls_secret_name: &'a str,
     pub container_ports: &'a [NamePort],
     pub service_ports: &'a [NamePort],
     pub infrastructure_labels: &'a [InfraLabelRow],
@@ -147,6 +151,9 @@ mod tests {
             xds_insecure_json: serde_json::to_string("true").unwrap(),
             xds_wire_json: serde_json::to_string("gwxds").unwrap(),
             gateway_name_json: serde_json::to_string("gw1").unwrap(),
+            config_source: "xds",
+            config_map_name: "ugwc-dp-gw1",
+            tls_secret_name: "ugwc-dp-gw1-tls",
             container_ports: &ports,
             service_ports: &ports[1..],
             infrastructure_labels: &[],
@@ -156,11 +163,47 @@ mod tests {
         assert!(out.contains("kind: Deployment"));
         assert!(out.contains("quay.io/example/praxis:latest"));
         assert!(out.contains("containerPort: 15021"));
+        assert!(out.contains("ISTIOD_ADDR"));
         let docs = parse_manifest_documents(&out).expect("parse");
         assert_eq!(docs.len(), 5);
         assert_eq!(
             docs[0].get("kind").and_then(|k| k.as_str()),
             Some("ServiceAccount")
         );
+    }
+
+    #[test]
+    fn template_renders_configmap_mode() {
+        let ports = [NamePort {
+            name: "http".into(),
+            port: 8080,
+        }];
+        let ctx = PerGatewayTemplateContext {
+            namespace: "ns1",
+            gateway_name: "gw1",
+            gateway_uid: "uid-1",
+            gateway_class: "ugwc-praxis",
+            deployment_name: "ugwc-dp-gw1",
+            sa_name: "ugwc-dp-gw1-sa",
+            proxy_image_json: serde_json::to_string("quay.io/example/praxis:latest").unwrap(),
+            xds_bootstrap_addr_json: serde_json::to_string("").unwrap(),
+            gateway_scope_json: serde_json::to_string("ns1/gw1").unwrap(),
+            xds_insecure_json: serde_json::to_string("true").unwrap(),
+            xds_wire_json: serde_json::to_string("gwxds").unwrap(),
+            gateway_name_json: serde_json::to_string("gw1").unwrap(),
+            config_source: "configmap",
+            config_map_name: "ugwc-dp-gw1",
+            tls_secret_name: "ugwc-dp-gw1-tls",
+            container_ports: &ports,
+            service_ports: &ports,
+            infrastructure_labels: &[],
+        };
+        let out = render_per_gateway_praxis(&ctx).expect("render");
+        assert!(out.contains("/etc/praxis/praxis.yaml"));
+        assert!(out.contains("configMap:"));
+        assert!(out.contains("secretName: ugwc-dp-gw1-tls"));
+        assert!(!out.contains("ISTIOD_ADDR"));
+        let docs = parse_manifest_documents(&out).expect("parse");
+        assert_eq!(docs.len(), 5);
     }
 }

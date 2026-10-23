@@ -32,7 +32,8 @@ pub use reconcile_queue::{
 pub use crd_supervisor::{ActiveCrds, ManagedCrd};
 pub use events::{
     GatewayEvents, REASON_COMPILE_BLOCKED, REASON_DATAPLANE_MISCONFIGURED,
-    REASON_PROVISION_FAILED, REASON_TLS_MATERIAL_MISSING,
+    REASON_PRAXIS_CONFIG_FAILED, REASON_PRAXIS_CONFIG_UNSUPPORTED, REASON_PROVISION_FAILED,
+    REASON_TLS_MATERIAL_MISSING,
 };
 pub use initial_sync::InitialSyncGate;
 pub use spawn::spawn_with_trace_context;
@@ -41,10 +42,10 @@ pub use loader::{load_cluster_snapshot, parent_reference_to_snap, LoaderError};
 pub use stores::SharedStores;
 pub use mappers::{mapped_gateway_key, GatewayKey, WatchEventCause};
 pub use provision::{
-    collect_effective_listener_ports, per_gateway_dataplane_name, praxis_istiod_dial_url,
-    deprovision_per_gateway_praxis, reconcile_per_gateway_praxis, reconcile_shared_deployment_stub,
-    warn_per_gateway_without_enable,
-    PraxisProvisionArgs, ProvisionError,
+    collect_effective_listener_ports, per_gateway_dataplane_name, praxis_config_map_name,
+    praxis_istiod_dial_url, praxis_tls_secret_name, deprovision_per_gateway_praxis,
+    reconcile_per_gateway_praxis, reconcile_shared_deployment_stub,
+    warn_per_gateway_without_enable, PraxisConfigSource, PraxisProvisionArgs, ProvisionError,
 };
 pub use status::{
     apply_backend_tls_policies_for_gateway, apply_backend_tls_status_for_ca_ref_change,

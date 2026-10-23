@@ -4,13 +4,14 @@
 //! (`templates/per_gateway_praxis.yaml.j2`) and server-side applied as untyped
 //! [`kube::core::DynamicObject`] resources.
 
+mod config;
 mod template;
 
 use std::collections::HashSet;
 
 use k8s_openapi::api::apps::v1::Deployment;
 use k8s_openapi::api::autoscaling::v2::HorizontalPodAutoscaler;
-use k8s_openapi::api::core::v1::{Service, ServiceAccount};
+use k8s_openapi::api::core::v1::{ConfigMap, Secret, Service, ServiceAccount};
 use k8s_openapi::api::policy::v1::PodDisruptionBudget;
 use kube::api::DeleteParams;
 use kube::api::PatchParams;
@@ -21,6 +22,10 @@ use tracing::{debug, info, warn};
 
 use crate::resources::Gateway;
 
+pub use config::{
+    apply_praxis_config, build_config_map, build_tls_secret, praxis_config_map_name,
+    praxis_tls_secret_name, valid_secret_key,
+};
 pub use template::{InfraLabelRow, NamePort};
 
 #[derive(Debug, Error)]
@@ -29,6 +34,15 @@ pub enum ProvisionError {
     Kube(#[from] kube::Error),
     #[error("{0}")]
     Msg(String),
+}
+
+/// How the provisioned proxy receives its configuration.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PraxisConfigSource {
+    /// Dial ugwc over xDS (`ISTIOD_ADDR` + scoped node id).
+    Xds,
+    /// Read a mounted `praxis.yaml` produced from the gateway IR.
+    ConfigMap,
 }
 
 /// Bootstrap for a Praxis (or compatible) proxy that dials ugwc xDS with a scoped `node.id`.
@@ -42,6 +56,8 @@ pub struct PraxisProvisionArgs {
     pub gateway_scope: String,
     /// `Gateway.spec.gatewayClassName` (for standard Gateway API labels).
     pub gateway_class_name: String,
+    /// xDS bootstrap vs mounted native config.
+    pub config_source: PraxisConfigSource,
 }
 
 /// Turn `host:port` into a URI tonic can dial. Praxis xDS uses `http::Uri` + `Channel::builder`;
@@ -203,12 +219,22 @@ fn json_scalar(s: &str) -> String {
 }
 
 /// Apply ServiceAccount, Deployment, Service, HPA, and PDB from the embedded template (SSA).
+///
+/// When `config_source` is [`PraxisConfigSource::ConfigMap`], `output` must
+/// carry the encoded Praxis document; the function publishes the ConfigMap and
+/// TLS Secret before updating the workload.
 pub async fn reconcile_per_gateway_praxis(
     client: &Client,
     gateway: &Gateway,
     args: &PraxisProvisionArgs,
     listener_port_override: Option<&[(String, i32)]>,
+    output: Option<&ugwc_praxis::EncodeOutput>,
 ) -> Result<(), ProvisionError> {
+    if args.config_source == PraxisConfigSource::ConfigMap && output.is_none() {
+        return Err(ProvisionError::Msg(
+            "configmap output requires encoded Praxis configuration".into(),
+        ));
+    }
     let ns = gateway
         .metadata
         .namespace
@@ -223,6 +249,10 @@ pub async fn reconcile_per_gateway_praxis(
         .uid
         .as_deref()
         .ok_or_else(|| ProvisionError::Msg("gateway missing uid for ownerReference".into()))?;
+
+    if let Some(output) = output {
+        apply_praxis_config(client, gateway, output).await?;
+    }
 
     let dep_name = per_gateway_dataplane_name(gw_name);
     let sa_name = service_account_name(&dep_name);
@@ -251,6 +281,12 @@ pub async fn reconcile_per_gateway_praxis(
         .unwrap_or_default();
 
     let insecure_str = if args.xds_insecure { "true" } else { "false" };
+    let config_source = match args.config_source {
+        PraxisConfigSource::Xds => "xds",
+        PraxisConfigSource::ConfigMap => "configmap",
+    };
+    let config_map_name = praxis_config_map_name(gw_name);
+    let tls_secret_name = praxis_tls_secret_name(gw_name);
 
     let ctx = template::PerGatewayTemplateContext {
         namespace: ns,
@@ -265,6 +301,9 @@ pub async fn reconcile_per_gateway_praxis(
         xds_insecure_json: json_scalar(insecure_str),
         xds_wire_json: json_scalar(args.xds_wire.as_str()),
         gateway_name_json: json_scalar(gw_name),
+        config_source,
+        config_map_name: config_map_name.as_str(),
+        tls_secret_name: tls_secret_name.as_str(),
         container_ports: &container_ports,
         service_ports: &service_ports,
         infrastructure_labels: &infrastructure_labels,
@@ -331,6 +370,18 @@ pub async fn deprovision_per_gateway_praxis(
     delete_ignoring_not_found(
         Api::<Deployment>::namespaced(client.clone(), gateway_namespace),
         &dep_name,
+        &dp,
+    )
+    .await?;
+    delete_ignoring_not_found(
+        Api::<ConfigMap>::namespaced(client.clone(), gateway_namespace),
+        &praxis_config_map_name(gateway_name),
+        &dp,
+    )
+    .await?;
+    delete_ignoring_not_found(
+        Api::<Secret>::namespaced(client.clone(), gateway_namespace),
+        &praxis_tls_secret_name(gateway_name),
         &dp,
     )
     .await?;

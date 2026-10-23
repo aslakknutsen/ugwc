@@ -11,6 +11,10 @@ pub const REASON_COMPILE_BLOCKED: &str = "CompileBlocked";
 pub const REASON_PROVISION_FAILED: &str = "ProvisionFailed";
 pub const REASON_TLS_MATERIAL_MISSING: &str = "TlsMaterialMissing";
 pub const REASON_DATAPLANE_MISCONFIGURED: &str = "DataplaneMisconfigured";
+/// Gateway API features the Praxis native-config encoder could not express.
+pub const REASON_PRAXIS_CONFIG_UNSUPPORTED: &str = "PraxisConfigUnsupported";
+/// Encoding or publishing the per-gateway Praxis ConfigMap failed.
+pub const REASON_PRAXIS_CONFIG_FAILED: &str = "PraxisConfigFailed";
 
 /// Aggregated Kubernetes Events publisher (`events.k8s.io`).
 #[derive(Clone)]
