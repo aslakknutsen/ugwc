@@ -45,7 +45,9 @@ CLONE_DIR="${CACHE_ROOT}/gateway-api"
 if [[ -z "${GO_TEST_FLAGS:-}" ]]; then
   GO_TEST_FLAGS="-timeout=3h -count=1 -v"
 fi
-SUPPORTED_FEATURES="${CONFORMANCE_SUPPORTED_FEATURES:-Gateway,ReferenceGrant,ListenerSet,BackendTLSPolicy,HTTPRoute,TLSRoute,GRPCRoute,HTTPRouteMethodMatching,HTTPRouteQueryParamMatching,HTTPRouteSchemeRedirect,HTTPRoutePortRedirect,HTTPRoutePathRedirect,HTTPRoute303RedirectStatusCode,HTTPRoute307RedirectStatusCode,HTTPRoute308RedirectStatusCode,HTTPRouteResponseHeaderModification,HTTPRouteHostRewrite,HTTPRoutePathRewrite,HTTPRouteRequestTimeout,HTTPRouteBackendTimeout,HTTPRouteParentRefPort,HTTPRouteNamedRouteRule,HTTPRouteListenerPortMatching,HTTPRouteCORS,HTTPRouteCORSAllowCredentialsBehavior}"
+# Default matches the built-in native `praxis_configmap` profile. Override
+# CONFORMANCE_SUPPORTED_FEATURES when running against an xDS profile.
+SUPPORTED_FEATURES="${CONFORMANCE_SUPPORTED_FEATURES:-Gateway,ReferenceGrant,ListenerSet,BackendTLSPolicy,HTTPRoute,TLSRoute,GRPCRoute,HTTPRouteSchemeRedirect,HTTPRoutePortRedirect,HTTPRoute307RedirectStatusCode,HTTPRoute308RedirectStatusCode,HTTPRouteResponseHeaderModification,HTTPRouteHostRewrite,HTTPRoutePathRewrite,HTTPRouteRequestTimeout,HTTPRouteBackendTimeout,HTTPRouteParentRefPort,HTTPRouteNamedRouteRule,HTTPRouteListenerPortMatching}"
 GO_TEST_RUN="${GO_TEST_RUN:-TestConformance}"
 SINGLE_TEST="${CONFORMANCE_SINGLE_TEST:-}"
 FORWARD_ARGS=()

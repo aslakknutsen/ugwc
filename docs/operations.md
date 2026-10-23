@@ -289,11 +289,10 @@ Behavior and limits:
   keeps the original path: Praxis 0.7.5's redirect `Location` template only substitutes
   the whole request path, so a prefix cannot be stripped or replaced. `ReplaceFullPath`
   redirects work normally.
-- Praxis 0.7.5's redirect filter accepts only 301/302/307/308. A 303 redirect is served
-  by a `static_response` with status 303 and a static `Location`. The location uses the
-  `ReplaceFullPath` value when present, otherwise the matched route path (or `/`); it
-  cannot echo an unspecified request host or a request path suffix. The encoder reports
-  `RedirectStatus303Location` so callers can see the gap.
+- Praxis 0.7.5's redirect filter accepts only 301/302/307/308. A rule requesting 303 is
+  reported as `RedirectStatus303` and is not emitted; the encoder does not substitute a
+  different status or emulate the redirect with a static response. 303 is therefore
+  excluded from the native conformance feature list.
 - Praxis 0.7.5's upstream connection pool is keyed by address, SNI, client certificate,
   and verify flags, but not by the trust anchors. If two clusters dial the same address
   with the same SNI but trust different CAs, they could share a pooled connection and

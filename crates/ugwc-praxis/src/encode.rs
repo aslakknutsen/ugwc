@@ -331,6 +331,24 @@ impl<'a> State<'a> {
             if !matches!(route.route_family, RouteFamily::Http | RouteFamily::Grpc) {
                 continue;
             }
+            if route
+                .request_redirect
+                .as_ref()
+                .is_some_and(|redirect| redirect.status_code == Some(303))
+            {
+                // Praxis's redirect filter accepts only 301/302/307/308.
+                // Do not approximate 303 with a different status or a static
+                // response; report the gap and leave the rule out.
+                self.unsupported(
+                    "RedirectStatus303",
+                    format!(
+                        "route {} requests a 303 redirect; Praxis's redirect filter supports \
+                         301/302/307/308, so the rule is not emitted",
+                        route.name
+                    ),
+                );
+                continue;
+            }
             let conditions = filter_conditions(route, &mut self.unsupported);
             let rewrites_path = route.url_rewrite.as_ref().is_some_and(|rewrite| {
                 rewrite.path_replace_full.is_some() || rewrite.path_replace_prefix.is_some()
@@ -364,45 +382,14 @@ impl<'a> State<'a> {
                         ),
                     );
                 }
-                if redirect.status_code == Some(303) {
-                    // Praxis 0.7.5's redirect filter accepts only
-                    // 301/302/307/308. Emit a static 303 response instead.
-                    // Without a templating engine the Location header cannot
-                    // echo the original path, so report that gap while still
-                    // returning the requested status.
-                    let location = static_303_location(redirect, route, tls.is_some());
-                    self.unsupported(
-                        "RedirectStatus303Location",
-                        format!(
-                            "route {} requests a 303 redirect; the status is served by a static \
-                             response with Location {location:?}, which cannot include a request \
-                             path suffix or echo an unspecified request host",
-                            route.name
-                        ),
-                    );
-                    push_per_condition(&mut redirect_filters, &conditions, |conds| {
-                        Filter::StaticResponse(StaticResponseFilter {
-                            status: 303,
-                            headers: vec![HeaderPair {
-                                name: "Location".into(),
-                                value: location.clone(),
-                            }],
-                            // A body keeps Praxis on its normal response path;
-                            // header-only 3xx rejections currently fail.
-                            body: Some("See Other".into()),
-                            conditions: conds,
-                        })
-                    });
-                } else {
-                    push_per_condition(&mut redirect_filters, &conditions, |conds| {
-                        Filter::Redirect(redirect_filter(
-                            redirect,
-                            &route.hosts,
-                            primary.bind_port,
-                            conds,
-                        ))
-                    });
-                }
+                push_per_condition(&mut redirect_filters, &conditions, |conds| {
+                    Filter::Redirect(redirect_filter(
+                        redirect,
+                        &route.hosts,
+                        primary.bind_port,
+                        conds,
+                    ))
+                });
                 continue;
             }
 
@@ -1510,40 +1497,6 @@ fn pin_shared_tls_pools(config: &mut PraxisConfig) {
 // Filter builders
 // -----------------------------------------------------------------------------
 
-/// Build a static `Location` for a 303 response, which cannot use Praxis's
-/// `${...}` redirect templates. A relative path is emitted whenever the
-/// redirect does not change the authority, so the client resolves it against
-/// the original request.
-fn static_303_location(
-    redirect: &RequestRedirectIr,
-    route: &RouteRuleIr,
-    listener_https: bool,
-) -> String {
-    let path = redirect
-        .path_replace_full
-        .clone()
-        .or_else(|| {
-            route
-                .matches
-                .iter()
-                .find_map(|m| m.path_exact.clone().or_else(|| m.path_prefix.clone()))
-        })
-        .unwrap_or_else(|| "/".into());
-    let host = redirect
-        .hostname
-        .clone()
-        .or_else(|| route.hosts.first().cloned());
-    let Some(host) = host else {
-        return path;
-    };
-    let scheme = redirect
-        .scheme
-        .clone()
-        .unwrap_or_else(|| if listener_https { "https" } else { "http" }.into());
-    let port = redirect.port.map(|p| format!(":{p}")).unwrap_or_default();
-    format!("{scheme}://{host}{port}{path}")
-}
-
 fn redirect_filter(
     redirect: &RequestRedirectIr,
     route_hosts: &[String],
@@ -2595,7 +2548,7 @@ mod tests {
     }
 
     #[test]
-    fn redirect_303_uses_static_response() {
+    fn redirect_303_is_reported_and_not_emitted() {
         let mut r = route("r1", RouteFamily::Http, backend("default", "svc", 8080));
         r.listener = Some(ListenerAttachmentIr {
             parent_kind: "Gateway".into(),
@@ -2622,16 +2575,22 @@ mod tests {
             vec![],
         );
         let out = encode(&ir).unwrap();
-        let value: Value = serde_yaml::from_str(&out.yaml).unwrap();
-        let response = filter(&value, "static_response");
-        assert_eq!(response["status"].as_u64(), Some(303));
-        assert_eq!(response["headers"][0]["name"].as_str(), Some("Location"));
-        assert_eq!(response["headers"][0]["value"].as_str(), Some("/new"));
-        assert_eq!(response["body"].as_str(), Some("See Other"));
         assert!(
             out.unsupported
                 .iter()
-                .any(|u| u.feature == "RedirectStatus303Location")
+                .any(|u| u.feature == "RedirectStatus303")
+        );
+        let value: Value = serde_yaml::from_str(&out.yaml).unwrap();
+        let filters = value["filter_chains"][0]["filters"].as_sequence().unwrap();
+        assert!(
+            filters
+                .iter()
+                .all(|f| f["filter"].as_str() != Some("redirect"))
+        );
+        assert!(
+            filters
+                .iter()
+                .all(|f| f["filter"].as_str() != Some("static_response"))
         );
     }
 
