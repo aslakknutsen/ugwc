@@ -7,7 +7,7 @@ use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-use crate::implementation_profiles::{DataPlaneKind, ImplementationProfile};
+use crate::implementation_profiles::{DataPlaneKind, ImplementationProfile, OutputKind};
 
 fn default_admin() -> String {
     "127.0.0.1:8080".into()
@@ -107,6 +107,10 @@ pub enum ConfigError {
     Profiles(String),
     #[error("UGWC_DATAPLANE_ENABLE requires UGWC_CONTROL_PLANE_XDS_BOOTSTRAP_ADDR when a profile uses per_gateway_praxis")]
     BootstrapAddrRequired,
+    #[error(
+        "output `praxis_configmap` requires data_plane `per_gateway_praxis` (controller {0:?})"
+    )]
+    PraxisConfigmapRequiresPerGatewayPraxis(String),
     #[error("per_gateway_praxis profile requires non-empty proxy_image for controller {0:?}")]
     ProxyImageRequired(String),
     #[error("UGWC_RECONCILE_CONCURRENCY must be >= 1")]
@@ -149,13 +153,20 @@ impl Config {
                     return Err(ConfigError::ProxyImageRequired(cn.clone()));
                 }
             }
+            if matches!(p.output, OutputKind::PraxisConfigmap)
+                && !matches!(p.data_plane, DataPlaneKind::PerGatewayPraxis)
+            {
+                return Err(ConfigError::PraxisConfigmapRequiresPerGatewayPraxis(
+                    cn.clone(),
+                ));
+            }
         }
 
         if self.dataplane_enable {
-            let needs_addr = self
-                .implementation_profiles
-                .values()
-                .any(|p| matches!(p.data_plane, DataPlaneKind::PerGatewayPraxis));
+            let needs_addr = self.implementation_profiles.values().any(|p| {
+                matches!(p.data_plane, DataPlaneKind::PerGatewayPraxis)
+                    && matches!(p.output, OutputKind::Xds)
+            });
             if needs_addr {
                 let addr = self
                     .control_plane_xds_bootstrap_addr
@@ -285,6 +296,56 @@ mod tests {
         assert!(matches!(
             c.validate(),
             Err(ConfigError::StatusPatchConcurrencyZero)
+        ));
+    }
+
+    fn profile(data_plane: DataPlaneKind, output: OutputKind) -> ImplementationProfile {
+        ImplementationProfile {
+            data_plane,
+            output,
+            subscription_default: Default::default(),
+            proxy_image: Some("example/praxis:latest".into()),
+        }
+    }
+
+    #[test]
+    fn praxis_configmap_requires_per_gateway_praxis() {
+        let mut c = sample();
+        c.dataplane_enable = true;
+        c.implementation_profiles.insert(
+            "example.com/foo".into(),
+            profile(DataPlaneKind::External, OutputKind::PraxisConfigmap),
+        );
+        assert!(matches!(
+            c.validate_profiles(),
+            Err(ConfigError::PraxisConfigmapRequiresPerGatewayPraxis(_))
+        ));
+    }
+
+    #[test]
+    fn praxis_configmap_does_not_require_bootstrap_addr() {
+        let mut c = sample();
+        c.dataplane_enable = true;
+        c.control_plane_xds_bootstrap_addr = None;
+        c.implementation_profiles.insert(
+            "example.com/foo".into(),
+            profile(DataPlaneKind::PerGatewayPraxis, OutputKind::PraxisConfigmap),
+        );
+        assert!(c.validate_profiles().is_ok());
+    }
+
+    #[test]
+    fn xds_profile_still_requires_bootstrap_addr() {
+        let mut c = sample();
+        c.dataplane_enable = true;
+        c.control_plane_xds_bootstrap_addr = None;
+        c.implementation_profiles.insert(
+            "example.com/foo".into(),
+            profile(DataPlaneKind::PerGatewayPraxis, OutputKind::Xds),
+        );
+        assert!(matches!(
+            c.validate_profiles(),
+            Err(ConfigError::BootstrapAddrRequired)
         ));
     }
 

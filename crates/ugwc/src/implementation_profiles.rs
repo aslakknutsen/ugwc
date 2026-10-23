@@ -21,6 +21,7 @@ pub fn builtin_profiles() -> HashMap<String, ImplementationProfile> {
         BUILTIN_DEFAULT_CONTROLLER_NAME.to_string(),
         ImplementationProfile {
             data_plane: DataPlaneKind::PerGatewayPraxis,
+            output: OutputKind::Xds,
             subscription_default: SubscriptionScope::OneGateway,
             proxy_image: Some(BUILTIN_PRAXIS_PROXY_IMAGE.to_string()),
         },
@@ -37,6 +38,25 @@ pub enum DataPlaneKind {
     SharedDeployment,
 }
 
+/// How compiled IR is delivered to the data plane for this controller name.
+///
+/// This is the per-class "publish protocol" axis from
+/// `design/dataplane-provisioning.md`. It is orthogonal to [`DataPlaneKind`]:
+/// provisioning decides *whether* a workload is created; output decides *how*
+/// that workload receives configuration.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OutputKind {
+    /// Serve IR over xDS; wire format is selected by `UGWC_XDS_WIRE`
+    /// (`gwxds` or `envoy`).
+    #[default]
+    Xds,
+    /// Render IR to Praxis native YAML and distribute it through a
+    /// per-gateway ConfigMap (plus a Secret for TLS material) mounted into
+    /// the provisioned Praxis Deployment.
+    PraxisConfigmap,
+}
+
 /// Default subscription hint for clients; xDS uses `node.id` (see design doc).
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -50,6 +70,9 @@ pub enum SubscriptionScope {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct ImplementationProfile {
     pub data_plane: DataPlaneKind,
+    /// How IR reaches the data plane; defaults to xDS for backward compatibility.
+    #[serde(default)]
+    pub output: OutputKind,
     #[serde(default)]
     pub subscription_default: SubscriptionScope,
     #[serde(default)]
@@ -61,6 +84,7 @@ impl ImplementationProfile {
     pub fn default_external() -> Self {
         Self {
             data_plane: DataPlaneKind::External,
+            output: OutputKind::Xds,
             subscription_default: SubscriptionScope::All,
             proxy_image: None,
         }
@@ -128,8 +152,26 @@ mod tests {
         let m = builtin_profiles();
         let p = resolve_for_controller(&m, Some(BUILTIN_DEFAULT_CONTROLLER_NAME));
         assert_eq!(p.data_plane, DataPlaneKind::PerGatewayPraxis);
+        assert_eq!(p.output, OutputKind::Xds);
         assert_eq!(p.subscription_default, SubscriptionScope::OneGateway);
         assert_eq!(p.proxy_image.as_deref(), Some(BUILTIN_PRAXIS_PROXY_IMAGE));
+    }
+
+    #[test]
+    fn output_defaults_to_xds_when_omitted() {
+        let p: ImplementationProfile =
+            serde_json::from_str(r#"{"data_plane":"per_gateway_praxis","proxy_image":"img"}"#)
+                .unwrap();
+        assert_eq!(p.output, OutputKind::Xds);
+    }
+
+    #[test]
+    fn output_parses_praxis_configmap() {
+        let p: ImplementationProfile = serde_json::from_str(
+            r#"{"data_plane":"per_gateway_praxis","output":"praxis_configmap","proxy_image":"img"}"#,
+        )
+        .unwrap();
+        assert_eq!(p.output, OutputKind::PraxisConfigmap);
     }
 
     #[test]

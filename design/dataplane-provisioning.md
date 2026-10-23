@@ -21,7 +21,7 @@ Each owned `GatewayClass.spec.controllerName` resolves (via static config today;
 |------|--------|
 | **Admission** | Class `controllerName` matches this controller instance (`UGWC_CONTROLLER_NAMES`). |
 | **Data plane strategy** | **External** — no workload mutations. **PerGatewayPraxis** — one `Gateway` ⇒ one Deployment (+ Service) with bootstrap env. **SharedDeployment** — *stub*: multiple gateways → one deployment; **grouping key not decided** (see §7). |
-| **Publish protocol** | e.g. xDS wire `gwxds` vs `envoy` (`UGWC_XDS_WIRE`); orthogonal to provisioning but tied to what the proxy binary speaks. |
+| **Publish protocol** | **`output`** on the profile: `xds` (default; wire selected by `UGWC_XDS_WIRE`, `gwxds` vs `envoy`) or `praxis_configmap` (render native Praxis YAML into a per-gateway ConfigMap + TLS Secret mounted into the provisioned Deployment). Orthogonal to provisioning but tied to what the proxy binary speaks. |
 | **Subscription scope (default)** | **All** — client uses global xDS node id (`global` / `*`). **OneGateway** — client node id = `namespace/name` of the `Gateway`; server serves only that scope’s snapshot. **Some** — reserved for pool/shard; not implemented in v1. |
 
 **Pairing rule:** `PerGatewayPraxis` implies **OneGateway** subscription for the provisioned workload unless overridden.
@@ -92,11 +92,22 @@ Path: `UGWC_IMPLEMENTATION_PROFILES_PATH` (JSON).
   "profiles": {
     "example.com/gateway-controller": {
       "data_plane": "per_gateway_praxis",
+      "output": "xds",
+      "subscription_default": "one_gateway",
+      "proxy_image": "ghcr.io/praxis-proxy/praxis:latest"
+    },
+    "ugwc.io/praxis-config": {
+      "data_plane": "per_gateway_praxis",
+      "output": "praxis_configmap",
       "subscription_default": "one_gateway",
       "proxy_image": "ghcr.io/praxis-proxy/praxis:latest"
     }
   }
 }
 ```
+
+`output` defaults to `xds` when omitted. `praxis_configmap` requires
+`per_gateway_praxis` and does not require `UGWC_CONTROL_PLANE_XDS_BOOTSTRAP_ADDR`
+(the proxy reads a mounted config file instead of dialing xDS).
 
 Controllers listed in `UGWC_CONTROLLER_NAMES` but omitted from this file default to **External** + **All**.
