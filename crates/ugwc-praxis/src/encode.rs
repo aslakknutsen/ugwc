@@ -13,8 +13,8 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use regex::escape as regex_escape;
 use ugwc_core::ir::{
-    backend_endpoints_map_key, BackendIr, BackendTlsIr, IrSnapshot, ListenerIr, RequestRedirectIr,
-    RouteFamily, RouteMatchIr, RouteRuleIr, TlsMode, WeightedBackendIr,
+    BackendIr, BackendTlsIr, IrSnapshot, ListenerIr, RequestRedirectIr, RouteFamily, RouteMatchIr,
+    RouteRuleIr, TlsMode, WeightedBackendIr, backend_endpoints_map_key,
 };
 
 use crate::model::{
@@ -213,7 +213,12 @@ impl<'a> State<'a> {
             None
         };
 
+        // CORS is a security filter: Praxis rejects request conditions on it
+        // outright (they could be bypassed), so one unconditional filter is
+        // emitted per listener. Scoped or conflicting configurations are
+        // reported instead of being silently misapplied.
         let mut cors_filters = Vec::new();
+        let mut emitted_cors: Option<ugwc_core::ir::CorsFilterIr> = None;
         let mut redirect_filters = Vec::new();
         let mut router_routes = Vec::new();
         let mut post_router = Vec::new();
@@ -224,9 +229,12 @@ impl<'a> State<'a> {
                 continue;
             }
             let conditions = filter_conditions(route, &mut self.unsupported);
+            let rewrites_path = route.url_rewrite.as_ref().is_some_and(|rewrite| {
+                rewrite.path_replace_full.is_some() || rewrite.path_replace_prefix.is_some()
+            });
             let has_rule_filters = route.cors.is_some()
                 || route.request_redirect.is_some()
-                || route.url_rewrite.is_some()
+                || rewrites_path
                 || route.request_header_modifier.is_some()
                 || route.response_header_modifier.is_some()
                 || route.request_timeout_ms.is_some()
@@ -243,13 +251,40 @@ impl<'a> State<'a> {
             }
 
             if let Some(redirect) = &route.request_redirect {
+                if redirect.path_replace_prefix.is_some() {
+                    self.unsupported(
+                        "RedirectPathPrefix",
+                        format!(
+                            "route {} redirects with ReplacePrefixMatch; Praxis redirect templates \
+                             cannot strip a prefix, so the original request path is kept",
+                            route.name
+                        ),
+                    );
+                }
+                if redirect.status_code == Some(303) {
+                    self.unsupported(
+                        "RedirectStatus303",
+                        format!(
+                            "route {} requests a 303 redirect; Praxis supports 301/302/307/308 and \
+                             this is emitted as 302",
+                            route.name
+                        ),
+                    );
+                }
                 push_per_condition(&mut redirect_filters, &conditions, |conds| {
-                    Filter::Redirect(redirect_filter(redirect, &route.hosts, conds))
+                    Filter::Redirect(redirect_filter(redirect, &route.hosts, ln.bind_port, conds))
                 });
                 continue;
             }
 
-            let Some(cluster) = self.route_cluster(route) else {
+            // URLRewrite hostname becomes the cluster's fixed upstream
+            // authority, so it must be part of cluster identity (one cluster
+            // per backend + authority pair).
+            let authority = route
+                .url_rewrite
+                .as_ref()
+                .and_then(|rewrite| rewrite.hostname.as_deref());
+            let Some(cluster) = self.route_cluster(route, authority) else {
                 continue;
             };
             referenced.insert(cluster.clone());
@@ -267,47 +302,109 @@ impl<'a> State<'a> {
             }
 
             if let Some(cors) = &route.cors {
-                let cors_conditions = cors_conditions(route);
-                push_per_condition(&mut cors_filters, &cors_conditions, |conds| {
-                    Filter::Cors(CorsFilter {
-                        allow_origins: cors.allow_origins.clone(),
-                        allow_methods: cors.allow_methods.clone(),
-                        allow_headers: cors.allow_headers.clone(),
-                        expose_headers: cors.expose_headers.clone(),
-                        max_age: cors.max_age,
-                        allow_credentials: cors.allow_credentials,
-                        conditions: conds,
-                    })
-                });
+                if !route.matches.is_empty() {
+                    self.unsupported(
+                        "ScopedCors",
+                        format!(
+                            "route {} scopes its CORS filter to a path or method; Praxis rejects \
+                             request conditions on security filters, so CORS applies to the whole \
+                             listener",
+                            route.name
+                        ),
+                    );
+                }
+                match &emitted_cors {
+                    None => {
+                        emitted_cors = Some(cors.clone());
+                        cors_filters.push(Filter::Cors(CorsFilter {
+                            allow_origins: cors.allow_origins.clone(),
+                            allow_methods: cors.allow_methods.clone(),
+                            allow_headers: cors.allow_headers.clone(),
+                            expose_headers: cors.expose_headers.clone(),
+                            max_age: cors.max_age,
+                            allow_credentials: cors.allow_credentials,
+                            conditions: Vec::new(),
+                        }));
+                    }
+                    Some(existing) if existing != cors => {
+                        self.unsupported(
+                            "MultipleCorsConfigs",
+                            format!(
+                                "route {} defines a CORS policy different from an earlier route on \
+                                 listener {}; Praxis applies a single CORS filter per filter chain",
+                                route.name, ln.section_name
+                            ),
+                        );
+                    }
+                    Some(_) => {}
+                }
             }
 
             if let Some(rewrite) = &route.url_rewrite {
-                if let Some((pattern, replacement)) = rewrite_path_pattern(rewrite) {
+                if let Some(full) = &rewrite.path_replace_full {
+                    let replacement = escape_replacement(full);
                     push_per_condition(&mut post_router, &conditions, |conds| {
                         Filter::PathRewrite(PathRewriteFilter {
                             strip_prefix: None,
                             add_prefix: None,
                             replace: Some(RegexReplace {
-                                pattern: pattern.clone(),
+                                pattern: "^.*$".into(),
                                 replacement: replacement.clone(),
                             }),
                             allow_rewrite_override: true,
                             conditions: conds,
                         })
                     });
+                } else if let Some(new_prefix) = &rewrite.path_replace_prefix {
+                    // ReplacePrefixMatch rewrites the prefix from the route
+                    // match; the replacement alone does not identify it.
+                    if route.matches.is_empty() {
+                        self.unsupported(
+                            "PrefixRewriteWithoutMatch",
+                            format!(
+                                "route {} uses ReplacePrefixMatch without a path match; cannot \
+                                 determine which prefix to replace",
+                                route.name
+                            ),
+                        );
+                    }
+                    let grpc = matches!(route.route_family, RouteFamily::Grpc);
+                    let replacement = format!("{}$1", escape_replacement(new_prefix));
+                    for m in &route.matches {
+                        let Some(match_prefix) = &m.path_prefix else {
+                            self.unsupported(
+                                "PrefixRewriteWithoutPrefixMatch",
+                                format!(
+                                    "route {} uses ReplacePrefixMatch with a non-prefix path \
+                                     match; the rewrite is skipped",
+                                    route.name
+                                ),
+                            );
+                            continue;
+                        };
+                        let cm = condition_match(m, grpc, &mut self.unsupported);
+                        let conds = if cm.is_empty() {
+                            Vec::new()
+                        } else {
+                            vec![Condition { when: cm }]
+                        };
+                        post_router.push(Filter::PathRewrite(PathRewriteFilter {
+                            strip_prefix: None,
+                            add_prefix: None,
+                            replace: Some(RegexReplace {
+                                pattern: format!("^{}(.*)$", regex_escape(match_prefix)),
+                                replacement: replacement.clone(),
+                            }),
+                            allow_rewrite_override: true,
+                            conditions: conds,
+                        }));
+                    }
                 }
             }
 
-            let rewrite_host = route
-                .url_rewrite
-                .as_ref()
-                .and_then(|rewrite| rewrite.hostname.clone());
-            if rewrite_host.is_some()
-                || route.request_header_modifier.is_some()
-                || route.response_header_modifier.is_some()
-            {
+            if route.request_header_modifier.is_some() || route.response_header_modifier.is_some() {
                 push_per_condition(&mut post_router, &conditions, |conds| {
-                    Filter::Headers(header_filter(route, rewrite_host.clone(), conds))
+                    Filter::Headers(header_filter(route, conds))
                 });
             }
 
@@ -340,11 +437,14 @@ impl<'a> State<'a> {
         let mut filters = Vec::new();
         filters.extend(cors_filters);
         filters.extend(redirect_filters);
-        // An empty router keeps a route-less listener valid and ready for the
-        // next config revision.
-        filters.push(Filter::Router(RouterFilter {
-            routes: router_routes,
-        }));
+        // Praxis rejects an empty router table. A listener with no routable
+        // rules (for example before any HTTPRoute attaches) gets a chain
+        // without a router instead; unmatched requests fail closed.
+        if !router_routes.is_empty() {
+            filters.push(Filter::Router(RouterFilter {
+                routes: router_routes,
+            }));
+        }
         filters.extend(post_router);
         if !clusters.is_empty() {
             filters.push(Filter::LoadBalancer(LoadBalancerFilter { clusters }));
@@ -454,8 +554,23 @@ impl<'a> State<'a> {
 
     // -- Backends -----------------------------------------------------------
 
-    fn route_cluster(&mut self, route: &RouteRuleIr) -> Option<String> {
+    fn route_cluster(&mut self, route: &RouteRuleIr, authority: Option<&str>) -> Option<String> {
         let grpc = matches!(route.route_family, RouteFamily::Grpc);
+        let authority = match authority {
+            Some(value) if !value.is_empty() && !valid_authority(value) => {
+                self.unsupported(
+                    "UrlRewriteHostnameInvalid",
+                    format!(
+                        "route {} rewrites Host to {:?}, which is not a valid HTTP authority; \
+                         forwarding the downstream Host instead",
+                        route.name, value
+                    ),
+                );
+                None
+            }
+            Some(value) if !value.is_empty() => Some(value),
+            _ => None,
+        };
         let active: Vec<&WeightedBackendIr> =
             route.backends.iter().filter(|wb| wb.weight > 0).collect();
         if active.is_empty() {
@@ -467,7 +582,7 @@ impl<'a> State<'a> {
         }
         let mut names: Vec<String> = Vec::new();
         for wb in &active {
-            if let Some(name) = self.cluster_for(&wb.backend, grpc) {
+            if let Some(name) = self.cluster_for(&wb.backend, grpc, authority) {
                 if !names.contains(&name) {
                     names.push(name);
                 }
@@ -490,7 +605,12 @@ impl<'a> State<'a> {
         names.into_iter().next()
     }
 
-    fn cluster_for(&mut self, backend: &BackendIr, grpc: bool) -> Option<String> {
+    fn cluster_for(
+        &mut self,
+        backend: &BackendIr,
+        grpc: bool,
+        authority: Option<&str>,
+    ) -> Option<String> {
         if backend.inference.is_some() {
             self.unsupported(
                 "InferencePool",
@@ -524,12 +644,18 @@ impl<'a> State<'a> {
 
         let key =
             backend_endpoints_map_key(&backend.service_namespace, &backend.service_name, port);
-        if let Some(name) = self.cluster_names.get(&key) {
+        let cluster_key = match authority {
+            Some(authority) => format!("{key}|{authority}"),
+            None => key,
+        };
+        if let Some(name) = self.cluster_names.get(&cluster_key) {
             if grpc {
                 if let Some(cluster) = self.clusters.get_mut(name) {
-                    cluster.http = Some(ClusterHttp {
-                        version: "h2".into(),
+                    let http = cluster.http.get_or_insert(ClusterHttp {
+                        version: None,
+                        authority: None,
                     });
+                    http.version = Some("h2".into());
                 }
             }
             return Some(name.clone());
@@ -547,23 +673,39 @@ impl<'a> State<'a> {
             return None;
         }
 
-        let name = self.cluster_name_registry.unique(&format!(
-            "{}-{}-{}",
-            backend.service_namespace, backend.service_name, port
-        ));
+        let base_name = match authority {
+            Some(authority) => format!(
+                "{}-{}-{}-{}",
+                backend.service_namespace,
+                backend.service_name,
+                port,
+                sanitize_name_component(authority)
+            ),
+            None => format!(
+                "{}-{}-{}",
+                backend.service_namespace, backend.service_name, port
+            ),
+        };
+        let name = self.cluster_name_registry.unique(&base_name);
         let tls = backend
             .backend_tls
             .as_ref()
             .and_then(|tls| self.cluster_tls(&name, tls));
+        let http = if grpc || authority.is_some() {
+            Some(ClusterHttp {
+                version: grpc.then(|| "h2".to_string()),
+                authority: authority.map(str::to_owned),
+            })
+        } else {
+            None
+        };
         let cluster = Cluster {
             name: name.clone(),
             endpoints,
             tls,
-            http: grpc.then(|| ClusterHttp {
-                version: "h2".into(),
-            }),
+            http,
         };
-        self.cluster_names.insert(key, name.clone());
+        self.cluster_names.insert(cluster_key, name.clone());
         self.clusters.insert(name.clone(), cluster);
         Some(name)
     }
@@ -713,7 +855,7 @@ fn endpoints_for(ir: &IrSnapshot, backend: &BackendIr) -> Vec<String> {
         if !endpoints.is_empty() {
             return endpoints
                 .iter()
-                .map(|e| format!("{}:{}", e.address, e.port))
+                .map(|e| endpoint_address(&e.address, e.port))
                 .collect();
         }
     }
@@ -727,6 +869,15 @@ fn endpoints_for(ir: &IrSnapshot, backend: &BackendIr) -> Vec<String> {
         "{}.{}.svc.cluster.local:{}",
         backend.service_name, backend.service_namespace, dial_port
     )]
+}
+
+/// Format `host:port`, bracketing IPv6 literals.
+fn endpoint_address(address: &str, port: u16) -> String {
+    if address.starts_with('[') || !address.contains(':') {
+        format!("{address}:{port}")
+    } else {
+        format!("[{address}]:{port}")
+    }
 }
 
 fn route_matches(route: &RouteRuleIr) -> Vec<Option<&RouteMatchIr>> {
@@ -836,25 +987,6 @@ fn filter_conditions(route: &RouteRuleIr, unsupported: &mut Vec<Unsupported>) ->
     out
 }
 
-fn cors_conditions(route: &RouteRuleIr) -> Vec<Condition> {
-    if route.matches.is_empty() {
-        return Vec::new();
-    }
-    let mut out = Vec::new();
-    for m in &route.matches {
-        let cm = ConditionMatch {
-            path: m.path_exact.clone(),
-            path_prefix: m.path_prefix.clone(),
-            ..ConditionMatch::default()
-        };
-        if cm.is_empty() {
-            return Vec::new();
-        }
-        out.push(Condition { when: cm });
-    }
-    out
-}
-
 fn condition_match(
     m: &RouteMatchIr,
     grpc: bool,
@@ -912,15 +1044,13 @@ fn push_per_condition(
 fn redirect_filter(
     redirect: &RequestRedirectIr,
     route_hosts: &[String],
+    listener_port: u16,
     conditions: Vec<Condition>,
 ) -> RedirectFilter {
-    let default_status = if redirect.path_replace_full.is_some() {
-        301
-    } else {
-        302
-    };
-    let status = match redirect.status_code.unwrap_or(default_status) {
-        301 | 302 | 307 | 308 => redirect.status_code.unwrap_or(default_status) as u16,
+    // Gateway API defaults RequestRedirect.statusCode to 302.
+    let requested = redirect.status_code.unwrap_or(302);
+    let status = match requested {
+        301 | 302 | 307 | 308 => requested as u16,
         _ => 302,
     };
 
@@ -932,13 +1062,19 @@ fn redirect_filter(
         .hostname
         .clone()
         .unwrap_or_else(|| "${host}".into());
-    let port = redirect.port.map(|p| format!(":{p}")).unwrap_or_default();
+    // Gateway API defaults the redirect port to the listener port. Omit it
+    // only for the default HTTP/HTTPS ports so the Location stays canonical.
+    let port = redirect
+        .port
+        .map(|p| format!(":{p}"))
+        .or_else(|| {
+            (listener_port != 80 && listener_port != 443).then(|| format!(":{listener_port}"))
+        })
+        .unwrap_or_default();
     let path = redirect
         .path_replace_full
         .clone()
         .unwrap_or_else(|| "${path}".into());
-    // `path_replace_prefix` is not representable in a redirect template; keep
-    // the request path rather than silently redirecting to the wrong tree.
     let location = format!("{scheme}://{host}{port}{path}${{query}}");
 
     let allowed_hosts = if redirect.hostname.is_none() {
@@ -959,40 +1095,13 @@ fn redirect_filter(
     }
 }
 
-fn rewrite_path_pattern(rewrite: &ugwc_core::ir::UrlRewriteIr) -> Option<(String, String)> {
-    if let Some(full) = &rewrite.path_replace_full {
-        return Some(("^.*$".into(), escape_replacement(full)));
-    }
-    if let Some(prefix) = &rewrite.path_replace_prefix {
-        return Some((
-            format!("^{}(.*)$", regex_escape(prefix)),
-            format!("{}$1", escape_replacement(prefix)),
-        ));
-    }
-    None
-}
-
-fn header_filter(
-    route: &RouteRuleIr,
-    rewrite_host: Option<String>,
-    conditions: Vec<Condition>,
-) -> HeadersFilter {
+fn header_filter(route: &RouteRuleIr, conditions: Vec<Condition>) -> HeadersFilter {
     let mut filter = HeadersFilter {
         conditions,
         ..HeadersFilter::default()
     };
-    if let Some(host) = rewrite_host {
-        filter.request_set.push(HeaderPair {
-            name: "Host".into(),
-            value: host,
-        });
-    }
     if let Some(req) = &route.request_header_modifier {
-        filter.request_set.extend(
-            header_pairs(&req.set)
-                .into_iter()
-                .filter(|h| !h.name.eq_ignore_ascii_case("host")),
-        );
+        filter.request_set = header_pairs(&req.set);
         filter.request_add = header_pairs(&req.add);
         filter.request_remove = req.remove.clone();
     }
@@ -1017,6 +1126,29 @@ fn header_pairs(headers: &[ugwc_core::ir::NamedHeaderIr]) -> Vec<HeaderPair> {
 /// `regex::Regex::replace` expands `$name`/`$1`; escape literal dollars.
 fn escape_replacement(value: &str) -> String {
     value.replace('$', "$$")
+}
+
+fn sanitize_name_component(value: &str) -> String {
+    value
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '-'
+            }
+        })
+        .collect()
+}
+
+fn valid_authority(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 255
+        && value
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '.' | '_' | ':'))
+        && !value.starts_with('-')
+        && !value.ends_with('-')
 }
 
 fn valid_sni(hostname: &str) -> bool {
@@ -1084,9 +1216,9 @@ mod tests {
     use super::*;
     use serde_yaml::Value;
     use ugwc_core::ir::{
-        BackendEndpointIr, BackendTlsIr, CorsFilterIr, InferencePoolBackendIr, IrRevision,
-        IrScopeId, ListenerAttachmentIr, NamedHeaderIr, RequestHeaderModifierIr, RouteMatchIr,
-        SnapshotMeta, UrlRewriteIr, IR_VERSION,
+        BackendEndpointIr, BackendTlsIr, CorsFilterIr, IR_VERSION, InferencePoolBackendIr,
+        IrRevision, IrScopeId, ListenerAttachmentIr, NamedHeaderIr, RequestHeaderModifierIr,
+        RouteMatchIr, SnapshotMeta, UrlRewriteIr,
     };
     use zeroize::Zeroizing;
 
@@ -1331,14 +1463,18 @@ mod tests {
         let tls = &filter(&value, "load_balancer")["clusters"][0]["tls"];
         assert_eq!(tls["verify"].as_bool(), Some(true));
         assert_eq!(tls["sni"].as_str(), Some("svc.default.svc.cluster.local"));
-        assert!(tls["ca"]["ca_path"]
-            .as_str()
-            .unwrap()
-            .starts_with(TLS_MOUNT_DIR));
-        assert!(tls["client_cert"]["cert_path"]
-            .as_str()
-            .unwrap()
-            .starts_with(TLS_MOUNT_DIR));
+        assert!(
+            tls["ca"]["ca_path"]
+                .as_str()
+                .unwrap()
+                .starts_with(TLS_MOUNT_DIR)
+        );
+        assert!(
+            tls["client_cert"]["cert_path"]
+                .as_str()
+                .unwrap()
+                .starts_with(TLS_MOUNT_DIR)
+        );
     }
 
     #[test]
@@ -1365,10 +1501,12 @@ mod tests {
             redirect["location"].as_str(),
             Some("https://new.example.com/new${query}")
         );
-        assert!(filter(&value, "router")["routes"]
-            .as_sequence()
-            .unwrap()
-            .is_empty());
+        let filters = value["filter_chains"][0]["filters"].as_sequence().unwrap();
+        assert!(
+            filters
+                .iter()
+                .all(|f| f["filter"].as_str() != Some("router"))
+        );
     }
 
     #[test]
@@ -1448,10 +1586,11 @@ mod tests {
             ],
         );
         let out = encode(&ir).unwrap();
-        assert!(out
-            .unsupported
-            .iter()
-            .any(|u| u.feature == "WeightedBackends"));
+        assert!(
+            out.unsupported
+                .iter()
+                .any(|u| u.feature == "WeightedBackends")
+        );
     }
 
     #[test]
@@ -1483,7 +1622,7 @@ mod tests {
         }];
         r.url_rewrite = Some(UrlRewriteIr {
             hostname: Some("upstream.internal".into()),
-            path_replace_prefix: Some("/api".into()),
+            path_replace_prefix: Some("/v1".into()),
             path_replace_full: None,
         });
         r.request_header_modifier = Some(RequestHeaderModifierIr {
@@ -1523,7 +1662,7 @@ mod tests {
         );
         assert_eq!(
             path_rewrite["replace"]["replacement"].as_str(),
-            Some("/api$1")
+            Some("/v1$1")
         );
         assert_eq!(
             path_rewrite["conditions"][0]["when"]["path_prefix"].as_str(),
@@ -1531,13 +1670,106 @@ mod tests {
         );
 
         let headers = filter(&value, "headers");
-        assert_eq!(headers["request_set"][0]["name"].as_str(), Some("Host"));
+        assert_eq!(headers["request_set"][0]["name"].as_str(), Some("x-added"));
         assert_eq!(headers["request_remove"][0].as_str(), Some("x-remove"));
+
+        let lb = filter(&value, "load_balancer");
+        assert_eq!(
+            lb["clusters"][0]["http"]["authority"].as_str(),
+            Some("upstream.internal")
+        );
+        assert!(lb["clusters"][0]["http"].get("version").is_none());
 
         let timeout = filter(&value, "timeout");
         assert_eq!(timeout["timeout_ms"].as_u64(), Some(1500));
 
         let cors = filter(&value, "cors");
         assert_eq!(cors["max_age"].as_u64(), Some(600));
+        assert!(cors.get("conditions").is_none());
+    }
+
+    #[test]
+    fn omits_router_for_route_less_listener() {
+        let ir = snapshot(
+            vec![listener("HTTP", 80, TlsMode::Plaintext)],
+            vec![],
+            vec![],
+        );
+        let out = encode(&ir).unwrap();
+        let value: Value = serde_yaml::from_str(&out.yaml).unwrap();
+        assert!(
+            value["filter_chains"][0]["filters"]
+                .as_sequence()
+                .unwrap()
+                .is_empty()
+        );
+        assert!(out.unsupported.is_empty());
+    }
+
+    #[test]
+    fn redirect_uses_listener_port_and_reports_303() {
+        let mut r = route("r1", RouteFamily::Http, backend("default", "svc", 8080));
+        r.listener = Some(ListenerAttachmentIr {
+            parent_kind: "Gateway".into(),
+            parent_namespace: "default".into(),
+            parent_name: "gw".into(),
+            section_name: "l18080".into(),
+            port: 18080,
+        });
+        r.matches = vec![RouteMatchIr {
+            path_prefix: Some("/old".into()),
+            ..empty_match()
+        }];
+        r.request_redirect = Some(RequestRedirectIr {
+            hostname: None,
+            scheme: None,
+            port: None,
+            status_code: Some(303),
+            path_replace_full: Some("/new".into()),
+            path_replace_prefix: None,
+        });
+        let ir = snapshot(
+            vec![listener("HTTP", 18080, TlsMode::Plaintext)],
+            vec![r],
+            vec![],
+        );
+        let out = encode(&ir).unwrap();
+        let value: Value = serde_yaml::from_str(&out.yaml).unwrap();
+        let redirect = filter(&value, "redirect");
+        assert_eq!(redirect["status"].as_u64(), Some(302));
+        assert_eq!(
+            redirect["location"].as_str(),
+            Some("${scheme}://${host}:18080/new${query}")
+        );
+        assert!(
+            out.unsupported
+                .iter()
+                .any(|u| u.feature == "RedirectStatus303")
+        );
+    }
+
+    #[test]
+    fn brackets_ipv6_endpoints() {
+        let ir = snapshot(
+            vec![listener("HTTP", 80, TlsMode::Plaintext)],
+            vec![route(
+                "r1",
+                RouteFamily::Http,
+                backend("default", "v6", 8080),
+            )],
+            vec![("default", "v6", 8080, "fd00::1")],
+        );
+        let out = encode(&ir).unwrap();
+        assert_eq!(
+            out.config.filter_chains[0]
+                .filters
+                .iter()
+                .find_map(|f| match f {
+                    Filter::LoadBalancer(lb) => lb.clusters[0].endpoints.first().cloned(),
+                    _ => None,
+                })
+                .as_deref(),
+            Some("[fd00::1]:8080")
+        );
     }
 }

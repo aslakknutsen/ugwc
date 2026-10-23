@@ -171,7 +171,11 @@ pub struct CaConfig {
 /// HTTP options for a cluster (gRPC needs `version: h2`).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct ClusterHttp {
-    pub version: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub version: Option<String>,
+    /// Fixed upstream `Host` / HTTP/2 `:authority` for this cluster.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub authority: Option<String>,
 }
 
 /// Request redirect filter.
