@@ -1,6 +1,6 @@
 # Sample: Gateway + ListenerSet + cross-namespace TLS and BackendTLSPolicy
 
-Multi-namespace manifests intended to exercise ugwc’s cluster snapshot path: `Gateway` (addresses, infrastructure, `allowedListeners`), `ListenerSet` merge, HTTPS listener `certificateRefs` with `ReferenceGrant`, `HTTPRoute` / `GRPCRoute` with cross-namespace parents and backends, `BackendTLSPolicy` with CA in a `ConfigMap` in another namespace, plus `Service` and `EndpointSlice`.
+Multi-namespace manifests intended to exercise ugwc’s cluster snapshot path: `Gateway` (addresses, infrastructure, `allowedListeners`), `ListenerSet` merge, HTTPS listener `certificateRefs` with `ReferenceGrant`, `HTTPRoute` / `GRPCRoute` with cross-namespace parents and backends, `BackendTLSPolicy` with a same-namespace CA `ConfigMap`, plus `Service` and `EndpointSlice`.
 
 Apply:
 

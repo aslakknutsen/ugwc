@@ -74,7 +74,7 @@ Flags: `--iterations N` (default 3) sends that many `DiscoveryRequest` messages;
 
 3. **Routes** — `HTTPRoute` / `GRPCRoute` in `ugwc-sample-routes` attach to the remote `Gateway`; `ReferenceGrant` objects live in the **Gateway namespace** (parent) and **Service namespace** (backend), per Gateway API rules.
 
-4. **Backend TLS** — `BackendTLSPolicy` in `ugwc-sample-workloads` references a CA `ConfigMap` in `ugwc-sample-certs`; grant is in the **ConfigMap namespace**.
+4. **Backend TLS** — `BackendTLSPolicy` in `ugwc-sample-workloads` references the `backend-ca` `ConfigMap` in the same namespace. Gateway API v1.5 `caCertificateRefs` are namespace-local, so no `ReferenceGrant` is involved.
 
 5. **xDS** — After reconcile publishes an IR snapshot for that gateway scope, `ugwc xds-dump --node-id ugwc-sample-gateway/demo-gateway` prints non-zero `resources` when `UGWC_XDS_WIRE` matches the `--wire` hint (or use `--type-url` explicitly).
 

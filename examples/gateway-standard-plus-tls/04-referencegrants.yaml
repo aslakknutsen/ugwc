@@ -18,21 +18,6 @@ spec:
 apiVersion: gateway.networking.k8s.io/v1beta1
 kind: ReferenceGrant
 metadata:
-  name: backend-tls-policy-to-ca-configmap
-  namespace: ugwc-sample-certs
-spec:
-  from:
-    - group: gateway.networking.k8s.io
-      kind: BackendTLSPolicy
-      namespace: ugwc-sample-workloads
-  to:
-    - group: ""
-      kind: ConfigMap
-      name: backend-ca
----
-apiVersion: gateway.networking.k8s.io/v1beta1
-kind: ReferenceGrant
-metadata:
   name: routes-to-gateway
   namespace: ugwc-sample-gateway
 spec:

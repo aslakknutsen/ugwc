@@ -1,9 +1,11 @@
 # CA bundle for BackendTLSPolicy (same PEM as listener cert for this sample).
+# BackendTLSPolicy caCertificateRefs are namespace-local in Gateway API v1.5,
+# so this ConfigMap must live in the policy's namespace.
 apiVersion: v1
 kind: ConfigMap
 metadata:
   name: backend-ca
-  namespace: ugwc-sample-certs
+  namespace: ugwc-sample-workloads
 data:
   ca.crt: |
     -----BEGIN CERTIFICATE-----

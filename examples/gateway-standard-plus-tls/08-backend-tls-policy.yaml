@@ -15,4 +15,3 @@ spec:
       - group: ""
         kind: ConfigMap
         name: backend-ca
-        namespace: ugwc-sample-certs
